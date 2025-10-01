@@ -1,0 +1,11 @@
+aioesphomeapi>=21.0.0
+asyncio-mqtt
+websockets
+fastapi
+uvicorn
+python-multipart
+aiofiles
+pydantic
+aiohttp
+webrtcvad
+setuptools
