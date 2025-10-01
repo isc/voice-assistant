@@ -9,3 +9,4 @@ pydantic
 aiohttp
 webrtcvad
 setuptools
+piper-tts

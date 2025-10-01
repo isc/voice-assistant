@@ -8,23 +8,12 @@ import asyncio
 import logging
 import sys
 from typing import Dict, Any, Optional
-import json
 import time
 from pathlib import Path
 import aiohttp
-from aiohttp import web
-import subprocess
-import os
-import tempfile
-import socket
-import wave
-
-import aioesphomeapi
 from aioesphomeapi import (
     APIClient,
     VoiceAssistantEventType,
-    VoiceAssistantAudioSettings,
-    VoiceAssistantCommand,
 )
 
 # Configuration du logging
@@ -82,8 +71,7 @@ class VoiceAssistantServer:
                 if not model_path.exists():
                     logger.info(f"  📥 Téléchargement {voice_name}.onnx (~30MB)...")
                     urllib.request.urlretrieve(
-                        f"{base_url}/fr_FR-gilles-low.onnx",
-                        model_path
+                        f"{base_url}/fr_FR-gilles-low.onnx", model_path
                     )
                     logger.info(f"  ✅ Modèle téléchargé")
 
@@ -91,8 +79,7 @@ class VoiceAssistantServer:
                 if not config_path.exists():
                     logger.info(f"  📥 Téléchargement config...")
                     urllib.request.urlretrieve(
-                        f"{base_url}/fr_FR-gilles-low.onnx.json",
-                        config_path
+                        f"{base_url}/fr_FR-gilles-low.onnx.json", config_path
                     )
                     logger.info(f"  ✅ Config téléchargée")
             else:
@@ -102,23 +89,34 @@ class VoiceAssistantServer:
             logger.info(f"📦 Config: {config_path}")
 
             # Charge le modèle
-            self.tts_engine = PiperVoice.load(str(model_path), str(config_path), use_cuda=False)
+            self.tts_engine = PiperVoice.load(
+                str(model_path), str(config_path), use_cuda=False
+            )
 
-            logger.info(f"✅ Piper TTS prêt (sample_rate: {self.tts_engine.config.sample_rate}Hz)")
+            logger.info(
+                f"✅ Piper TTS prêt (sample_rate: {self.tts_engine.config.sample_rate}Hz)"
+            )
 
             # Test rapide avec l'API correcte (synthesize() retourne des AudioChunk)
             logger.info("🧪 Test TTS...")
             import numpy as np
+
             test_audio = []
             for chunk in self.tts_engine.synthesize("Bonjour"):
                 test_audio.append(chunk.audio_float_array)
             test_samples = np.concatenate(test_audio)
-            logger.info(f"✅ Test réussi: {len(test_samples)} samples générés @ {self.tts_engine.config.sample_rate}Hz")
+            logger.info(
+                f"✅ Test réussi: {len(test_samples)} samples générés @ {self.tts_engine.config.sample_rate}Hz"
+            )
 
             # Vérifier le sample rate
             if self.tts_engine.config.sample_rate != 16000:
-                logger.error(f"❌ ERREUR: Modèle génère en {self.tts_engine.config.sample_rate}Hz au lieu de 16KHz")
-                raise ValueError(f"Sample rate incorrect: {self.tts_engine.config.sample_rate}Hz")
+                logger.error(
+                    f"❌ ERREUR: Modèle génère en {self.tts_engine.config.sample_rate}Hz au lieu de 16KHz"
+                )
+                raise ValueError(
+                    f"Sample rate incorrect: {self.tts_engine.config.sample_rate}Hz"
+                )
 
         except ImportError:
             logger.error("❌ Piper TTS n'est pas installé")
@@ -127,6 +125,7 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.error(f"❌ Erreur initialisation Piper: {e}")
             import traceback
+
             traceback.print_exc()
             raise
 
@@ -386,7 +385,7 @@ class VoiceAssistantServer:
         """
         import webrtcvad
 
-        if not hasattr(self, 'vad'):
+        if not hasattr(self, "vad"):
             self.vad = webrtcvad.Vad(2)  # Agressivité 0-3 (2 = moyen)
 
         # WebRTC VAD analyse par frames de 10/20/30ms
@@ -396,7 +395,7 @@ class VoiceAssistantServer:
 
         # Traiter l'audio par frames
         for i in range(0, len(audio_bytes), frame_size):
-            frame = audio_bytes[i:i + frame_size]
+            frame = audio_bytes[i : i + frame_size]
             if len(frame) != frame_size:
                 continue  # Frame incomplète, ignorer
 
@@ -415,7 +414,9 @@ class VoiceAssistantServer:
 
                 # Arrêter après 1 seconde de silence (33 frames de 30ms)
                 if self.vad_has_speech and self.vad_silence_frames >= 33:
-                    logger.info(f"🤫 Silence détecté après parole ({self.vad_silence_frames} frames)")
+                    logger.info(
+                        f"🤫 Silence détecté après parole ({self.vad_silence_frames} frames)"
+                    )
                     if self.current_device and self.is_recording:
                         api = self.devices[self.current_device]
                         await self.stop_recording(api, "VAD silence")
@@ -480,7 +481,8 @@ class VoiceAssistantServer:
 
             # Envoyer STT_END (Voxtral ne retourne que la réponse LLM, pas la transcription)
             api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_STT_END, {"text": "(audio transcrit)"}
+                VoiceAssistantEventType.VOICE_ASSISTANT_STT_END,
+                {"text": "(audio transcrit)"},
             )
             logger.info("📤 STT_END envoyé")
 
@@ -493,7 +495,9 @@ class VoiceAssistantServer:
             logger.error(f"💥 Erreur pipeline: {e}")
             await self.send_error_to_device(api, f"Pipeline error: {e}")
 
-    async def process_audio_with_voxtral(self, api: APIClient, audio_bytes: bytes) -> Optional[str]:
+    async def process_audio_with_voxtral(
+        self, api: APIClient, audio_bytes: bytes
+    ) -> Optional[str]:
         """
         STT + LLM en une seule passe avec Voxtral
         Traite l'audio et retourne directement la réponse de l'assistant
@@ -511,19 +515,21 @@ class VoiceAssistantServer:
 
             # Créer un fichier WAV temporaire
             temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            with wave.open(temp_wav.name, 'wb') as wav_file:
+            with wave.open(temp_wav.name, "wb") as wav_file:
                 wav_file.setnchannels(1)  # Mono
                 wav_file.setsampwidth(2)  # 16-bit
                 wav_file.setframerate(16000)  # 16kHz
                 wav_file.writeframes(audio_bytes)
 
-            logger.info(f"📁 Audio WAV: {temp_wav.name} ({os.path.getsize(temp_wav.name)} bytes)")
+            logger.info(
+                f"📁 Audio WAV: {temp_wav.name} ({os.path.getsize(temp_wav.name)} bytes)"
+            )
 
             # Lire et encoder l'audio en base64
-            with open(temp_wav.name, 'rb') as f:
+            with open(temp_wav.name, "rb") as f:
                 audio_data = f.read()
 
-            audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+            audio_b64 = base64.b64encode(audio_data).decode("utf-8")
             logger.info(f"📦 Base64: {len(audio_b64)} caractères")
 
             # Préparer la requête OpenAI-compatible pour assistant vocal
@@ -532,35 +538,32 @@ class VoiceAssistantServer:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "Tu es un assistant vocal pour la maison connectée. Réponds de manière concise et naturelle en français. Tu peux contrôler les lumières, donner la météo, et répondre aux questions."
+                        "content": "Tu es un assistant vocal pour la maison connectée. Réponds de manière concise et naturelle en français. Tu peux contrôler les lumières, donner la météo, et répondre aux questions.",
                     },
                     {
                         "role": "user",
                         "content": [
                             {
                                 "type": "input_audio",
-                                "input_audio": {
-                                    "data": audio_b64,
-                                    "format": "wav"
-                                }
+                                "input_audio": {"data": audio_b64, "format": "wav"},
                             }
-                        ]
-                    }
+                        ],
+                    },
                 ],
                 "max_tokens": 256,
-                "temperature": 0.7
+                "temperature": 0.7,
             }
 
             # Envoyer à llama.cpp
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    llama_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=60)
+                    llama_url, json=payload, timeout=aiohttp.ClientTimeout(total=60)
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
-                        assistant_response = result['choices'][0]['message']['content'].strip()
+                        assistant_response = result["choices"][0]["message"][
+                            "content"
+                        ].strip()
                         logger.info(f'🤖 Réponse Voxtral: "{assistant_response}"')
 
                         # Nettoyer
@@ -569,56 +572,19 @@ class VoiceAssistantServer:
                         return assistant_response if assistant_response else None
                     else:
                         error_text = await response.text()
-                        logger.error(f"❌ Erreur Voxtral {response.status}: {error_text}")
+                        logger.error(
+                            f"❌ Erreur Voxtral {response.status}: {error_text}"
+                        )
                         os.unlink(temp_wav.name)
                         return None
 
         except Exception as e:
             logger.error(f"❌ Erreur STT: {e}")
             import traceback
+
             traceback.print_exc()
             # Fallback sur simulation
             return "Allume la lumière du salon"
-
-    async def process_with_llm(self, api: APIClient, text: str) -> Optional[str]:
-        """
-        Traitement LLM + MCP
-        À remplacer par votre stack
-        """
-        logger.info(f'🧠 LLM: Traitement de "{text}"')
-
-        # Signaler début intent - LEDs continuent en mode réflexion
-        api.send_voice_assistant_event(
-            VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START, {}
-        )
-        logger.info("📤 INTENT_START envoyé")
-
-        # TODO: Implémenter votre LLM + serveurs MCP
-        # Exemples:
-        # - OpenAI GPT
-        # - Claude
-        # - Ollama (local)
-        # - Serveurs MCP pour actions
-
-        # Simulation pour test
-        await asyncio.sleep(2)
-
-        if "lumière" in text.lower():
-            response = "J'allume la lumière du salon."
-        elif "météo" in text.lower():
-            response = "Il fait beau aujourd'hui, 22 degrés."
-        else:
-            response = f"J'ai entendu : {text}. Comment puis-je vous aider ?"
-
-        logger.info(f'🤖 Réponse LLM: "{response}"')
-
-        # Signaler fin intent
-        api.send_voice_assistant_event(
-            VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_END, {}
-        )
-        logger.info("📤 INTENT_END envoyé")
-
-        return response
 
     async def text_to_speech(self, api: APIClient, text: str):
         """
@@ -677,14 +643,16 @@ class VoiceAssistantServer:
             # Convertir en bytes (PCM brut, sans en-tête WAV)
             audio_bytes = audio_int16.tobytes()
 
-            logger.info(f"🎵 Audio PCM brut: {len(audio_bytes)} bytes ({len(audio_int16)} samples)")
+            logger.info(
+                f"🎵 Audio PCM brut: {len(audio_bytes)} bytes ({len(audio_int16)} samples)"
+            )
 
             # Stream par chunks de 512 samples = 1024 bytes (comme HA)
             chunk_size = 1024  # 512 samples × 2 bytes/sample
             chunk_count = 0
 
             for i in range(0, len(audio_bytes), chunk_size):
-                chunk = audio_bytes[i:i + chunk_size]
+                chunk = audio_bytes[i : i + chunk_size]
 
                 # Envoyer à l'ESP
                 api.send_voice_assistant_audio(chunk)
@@ -704,6 +672,7 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.error(f"❌ Erreur streaming TTS: {e}")
             import traceback
+
             traceback.print_exc()
             raise
         finally:
@@ -744,7 +713,7 @@ class VoiceAssistantServer:
             # send_voice_assistant_event est synchrone, pas async
             api.send_voice_assistant_event(
                 VoiceAssistantEventType.VOICE_ASSISTANT_ERROR,
-                {"code": "server_error", "message": error_message}
+                {"code": "server_error", "message": error_message},
             )
             logger.info("✅ Événement VOICE_ASSISTANT_ERROR envoyé à l'ESP")
         except Exception as e:
