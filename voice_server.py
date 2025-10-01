@@ -11,6 +11,10 @@ from typing import Dict, Any, Optional
 import time
 from pathlib import Path
 import aiohttp
+from aiohttp import web
+import socket
+import tempfile
+import wave
 from aioesphomeapi import (
     APIClient,
     VoiceAssistantEventType,
@@ -44,13 +48,19 @@ class VoiceAssistantServer:
         # API TTS intégrée (Piper)
         self.tts_engine = None
 
+        # Serveur HTTP pour héberger les fichiers TTS
+        self.http_server = None
+        self.http_port = 8888
+        self.tts_dir = Path(tempfile.gettempdir()) / "voice_assistant_tts"
+        self.tts_dir.mkdir(exist_ok=True)
+        logger.info(f"📁 Dossier TTS: {self.tts_dir}")
+
     async def init_tts_engine(self):
         """Initialiser Piper TTS (16KHz natif, optimisé pour ESP)"""
         logger.info("🔊 Initialisation Piper TTS...")
 
         try:
             from piper import PiperVoice
-            import json
             import urllib.request
 
             # Modèle français 16KHz NATIF (pas de resampling nécessaire !)
@@ -67,7 +77,6 @@ class VoiceAssistantServer:
 
                 base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/fr/fr_FR/gilles/low"
 
-                # Télécharge modèle
                 if not model_path.exists():
                     logger.info(f"  📥 Téléchargement {voice_name}.onnx (~30MB)...")
                     urllib.request.urlretrieve(
@@ -75,7 +84,6 @@ class VoiceAssistantServer:
                     )
                     logger.info(f"  ✅ Modèle téléchargé")
 
-                # Télécharge config
                 if not config_path.exists():
                     logger.info(f"  📥 Téléchargement config...")
                     urllib.request.urlretrieve(
@@ -93,31 +101,6 @@ class VoiceAssistantServer:
                 str(model_path), str(config_path), use_cuda=False
             )
 
-            logger.info(
-                f"✅ Piper TTS prêt (sample_rate: {self.tts_engine.config.sample_rate}Hz)"
-            )
-
-            # Test rapide avec l'API correcte (synthesize() retourne des AudioChunk)
-            logger.info("🧪 Test TTS...")
-            import numpy as np
-
-            test_audio = []
-            for chunk in self.tts_engine.synthesize("Bonjour"):
-                test_audio.append(chunk.audio_float_array)
-            test_samples = np.concatenate(test_audio)
-            logger.info(
-                f"✅ Test réussi: {len(test_samples)} samples générés @ {self.tts_engine.config.sample_rate}Hz"
-            )
-
-            # Vérifier le sample rate
-            if self.tts_engine.config.sample_rate != 16000:
-                logger.error(
-                    f"❌ ERREUR: Modèle génère en {self.tts_engine.config.sample_rate}Hz au lieu de 16KHz"
-                )
-                raise ValueError(
-                    f"Sample rate incorrect: {self.tts_engine.config.sample_rate}Hz"
-                )
-
         except ImportError:
             logger.error("❌ Piper TTS n'est pas installé")
             logger.info("💡 Installation: pip install piper-tts")
@@ -129,15 +112,36 @@ class VoiceAssistantServer:
             traceback.print_exc()
             raise
 
+    async def start_http_server(self):
+        """Démarrer le serveur HTTP pour héberger les fichiers TTS"""
+        app = web.Application()
+        app.router.add_static("/tts/", self.tts_dir, show_index=True)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", self.http_port)
+        await site.start()
+
+        # Obtenir l'IP locale
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
+
+        logger.info(
+            f"🌐 Serveur HTTP TTS démarré sur http://{local_ip}:{self.http_port}/tts/"
+        )
+        self.http_base_url = f"http://{local_ip}:{self.http_port}/tts/"
+
     async def start(self):
         """Démarrer le serveur et se connecter aux devices"""
         logger.info("🚀 Voice Assistant Server démarré")
         logger.info(f"📡 Configuration: port {self.config['port']}")
 
-        # Initialiser Piper TTS
         await self.init_tts_engine()
-
-        # Connexion à un device spécifique
+        await self.start_http_server()
         await self.connect_to_device("", self.config["password"])
 
     async def connect_to_device(self, host: str, password: str):
@@ -145,22 +149,17 @@ class VoiceAssistantServer:
         try:
             logger.info(f"🔌 Connexion à {host}...")
 
-            # Créer le client API
             api = APIClient(
                 host, self.config["port"], password, client_info="voice-server-python"
             )
-
-            # Connexion
             await api.connect(login=True)
             logger.info(f"✅ Connecté à {host}")
 
-            # Récupérer les infos du device
             device_info = await api.device_info()
             logger.info(
                 f"📱 Device: {device_info.name} (v{device_info.esphome_version})"
             )
 
-            # Vérifier support voice assistant
             if device_info.voice_assistant_feature_flags:
                 logger.info(
                     f"🎤 Voice assistant supporté (flags: {device_info.voice_assistant_feature_flags})"
@@ -171,7 +170,6 @@ class VoiceAssistantServer:
             self.devices[host] = api
             self.current_device = host
 
-            # Configurer les handlers voice assistant
             await self.setup_voice_assistant(api, host)
 
         except Exception as e:
@@ -186,7 +184,6 @@ class VoiceAssistantServer:
         logger.info(f"🎤 Configuration voice assistant pour {device_host}")
 
         try:
-            # S'abonner aux événements voice assistant avec la nouvelle API
             unsubscribe = api.subscribe_voice_assistant(
                 handle_start=self.handle_voice_assistant_start,
                 handle_stop=self.handle_voice_assistant_stop,
@@ -308,9 +305,17 @@ class VoiceAssistantServer:
     async def handle_announcement_finished(self, announcement_finished):
         """
         Gestionnaire pour l'événement announcement_finished
-        L'ESP envoie ce message quand il a fini de jouer l'audio TTS streamé
+        L'ESP envoie ce message quand il a fini de jouer l'audio TTS
         """
         logger.info("🔔 Announcement finished reçu de l'ESP")
+
+        # Signaler FIN du pipeline complet - LEDs retournent en mode idle
+        if self.current_device:
+            api = self.devices[self.current_device]
+            api.send_voice_assistant_event(
+                VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {}
+            )
+            logger.info("📤 RUN_END envoyé - Pipeline terminé, LEDs en mode idle")
 
     async def handle_voice_assistant_event(self, event: Any):
         """
@@ -588,8 +593,7 @@ class VoiceAssistantServer:
 
     async def text_to_speech(self, api: APIClient, text: str):
         """
-        Text-to-Speech avec Piper - Streaming direct vers ESP (16KHz natif)
-        Réplique exactement l'implémentation de Home Assistant
+        Text-to-Speech avec Piper - Génération fichier WAV + URL
         """
         logger.info(f'🗣️ TTS: Génération audio pour "{text}"')
 
@@ -599,28 +603,17 @@ class VoiceAssistantServer:
         )
         logger.info(f"📤 TTS_START envoyé")
 
-        # Streamer l'audio directement vers l'ESP
-        await self._stream_tts_to_esp(api, text)
-
-        logger.info("✅ TTS streaming terminé")
-
-    async def _stream_tts_to_esp(self, api: APIClient, text: str):
-        """
-        Stream l'audio TTS directement à l'ESP chunk par chunk
-        Format: 16KHz, 16-bit, mono (natif avec fr_FR-gilles-low)
-        Réplique exactement l'implémentation de Home Assistant
-        """
-        logger.info("🔊 Génération et streaming TTS avec Piper...")
-
-        start_time = time.time()
-
         try:
             import numpy as np
+            import hashlib
 
-            # Synthétise tout l'audio en mémoire AVANT TTS_STREAM_START
-            # (évite timeout ESP qui attend audio après TTS_STREAM_START)
+            # Créer un fichier unique pour cet audio
+            filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.wav"
+            output_path = self.tts_dir / filename
+
             logger.info(f"🔊 Synthétise: '{text[:80]}...'")
 
+            # Générer l'audio avec Piper
             all_audio = []
             for audio_chunk in self.tts_engine.synthesize(text):
                 all_audio.append(audio_chunk.audio_float_array)
@@ -631,79 +624,34 @@ class VoiceAssistantServer:
 
             logger.info(f"🎵 Audio total: {len(audio_float)} samples")
 
-            # TTS_STREAM_START juste avant de commencer à envoyer
-            api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_START, {}
-            )
-            logger.info("📤 TTS_STREAM_START - Début streaming audio")
-
             # Convertir float32 [-1, 1] → int16 (PCM 16-bit)
             audio_int16 = (audio_float * 32767).astype(np.int16)
 
-            # Convertir en bytes (PCM brut, sans en-tête WAV)
-            audio_bytes = audio_int16.tobytes()
+            # Sauvegarder comme fichier WAV
+            with wave.open(str(output_path), "wb") as wav_file:
+                wav_file.setnchannels(1)  # Mono
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(sample_rate)  # 16kHz
+                wav_file.writeframes(audio_int16.tobytes())
 
             logger.info(
-                f"🎵 Audio PCM brut: {len(audio_bytes)} bytes ({len(audio_int16)} samples)"
+                f"✅ TTS généré: {output_path} ({output_path.stat().st_size} bytes)"
             )
 
-            # Stream par chunks de 512 samples = 1024 bytes (comme HA)
-            chunk_size = 1024  # 512 samples × 2 bytes/sample
-            chunk_count = 0
+            # URL accessible par l'ESP
+            audio_url = f"{self.http_base_url}{filename}"
 
-            for i in range(0, len(audio_bytes), chunk_size):
-                chunk = audio_bytes[i : i + chunk_size]
-
-                # Envoyer à l'ESP
-                api.send_voice_assistant_audio(chunk)
-                chunk_count += 1
-
-                # Throttle: 90% de la durée du chunk (comme HA)
-                samples_in_chunk = len(chunk) // 2  # 2 bytes par sample (16-bit)
-                seconds_in_chunk = samples_in_chunk / sample_rate
-                await asyncio.sleep(seconds_in_chunk * 0.9)
-
-                if chunk_count % 50 == 0:
-                    logger.debug(f"📊 {chunk_count} chunks streamés")
-
-            elapsed = time.time() - start_time
-            logger.info(f"✅ {chunk_count} chunks streamés en {elapsed:.2f}s")
+            api.send_voice_assistant_event(
+                VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": audio_url}
+            )
+            logger.info(f"📤 TTS_END envoyé avec URL: {audio_url}")
 
         except Exception as e:
-            logger.error(f"❌ Erreur streaming TTS: {e}")
+            logger.error(f"❌ Erreur TTS: {e}")
             import traceback
 
             traceback.print_exc()
             raise
-        finally:
-            # TTS_STREAM_END
-            api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_TTS_STREAM_END, {}
-            )
-            logger.info("📤 TTS_STREAM_END - Fin streaming audio")
-
-            # TTS_END (signal que TTS est terminé)
-            api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {}
-            )
-            logger.info("📤 TTS_END - TTS terminé")
-
-            # Calculer la durée réelle de l'audio pour attendre la fin de lecture
-            total_samples = len(audio_int16)
-            audio_duration = total_samples / sample_rate
-
-            # Attendre que l'ESP finisse de jouer l'audio
-            # Le streaming a pris environ 90% du temps réel grâce au throttling,
-            # donc on attend les 10% restants + un petit buffer
-            remaining_time = audio_duration * 0.15  # 15% pour être sûr
-            logger.info(f"⏱️  Attente fin de lecture audio: {remaining_time:.2f}s")
-            await asyncio.sleep(remaining_time)
-
-            # Signaler FIN du pipeline complet - LEDs retournent en mode idle
-            api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {}
-            )
-            logger.info("📤 RUN_END envoyé - Pipeline terminé, LEDs en mode idle")
 
     async def send_error_to_device(self, api: APIClient, error_message: str):
         """Envoyer une erreur à l'ESP"""
@@ -724,7 +672,7 @@ async def main():
     """Point d'entrée principal"""
     print("🎯 Custom Voice Assistant Server for ESPHome (Python)")
     print("📋 Remplace Home Assistant pour le pipeline vocal")
-    print("🔊 TTS: Piper (16KHz natif, streaming)")
+    print("🔊 TTS: Piper (16KHz natif, fichier WAV + URL)")
     print("🎤 STT+LLM: Voxtral\n")
 
     server = VoiceAssistantServer()
