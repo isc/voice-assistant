@@ -498,6 +498,8 @@ class VoiceAssistantServer:
         if not self.ha_client:
             return []
 
+        room_param = {"type": "string", "description": "Pièce (ex: chambre Charlie, salon, cuisine)"}
+
         return [
             {
                 "name": "turn_on",
@@ -506,6 +508,7 @@ class VoiceAssistantServer:
                     "type": "object",
                     "properties": {
                         "entity": {"type": "string", "description": "Nom de l'appareil"},
+                        "room": room_param,
                         "brightness": {"type": "integer", "description": "Luminosité 0-100, seulement pour les lumières"},
                     },
                     "required": ["entity"],
@@ -518,6 +521,7 @@ class VoiceAssistantServer:
                     "type": "object",
                     "properties": {
                         "entity": {"type": "string", "description": "Nom de l'appareil"},
+                        "room": room_param,
                     },
                     "required": ["entity"],
                 },
@@ -529,6 +533,7 @@ class VoiceAssistantServer:
                     "type": "object",
                     "properties": {
                         "entity": {"type": "string", "description": "Nom du volet"},
+                        "room": room_param,
                     },
                     "required": ["entity"],
                 },
@@ -540,6 +545,7 @@ class VoiceAssistantServer:
                     "type": "object",
                     "properties": {
                         "entity": {"type": "string", "description": "Nom du volet"},
+                        "room": room_param,
                     },
                     "required": ["entity"],
                 },
@@ -551,6 +557,7 @@ class VoiceAssistantServer:
                     "type": "object",
                     "properties": {
                         "entity": {"type": "string", "description": "Nom du thermostat"},
+                        "room": room_param,
                         "temperature": {"type": "number", "description": "Température en degrés Celsius"},
                     },
                     "required": ["entity", "temperature"],
@@ -563,6 +570,7 @@ class VoiceAssistantServer:
                     "type": "object",
                     "properties": {
                         "entity": {"type": "string", "description": "Nom de l'appareil"},
+                        "room": room_param,
                     },
                     "required": ["entity"],
                 },
@@ -575,6 +583,7 @@ class VoiceAssistantServer:
             return "Home Assistant non disponible"
 
         entity_name = arguments.get("entity", "")
+        room = arguments.get("room")
 
         # Domain hints per tool
         domain_map = {
@@ -588,8 +597,8 @@ class VoiceAssistantServer:
 
         domains = domain_map.get(function_name)
 
-        # Resolve entity name to HA entity_id
-        entity_id = self.ha_client.resolve_entity(entity_name, domain_hints=domains)
+        # Resolve entity name to HA entity_id (scoped by room if provided)
+        entity_id = self.ha_client.resolve_entity(entity_name, room=room, domain_hints=domains)
         if not entity_id:
             return f"Appareil {entity_name} non trouvé"
 
@@ -670,11 +679,11 @@ class VoiceAssistantServer:
         try:
             # Build system prompt with available entities
             system_prompt = (
-                "/no_think Tu es un assistant vocal pour la maison connectée. "
+                "Tu es un assistant vocal pour la maison connectée. "
                 "Réponds en français, en 1-2 phrases courtes maximum. "
-                "Pas de markdown, pas de listes, pas de mise en forme. "
-                "Parle naturellement comme à l'oral. "
-                "Utilise les fonctions disponibles quand c'est approprié."
+                "Pas de markdown. Parle naturellement comme à l'oral. "
+                "Quand on te demande de contrôler un appareil, utilise TOUJOURS les fonctions disponibles. "
+                "Passe le paramètre room quand la pièce est mentionnée."
             )
             if self.ha_client:
                 entity_list = self.ha_client.get_entity_list_for_prompt()

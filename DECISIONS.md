@@ -69,3 +69,9 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: SmolLM3 3B does not support function/tool calling — it returns text responses instead of tool_calls JSON. Qwen 3 4B has native tool calling support (trained with function calling in its chat template).
 - **Decision**: Use Qwen 3 4B Q4_K_M via llama.cpp with --jinja flag. Keep /no_think prefix to disable reasoning mode.
 - **Trade-off**: Slightly slower than SmolLM3 (~5s cold, ~1.5s warm vs ~1.3s), but tool calling actually works. Still fits in 16GB RAM alongside Parakeet STT and Kokoro TTS.
+- **Note**: Qwen 3 4B requires thinking mode (no `/no_think`) for reliable tool calling. With `/no_think` it outputs tool calls as plain text instead of structured `tool_calls`. Thinking mode adds ~5s latency but is the only way to get reliable function calling.
+
+### AD-014: Entity resolution using HA areas and room parameter
+- **Context**: Entities in different rooms can have the same name (e.g., "Plafonnier" in Chambre Charlie and Chambre invités). Flat entity lists caused the LLM to pick the wrong one.
+- **Decision**: Fetch HA areas via template API, group entities by room in the system prompt, add `room` parameter to all LLM tools. Entity resolution scopes by room first, falls back to global search.
+- **Trade-off**: More template API calls at startup (~1 per area). Slightly larger prompt but better structured for the LLM.
