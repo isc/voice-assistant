@@ -52,8 +52,9 @@ class VoiceAssistantServer:
         self.recording_task = None
         self.last_audio_time = 0
 
-        # Piper TTS engine
+        # Kokoro TTS engine + French G2P
         self.tts_engine = None
+        self.tts_g2p = None
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -62,57 +63,49 @@ class VoiceAssistantServer:
         logger.info(f"TTS directory: {self.tts_dir}")
 
     async def init_tts_engine(self):
-        """Initialize Piper TTS (native 16KHz, optimized for ESP)"""
-        logger.info("Initializing Piper TTS...")
+        """Initialize Kokoro TTS with French G2P via misaki/espeak"""
+        logger.info("Initializing Kokoro TTS...")
 
         try:
-            from piper import PiperVoice
-            import urllib.request
+            import kokoro_onnx
+            from misaki.espeak import EspeakG2P
 
-            # French 16KHz native model (no resampling needed)
-            voice_name = "fr_FR-gilles-low"
-            models_dir = Path("/tmp/piper_models")
+            models_dir = Path("/tmp/kokoro_models")
             models_dir.mkdir(exist_ok=True)
 
-            model_path = models_dir / "fr_FR-gilles-low.onnx"
-            config_path = models_dir / "fr_FR-gilles-low.onnx.json"
+            model_path = models_dir / "kokoro-v1.0.onnx"
+            voices_path = models_dir / "voices-v1.0.bin"
 
-            if not model_path.exists() or not config_path.exists():
-                logger.info("Downloading Piper model (native 16KHz)...")
-
-                base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/fr/fr_FR/gilles/low"
+            if not model_path.exists() or not voices_path.exists():
+                logger.info("Downloading Kokoro models...")
+                import urllib.request
 
                 if not model_path.exists():
-                    logger.info(f"  Downloading {voice_name}.onnx (~30MB)...")
+                    logger.info("  Downloading kokoro-v1.0.onnx (~310MB)...")
                     urllib.request.urlretrieve(
-                        f"{base_url}/fr_FR-gilles-low.onnx", model_path
+                        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+                        model_path,
                     )
-                    logger.info(f"  Model downloaded")
-
-                if not config_path.exists():
-                    logger.info(f"  Downloading config...")
+                if not voices_path.exists():
+                    logger.info("  Downloading voices-v1.0.bin (~27MB)...")
                     urllib.request.urlretrieve(
-                        f"{base_url}/fr_FR-gilles-low.onnx.json", config_path
+                        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+                        voices_path,
                     )
-                    logger.info(f"  Config downloaded")
             else:
-                logger.info("Piper model already cached")
+                logger.info("Kokoro models already cached")
 
-            logger.info(f"Model: {model_path}")
-            logger.info(f"Config: {config_path}")
+            self.tts_engine = kokoro_onnx.Kokoro(str(model_path), str(voices_path))
+            self.tts_g2p = EspeakG2P(language="fr-fr")
+            logger.info("Kokoro TTS ready (voice: ff_siwis, French G2P via espeak)")
 
-            self.tts_engine = PiperVoice.load(
-                str(model_path), str(config_path), use_cuda=False
-            )
-
-        except ImportError:
-            logger.error("Piper TTS is not installed")
-            logger.info("Install with: pip install piper-tts")
+        except ImportError as e:
+            logger.error(f"Kokoro TTS dependencies missing: {e}")
+            logger.info("Install with: pip install kokoro-onnx misaki")
             raise
         except Exception as e:
-            logger.error(f"Piper init error: {e}")
+            logger.error(f"Kokoro init error: {e}")
             import traceback
-
             traceback.print_exc()
             raise
 
@@ -416,7 +409,7 @@ class VoiceAssistantServer:
 
     async def process_voice_pipeline(self, api: APIClient, audio_bytes: bytes):
         """
-        Main pipeline: Audio -> STT (Parakeet) -> LLM (Qwen) -> TTS (Piper)
+        Main pipeline: Audio -> STT (Parakeet) -> LLM (SmolLM3) -> TTS (Kokoro)
         """
         logger.info("Starting full voice pipeline")
 
@@ -536,7 +529,7 @@ class VoiceAssistantServer:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "/no_think Tu es un assistant vocal pour la maison connectée. Réponds de manière concise et naturelle en français. Tu peux contrôler les lumières, les volets, donner la météo, et répondre aux questions. Utilise les fonctions disponibles quand c'est approprié.",
+                        "content": "/no_think Tu es un assistant vocal pour la maison connectée. Réponds en français, en 1-2 phrases courtes maximum. Pas de markdown, pas de listes, pas de mise en forme. Parle naturellement comme à l'oral. Utilise les fonctions disponibles quand c'est approprié.",
                     },
                     {
                         "role": "user",
@@ -547,7 +540,7 @@ class VoiceAssistantServer:
                     {"type": "function", "function": func}
                     for func in self.get_available_functions()
                 ],
-                "max_tokens": 256,
+                "max_tokens": 50,
                 "temperature": 0.7,
             }
 
@@ -613,13 +606,13 @@ class VoiceAssistantServer:
             return None
 
     async def text_to_speech(self, api: APIClient, text: str):
-        """Text-to-Speech with Piper - WAV file generation + URL"""
+        """Text-to-Speech with Kokoro (24kHz) resampled to 16kHz for ESP"""
         logger.info(f'TTS: generating audio for "{text}"')
 
         api.send_voice_assistant_event(
             VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": text}
         )
-        logger.info(f"TTS_START sent")
+        logger.info("TTS_START sent")
 
         try:
             import numpy as np
@@ -628,31 +621,48 @@ class VoiceAssistantServer:
             filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.wav"
             output_path = self.tts_dir / filename
 
-            logger.info(f"Synthesizing: '{text[:80]}...'")
+            # Strip markdown artifacts before TTS
+            import re
+            clean_text = re.sub(r'\*+', '', text)        # **bold**, *italic*
+            clean_text = re.sub(r'#+\s*', '', clean_text) # ### headers
+            clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean_text)  # [link](url)
+            clean_text = re.sub(r'`([^`]+)`', r'\1', clean_text)  # `code`
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
 
-            # Generate audio with Piper
-            all_audio = []
-            for audio_chunk in self.tts_engine.synthesize(text):
-                all_audio.append(audio_chunk.audio_float_array)
+            logger.info(f"Synthesizing: '{clean_text[:80]}...'")
 
-            audio_float = np.concatenate(all_audio)
-            sample_rate = 16000  # fr_FR-gilles-low is native 16KHz
+            # French phonemization via espeak
+            phonemes = self.tts_g2p(clean_text)
+            logger.info(f"Phonemes: {phonemes}")
 
-            logger.info(f"Audio total: {len(audio_float)} samples")
+            # Generate audio with Kokoro (runs sync, use executor)
+            loop = asyncio.get_event_loop()
+            audio_24k, sr = await loop.run_in_executor(
+                None,
+                lambda: self.tts_engine.create(
+                    phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True
+                ),
+            )
+
+            logger.info(f"Kokoro output: {len(audio_24k)} samples at {sr}Hz")
+
+            # Resample 24kHz -> 16kHz (ESP expects 16kHz)
+            target_sr = 16000
+            num_samples_16k = int(len(audio_24k) * target_sr / sr)
+            indices = np.linspace(0, len(audio_24k) - 1, num_samples_16k)
+            audio_16k = np.interp(indices, np.arange(len(audio_24k)), audio_24k).astype(np.float32)
 
             # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
-            audio_int16 = (audio_float * 32767).astype(np.int16)
+            audio_int16 = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16)
 
             # Save as WAV file
             with wave.open(str(output_path), "wb") as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(2)  # 16-bit
-                wav_file.setframerate(sample_rate)  # 16kHz
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(target_sr)
                 wav_file.writeframes(audio_int16.tobytes())
 
-            logger.info(
-                f"TTS generated: {output_path} ({output_path.stat().st_size} bytes)"
-            )
+            logger.info(f"TTS generated: {output_path} ({output_path.stat().st_size} bytes)")
 
             # URL accessible by the ESP
             audio_url = f"{self.http_base_url}{filename}"
@@ -665,7 +675,6 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.error(f"TTS error: {e}")
             import traceback
-
             traceback.print_exc()
             raise
 
@@ -687,7 +696,7 @@ async def main():
     """Main entry point"""
     print("Custom Voice Assistant Server for ESPHome (Python)")
     print("Replaces Home Assistant for voice pipeline")
-    print("STT: Parakeet MLX | LLM: Qwen 3 (llama.cpp) | TTS: Piper\n")
+    print("STT: Parakeet MLX | LLM: SmolLM3 (llama.cpp) | TTS: Kokoro\n")
 
     server = VoiceAssistantServer()
 
