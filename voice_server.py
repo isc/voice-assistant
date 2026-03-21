@@ -498,7 +498,7 @@ class VoiceAssistantServer:
         if not self.ha_client:
             return []
 
-        room_param = {"type": "string", "description": "Pièce (ex: chambre Charlie, salon, cuisine)"}
+        room_param = {"type": "string", "description": "Pièce ou groupe (ex: chambre Charlie, salon, enfants, partout)"}
 
         return [
             {
@@ -597,20 +597,19 @@ class VoiceAssistantServer:
 
         domains = domain_map.get(function_name)
 
-        # Resolve entity name to HA entity_id (scoped by room if provided)
-        entity_id = self.ha_client.resolve_entity(entity_name, room=room, domain_hints=domains)
-        if not entity_id:
+        # Resolve entity name(s) — may return multiple for room groups
+        entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
+        if not entity_ids:
             return f"Appareil {entity_name} non trouvé"
 
-        # get_state is a read operation
+        # get_state is a read operation (use first entity only)
         if function_name == "get_state":
-            state_data = await self.ha_client.get_entity_state(entity_id)
+            state_data = await self.ha_client.get_entity_state(entity_ids[0])
             if state_data:
-                return self.ha_client.format_state_for_speech(entity_id, state_data)
+                return self.ha_client.format_state_for_speech(entity_ids[0], state_data)
             return f"Impossible de lire l'état de {entity_name}"
 
-        # Service calls
-        domain = entity_id.split(".")[0]
+        # Service calls — loop over all resolved entities
         service = {
             "turn_on": "turn_on",
             "turn_off": "turn_off",
@@ -625,7 +624,35 @@ class VoiceAssistantServer:
         if function_name == "turn_on" and "brightness" in arguments:
             extra["brightness_pct"] = arguments["brightness"]
 
-        return await self.ha_client.call_service(domain, service, entity_id, **extra)
+        for entity_id in entity_ids:
+            domain = entity_id.split(".")[0]
+            await self.ha_client.call_service(domain, service, entity_id, **extra)
+
+        # Compact response for multi-entity commands
+        if len(entity_ids) > 1:
+            whole_house = room and room.lower().strip() in ("tout", "toute la maison", "partout")
+            if whole_house:
+                action_map = {
+                    "close_cover": "Tous les volets en cours de fermeture",
+                    "open_cover": "Tous les volets en cours d'ouverture",
+                    "turn_on": "Toutes les lumières allumées",
+                    "turn_off": "Toutes les lumières éteintes",
+                }
+            else:
+                room_label = room or "la maison"
+                action_map = {
+                    "close_cover": f"Volets {room_label} en cours de fermeture",
+                    "open_cover": f"Volets {room_label} en cours d'ouverture",
+                    "turn_on": f"Lumières {room_label} allumées",
+                    "turn_off": f"Lumières {room_label} éteintes",
+                }
+            return action_map.get(function_name, "C'est fait")
+
+        return self.ha_client._build_response(
+            entity_ids[0].split(".")[0], service,
+            self.ha_client.entities.get(entity_ids[0], {}).get("friendly_name", entity_ids[0]),
+            extra,
+        )
 
     async def init_stt_engine(self):
         """Initialize Parakeet MLX STT model"""
@@ -716,7 +743,8 @@ class VoiceAssistantServer:
                 "Réponds en français, en 1-2 phrases courtes maximum. "
                 "Pas de markdown. Parle naturellement comme à l'oral. "
                 "Quand on te demande de contrôler un appareil, utilise TOUJOURS les fonctions disponibles. "
-                "Passe le paramètre room quand la pièce est mentionnée."
+                "Passe le paramètre room quand la pièce est mentionnée. "
+                "Utilise les noms de groupes tels quels (ex: room='enfants'), ne les décompose pas."
             )
             if self.ha_client:
                 entity_list = self.ha_client.get_entity_list_for_prompt()
@@ -731,7 +759,7 @@ class VoiceAssistantServer:
                     {"role": "user", "content": text},
                 ],
                 "max_tokens": 150,
-                "temperature": 0.7,
+                "temperature": 0.3,
             }
             if tools:
                 payload["tools"] = [

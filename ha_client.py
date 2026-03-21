@@ -18,6 +18,14 @@ SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player"}
 # French stopwords to strip for fuzzy matching
 STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
 
+# Room groups for multi-room commands (e.g. "ferme les volets des enfants")
+ROOM_GROUPS = {
+    "enfants": ["Chambre Zoé", "Chambre Charlie"],
+    "tout": ["Chambre Zoé", "Chambre Charlie", "Chambre parents", "Chambre invités", "Living Room"],
+    "toute la maison": ["Chambre Zoé", "Chambre Charlie", "Chambre parents", "Chambre invités", "Living Room"],
+    "partout": ["Chambre Zoé", "Chambre Charlie", "Chambre parents", "Chambre invités", "Living Room"],
+}
+
 
 def normalize(text: str) -> str:
     """Normalize text for fuzzy matching: lowercase, strip accents and stopwords."""
@@ -183,7 +191,80 @@ class HAClient:
             for dtype, names in sorted(devices.items()):
                 device_parts.append(f"{dtype}: {', '.join(names)}")
             parts.append(f"{area} ({'; '.join(device_parts)})")
+        # Append room groups
+        if ROOM_GROUPS:
+            group_parts = [f"{name} = {' + '.join(rooms)}" for name, rooms in ROOM_GROUPS.items()]
+            parts.append(f"Groupes: {', '.join(group_parts)}")
         return ". ".join(parts)
+
+    # Generic names that mean "all entities of this domain in the room"
+    _GENERIC_NAMES = {
+        "volet": "cover", "volets": "cover", "les volets": "cover",
+        "lumière": "light", "lumières": "light", "les lumières": "light",
+        "lumiere": "light", "lumieres": "light",
+    }
+
+    def resolve_all_entities(
+        self, name: str, room: str | None = None, domain_hints: list[str] | None = None
+    ) -> list[str]:
+        """Resolve entity name, expanding room groups and generic names into multiple entity_ids."""
+        is_group = False
+        rooms_to_search = [room]
+
+        # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"])
+        if room:
+            norm_room = normalize(room)
+            for group_name, group_rooms in ROOM_GROUPS.items():
+                if norm_room == normalize(group_name):
+                    rooms_to_search = group_rooms
+                    is_group = True
+                    break
+
+        # For room groups: return ALL entities of the matching domain(s)
+        # (user says "les volets des enfants" -> all covers in all children's rooms)
+        if is_group and domain_hints:
+            entity_ids = []
+            for r in rooms_to_search:
+                norm_r = normalize(r)
+                for eid, info in self.entities.items():
+                    if info["domain"] not in domain_hints:
+                        continue
+                    norm_area = normalize(info.get("area_name", ""))
+                    if norm_r not in norm_area and norm_area not in norm_r:
+                        continue
+                    if eid not in entity_ids:
+                        entity_ids.append(eid)
+            if entity_ids:
+                logger.info(f"Group resolve: '{name}' (group={room}) -> {entity_ids}")
+                return entity_ids
+
+        # Check if name is generic (e.g. "volet" -> all covers in room)
+        target_domain = self._GENERIC_NAMES.get(normalize(name))
+
+        if target_domain and any(r is not None for r in rooms_to_search):
+            entity_ids = []
+            for r in rooms_to_search:
+                norm_r = normalize(r) if r else None
+                for eid, info in self.entities.items():
+                    if info["domain"] != target_domain:
+                        continue
+                    if norm_r:
+                        norm_area = normalize(info.get("area_name", ""))
+                        if norm_r not in norm_area and norm_area not in norm_r:
+                            continue
+                    if eid not in entity_ids:
+                        entity_ids.append(eid)
+            if entity_ids:
+                logger.info(f"Generic resolve: '{name}' (room={room}) -> {entity_ids}")
+                return entity_ids
+
+        # Specific name: resolve individually per room
+        entity_ids = []
+        for r in rooms_to_search:
+            eid = self.resolve_entity(name, room=r, domain_hints=domain_hints)
+            if eid and eid not in entity_ids:
+                entity_ids.append(eid)
+        return entity_ids
 
     def resolve_entity(
         self, name: str, room: str | None = None, domain_hints: list[str] | None = None
