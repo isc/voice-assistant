@@ -738,9 +738,45 @@ class VoiceAssistantServer:
                             # Qwen 3 in thinking mode may wrap in <think>...</think>
                             if "</think>" in content:
                                 content = content.split("</think>")[-1]
-                            assistant_response = content.strip()
-                            logger.info(f'LLM response: "{assistant_response}"')
-                            return assistant_response if assistant_response else None
+                            content = content.strip()
+
+                            # Fallback: Qwen sometimes puts tool calls as text
+                            # Handles: turn_off({"entity": "X"}) and turn_off("X")
+                            import re
+                            tool_match = re.match(
+                                r'(\w+)\s*\(\s*(\{.*\})\s*\)', content, re.DOTALL
+                            )
+                            if not tool_match:
+                                # Simple form: func_name("value")
+                                tool_match_simple = re.match(
+                                    r'(\w+)\s*\(\s*"([^"]+)"\s*\)', content
+                                )
+                                if tool_match_simple:
+                                    fn_name = tool_match_simple.group(1)
+                                    fn_args = {"entity": tool_match_simple.group(2)}
+                                    tool_match = True  # flag to enter the block below
+
+                            if tool_match and isinstance(tool_match, bool):
+                                # Already parsed from simple form above
+                                pass
+                            elif tool_match:
+                                fn_name = tool_match.group(1)
+                                try:
+                                    fn_args = json.loads(tool_match.group(2))
+                                except json.JSONDecodeError:
+                                    fn_args = None
+
+                            if tool_match and fn_args:
+                                try:
+                                    logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
+                                    result = await self.execute_function(fn_name, fn_args)
+                                    logger.info(f"Function result: {result}")
+                                    return result
+                                except Exception as e:
+                                    logger.warning(f"Failed to execute text tool call: {e}")
+
+                            logger.info(f'LLM response: "{content}"')
+                            return content if content else None
                     else:
                         error_text = await response.text()
                         logger.error(f"LLM error {response.status}: {error_text}")

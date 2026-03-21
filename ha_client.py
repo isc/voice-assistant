@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 # Domains we expose as LLM tools
 SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player"}
 
+# Local name overrides for entities with bad/missing friendly_name in HA
+# Maps entity_id -> friendly_name
+ENTITY_NAME_OVERRIDES = {}
+
 # French stopwords to strip for fuzzy matching
 STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
 
@@ -85,19 +89,28 @@ class HAClient:
             if domain not in SUPPORTED_DOMAINS:
                 continue
 
-            friendly_name = state.get("attributes", {}).get("friendly_name", entity_id)
+            has_override = entity_id in ENTITY_NAME_OVERRIDES
+            friendly_name = ENTITY_NAME_OVERRIDES.get(
+                entity_id,
+                state.get("attributes", {}).get("friendly_name", entity_id),
+            )
 
-            # Skip Fibaro sub-entities (Basic channels and (2) duplicates)
-            if "Basic" in friendly_name or "basic" in entity_id:
-                continue
-            if friendly_name.endswith("(2)") or entity_id.endswith("_2"):
-                continue
-            # Skip entities with no useful name (generic "Dimmer 2", "Double Smart Module")
-            if friendly_name.strip() in ("Dimmer 2", "Double Smart Module", "Single Switch 2", "Smart Module", ""):
-                continue
-            # Skip unavailable entities
-            if state["state"] == "unavailable":
-                continue
+            # Skip filters for entities with explicit name overrides
+            if not has_override:
+                # Skip Fibaro sub-entities (Basic channels and (2) duplicates)
+                if "Basic" in friendly_name or "basic" in entity_id:
+                    continue
+                if friendly_name.endswith("(2)"):
+                    continue
+                # Skip Fibaro Dimmer 2 secondary channels (entity_id pattern: dimmer_2_2_N)
+                if "_2_2_" in entity_id or entity_id.endswith("_2_2"):
+                    continue
+                # Skip entities with no useful name
+                if friendly_name.strip() in ("Dimmer 2", "Double Smart Module", "Single Switch 2", "Smart Module", ""):
+                    continue
+                # Skip unavailable entities
+                if state["state"] == "unavailable":
+                    continue
 
             self.entities[entity_id] = {
                 "friendly_name": friendly_name.strip(),
