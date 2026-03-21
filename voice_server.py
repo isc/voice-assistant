@@ -670,8 +670,41 @@ class VoiceAssistantServer:
             traceback.print_exc()
             return None
 
+    _TOOL_NAMES = {"turn_on", "turn_off", "open_cover", "close_cover", "set_temperature", "get_state"}
+
+    def _parse_text_tool_call(self, content: str) -> tuple[Optional[str], Optional[dict]]:
+        """Parse tool calls that Qwen outputs as plain text instead of structured tool_calls.
+        Handles: fn({"entity":"X","room":"Y"}), fn("X"), fn(entity="X", room="Y")
+        """
+        import re
+        import json
+
+        # Pattern 1: fn({"key": "val", ...})
+        m = re.match(r'(\w+)\s*\(\s*(\{.*\})\s*\)', content, re.DOTALL)
+        if m and m.group(1) in self._TOOL_NAMES:
+            try:
+                return m.group(1), json.loads(m.group(2))
+            except json.JSONDecodeError:
+                pass
+
+        # Pattern 2: fn("value")
+        m = re.match(r'(\w+)\s*\(\s*"([^"]+)"\s*\)', content)
+        if m and m.group(1) in self._TOOL_NAMES:
+            return m.group(1), {"entity": m.group(2)}
+
+        # Pattern 3: fn(entity="X", room="Y") — Python-style kwargs
+        m = re.match(r'(\w+)\s*\((.+)\)', content, re.DOTALL)
+        if m and m.group(1) in self._TOOL_NAMES:
+            args = {}
+            for kv in re.findall(r'(\w+)\s*=\s*"([^"]*)"', m.group(2)):
+                args[kv[0]] = kv[1]
+            if args:
+                return m.group(1), args
+
+        return None, None
+
     async def process_with_llm(self, api: APIClient, text: str) -> Optional[str]:
-        """LLM with SmolLM3 via llama.cpp (OpenAI-compatible API)"""
+        """LLM with Qwen 3 4B via llama.cpp (OpenAI-compatible API)"""
         import json
 
         logger.info(f'LLM input: "{text}"')
@@ -679,7 +712,7 @@ class VoiceAssistantServer:
         try:
             # Build system prompt with available entities
             system_prompt = (
-                "Tu es un assistant vocal pour la maison connectée. "
+                "/no_think Tu es un assistant vocal pour la maison connectée. "
                 "Réponds en français, en 1-2 phrases courtes maximum. "
                 "Pas de markdown. Parle naturellement comme à l'oral. "
                 "Quand on te demande de contrôler un appareil, utilise TOUJOURS les fonctions disponibles. "
@@ -750,32 +783,8 @@ class VoiceAssistantServer:
                             content = content.strip()
 
                             # Fallback: Qwen sometimes puts tool calls as text
-                            # Handles: turn_off({"entity": "X"}) and turn_off("X")
-                            import re
-                            tool_match = re.match(
-                                r'(\w+)\s*\(\s*(\{.*\})\s*\)', content, re.DOTALL
-                            )
-                            if not tool_match:
-                                # Simple form: func_name("value")
-                                tool_match_simple = re.match(
-                                    r'(\w+)\s*\(\s*"([^"]+)"\s*\)', content
-                                )
-                                if tool_match_simple:
-                                    fn_name = tool_match_simple.group(1)
-                                    fn_args = {"entity": tool_match_simple.group(2)}
-                                    tool_match = True  # flag to enter the block below
-
-                            if tool_match and isinstance(tool_match, bool):
-                                # Already parsed from simple form above
-                                pass
-                            elif tool_match:
-                                fn_name = tool_match.group(1)
-                                try:
-                                    fn_args = json.loads(tool_match.group(2))
-                                except json.JSONDecodeError:
-                                    fn_args = None
-
-                            if tool_match and fn_args:
+                            fn_name, fn_args = self._parse_text_tool_call(content)
+                            if fn_name and fn_args:
                                 try:
                                     logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
                                     result = await self.execute_function(fn_name, fn_args)
