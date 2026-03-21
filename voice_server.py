@@ -162,7 +162,7 @@ class VoiceAssistantServer:
             if ESP_NOISE_PSK:
                 logger.info("🔐 Authentification: Noise encryption")
                 api = APIClient(
-                    host, ESP_PORT, noise_psk=ESP_NOISE_PSK,
+                    host, ESP_PORT, None, noise_psk=ESP_NOISE_PSK,
                     client_info="voice-server-python",
                 )
             else:
