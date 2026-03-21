@@ -8,6 +8,7 @@ Remplace Home Assistant pour le pipeline vocal
 
 import asyncio
 import logging
+import os
 import sys
 from typing import Dict, Any, Optional
 import time
@@ -28,6 +29,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Configuration via variables d'environnement
+ESP_HOST = os.environ.get("ESP_HOST", "")
+ESP_PORT = int(os.environ.get("ESP_PORT", "6053"))
+ESP_PASSWORD = os.environ.get("ESP_PASSWORD", "")
+ESP_NOISE_PSK = os.environ.get("ESP_NOISE_PSK", "")
+LLAMA_URL = os.environ.get("LLAMA_URL", "http://localhost:8080/v1/chat/completions")
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
+
 
 class VoiceAssistantServer:
     """
@@ -37,7 +46,6 @@ class VoiceAssistantServer:
 
     def __init__(self):
         self.devices: Dict[str, APIClient] = {}
-        self.config = {"port": 6053, "password": "", "debug": True}
 
         # État du pipeline vocal
         self.conversation_id = None
@@ -52,7 +60,6 @@ class VoiceAssistantServer:
 
         # Serveur HTTP pour héberger les fichiers TTS
         self.http_server = None
-        self.http_port = 8888
         self.tts_dir = Path(tempfile.gettempdir()) / "voice_assistant_tts"
         self.tts_dir.mkdir(exist_ok=True)
         logger.info(f"📁 Dossier TTS: {self.tts_dir}")
@@ -121,7 +128,7 @@ class VoiceAssistantServer:
 
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", self.http_port)
+        site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
         await site.start()
 
         # Obtenir l'IP locale
@@ -133,27 +140,37 @@ class VoiceAssistantServer:
             s.close()
 
         logger.info(
-            f"🌐 Serveur HTTP TTS démarré sur http://{local_ip}:{self.http_port}/tts/"
+            f"🌐 Serveur HTTP TTS démarré sur http://{local_ip}:{HTTP_PORT}/tts/"
         )
-        self.http_base_url = f"http://{local_ip}:{self.http_port}/tts/"
+        self.http_base_url = f"http://{local_ip}:{HTTP_PORT}/tts/"
 
     async def start(self):
         """Démarrer le serveur et se connecter aux devices"""
         logger.info("🚀 Voice Assistant Server démarré")
-        logger.info(f"📡 Configuration: port {self.config['port']}")
+        logger.info(f"📡 ESP: {ESP_HOST}:{ESP_PORT} | LLM: {LLAMA_URL} | HTTP: {HTTP_PORT}")
 
         await self.init_tts_engine()
         await self.start_http_server()
-        await self.connect_to_device("", self.config["password"])
+        await self.connect_to_device(ESP_HOST)
 
-    async def connect_to_device(self, host: str, password: str):
+    async def connect_to_device(self, host: str):
         """Se connecter à un device ESPHome spécifique"""
         try:
             logger.info(f"🔌 Connexion à {host}...")
 
-            api = APIClient(
-                host, self.config["port"], password, client_info="voice-server-python"
-            )
+            # Noise encryption (recommandé) ou password (legacy)
+            if ESP_NOISE_PSK:
+                logger.info("🔐 Authentification: Noise encryption")
+                api = APIClient(
+                    host, ESP_PORT, noise_psk=ESP_NOISE_PSK,
+                    client_info="voice-server-python",
+                )
+            else:
+                api = APIClient(
+                    host, ESP_PORT, ESP_PASSWORD,
+                    client_info="voice-server-python",
+                )
+
             await api.connect(login=True)
             logger.info(f"✅ Connecté à {host}")
 
@@ -179,7 +196,7 @@ class VoiceAssistantServer:
             logger.info("💡 Vérifiez que:")
             logger.info("   - L'ESP est allumé et connecté au WiFi")
             logger.info("   - L'IP est correcte")
-            logger.info("   - Le password correspond à la config ESPHome")
+            logger.info("   - ESP_PASSWORD ou ESP_NOISE_PSK est configuré")
 
     async def setup_voice_assistant(self, api: APIClient, device_host: str):
         """Configuration du voice assistant"""
@@ -562,13 +579,9 @@ class VoiceAssistantServer:
 
         try:
             import base64
-            import wave
-            import tempfile
-            import os
             import json
 
-            # URL OpenAI-compatible de llama.cpp
-            llama_url = "http://localhost:8080/v1/chat/completions"
+            llama_url = LLAMA_URL
 
             # Créer un fichier WAV temporaire
             temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
