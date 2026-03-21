@@ -33,6 +33,8 @@ ESP_PASSWORD = os.environ.get("ESP_PASSWORD", "")
 ESP_NOISE_PSK = os.environ.get("ESP_NOISE_PSK", "")
 LLAMA_URL = os.environ.get("LLAMA_URL", "http://localhost:8080/v1/chat/completions")
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
+HA_URL = os.environ.get("HA_URL", "http://localhost:8123")
+HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
 
 class VoiceAssistantServer:
@@ -55,6 +57,9 @@ class VoiceAssistantServer:
         # Kokoro TTS engine + French G2P
         self.tts_engine = None
         self.tts_g2p = None
+
+        # Home Assistant client
+        self.ha_client = None
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -112,6 +117,7 @@ class VoiceAssistantServer:
     async def start_http_server(self):
         """Start HTTP server to host TTS audio files"""
         app = web.Application()
+        app.router.add_post("/test", self.handle_test_prompt)
         app.router.add_static("/tts/", self.tts_dir, show_index=True)
 
         runner = web.AppRunner(app)
@@ -128,7 +134,35 @@ class VoiceAssistantServer:
             s.close()
 
         logger.info(f"HTTP TTS server started on http://{local_ip}:{HTTP_PORT}/tts/")
+        logger.info(f"Test endpoint: curl -X POST http://{local_ip}:{HTTP_PORT}/test -d '{{\"text\": \"allume la lumière\"}}'")
         self.http_base_url = f"http://{local_ip}:{HTTP_PORT}/tts/"
+
+    async def handle_test_prompt(self, request):
+        """Test endpoint: bypass ESP/STT, send text directly to LLM -> HA -> TTS"""
+        import json
+
+        try:
+            body = await request.json()
+            text = body.get("text", "")
+        except Exception:
+            text = (await request.text()).strip()
+
+        if not text:
+            return web.json_response({"error": "missing 'text' field"}, status=400)
+
+        logger.info(f"[TEST] Input: \"{text}\"")
+
+        # Run LLM (no ESP api needed for tool execution)
+        response_text = await self.process_with_llm(None, text)
+        if not response_text:
+            return web.json_response({"error": "LLM returned no response"}, status=500)
+
+        # Generate TTS audio
+        tts_url = await self.text_to_speech_file(response_text)
+
+        result = {"input": text, "response": response_text, "tts_url": tts_url}
+        logger.info(f"[TEST] Result: {json.dumps(result, ensure_ascii=False)}")
+        return web.json_response(result)
 
     async def start(self):
         """Start the server and connect to devices"""
@@ -137,8 +171,24 @@ class VoiceAssistantServer:
 
         await self.init_stt_engine()
         await self.init_tts_engine()
+        await self.init_ha_client()
         await self.start_http_server()
         await self.connect_to_device(ESP_HOST)
+
+    async def init_ha_client(self):
+        """Connect to Home Assistant and discover entities."""
+        from ha_client import HAClient
+
+        if not HA_TOKEN:
+            logger.info("No HA_TOKEN configured, device control disabled")
+            return
+
+        self.ha_client = HAClient(HA_URL, HA_TOKEN)
+        if await self.ha_client.connect():
+            logger.info(f"Home Assistant: {len(self.ha_client.entities)} entities discovered")
+        else:
+            logger.warning("Home Assistant not reachable, device control disabled")
+            self.ha_client = None
 
     async def connect_to_device(self, host: str):
         """Connect to a specific ESPHome device"""
@@ -445,35 +495,128 @@ class VoiceAssistantServer:
 
     def get_available_functions(self) -> list:
         """Return available functions for LLM function calling"""
+        if not self.ha_client:
+            return []
+
         return [
             {
-                "name": "close_shutters",
-                "description": "Close the shutters in a room",
+                "name": "turn_on",
+                "description": "Allumer un appareil (lumière, prise, etc.)",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "room": {
-                            "type": "string",
-                            "description": "The room where to close the shutters (living room, bedroom, etc.)",
-                        }
+                        "entity": {"type": "string", "description": "Nom de l'appareil"},
+                        "brightness": {"type": "integer", "description": "Luminosité 0-100, seulement pour les lumières"},
                     },
-                    "required": ["room"],
+                    "required": ["entity"],
                 },
-            }
+            },
+            {
+                "name": "turn_off",
+                "description": "Éteindre un appareil (lumière, prise, etc.)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {"type": "string", "description": "Nom de l'appareil"},
+                    },
+                    "required": ["entity"],
+                },
+            },
+            {
+                "name": "open_cover",
+                "description": "Ouvrir un volet ou un store",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {"type": "string", "description": "Nom du volet"},
+                    },
+                    "required": ["entity"],
+                },
+            },
+            {
+                "name": "close_cover",
+                "description": "Fermer un volet ou un store",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {"type": "string", "description": "Nom du volet"},
+                    },
+                    "required": ["entity"],
+                },
+            },
+            {
+                "name": "set_temperature",
+                "description": "Régler la température d'un thermostat",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {"type": "string", "description": "Nom du thermostat"},
+                        "temperature": {"type": "number", "description": "Température en degrés Celsius"},
+                    },
+                    "required": ["entity", "temperature"],
+                },
+            },
+            {
+                "name": "get_state",
+                "description": "Obtenir l'état actuel d'un appareil (allumé/éteint, température, ouvert/fermé)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {"type": "string", "description": "Nom de l'appareil"},
+                    },
+                    "required": ["entity"],
+                },
+            },
         ]
 
     async def execute_function(self, function_name: str, arguments: dict) -> str:
-        """Execute a function called by the LLM"""
-        if function_name == "close_shutters":
-            return await self.close_shutters(**arguments)
-        else:
-            return f"Unknown function: {function_name}"
+        """Execute a function by calling Home Assistant"""
+        if not self.ha_client:
+            return "Home Assistant non disponible"
 
-    async def close_shutters(self, room: str) -> str:
-        """Close the shutters in a room (simulation for now)"""
-        logger.info(f"FUNCTION CALLED: close_shutters(room={room})")
-        logger.info(f"   Simulation: closing shutters in {room}")
-        return f"Shutters in {room} have been closed"
+        entity_name = arguments.get("entity", "")
+
+        # Domain hints per tool
+        domain_map = {
+            "turn_on": ["light", "switch", "media_player"],
+            "turn_off": ["light", "switch", "media_player"],
+            "open_cover": ["cover"],
+            "close_cover": ["cover"],
+            "set_temperature": ["climate"],
+            "get_state": None,
+        }
+
+        domains = domain_map.get(function_name)
+
+        # Resolve entity name to HA entity_id
+        entity_id = self.ha_client.resolve_entity(entity_name, domain_hints=domains)
+        if not entity_id:
+            return f"Appareil {entity_name} non trouvé"
+
+        # get_state is a read operation
+        if function_name == "get_state":
+            state_data = await self.ha_client.get_entity_state(entity_id)
+            if state_data:
+                return self.ha_client.format_state_for_speech(entity_id, state_data)
+            return f"Impossible de lire l'état de {entity_name}"
+
+        # Service calls
+        domain = entity_id.split(".")[0]
+        service = {
+            "turn_on": "turn_on",
+            "turn_off": "turn_off",
+            "open_cover": "open_cover",
+            "close_cover": "close_cover",
+            "set_temperature": "set_temperature",
+        }.get(function_name, function_name)
+
+        extra = {}
+        if function_name == "set_temperature" and "temperature" in arguments:
+            extra["temperature"] = arguments["temperature"]
+        if function_name == "turn_on" and "brightness" in arguments:
+            extra["brightness_pct"] = arguments["brightness"]
+
+        return await self.ha_client.call_service(domain, service, entity_id, **extra)
 
     async def init_stt_engine(self):
         """Initialize Parakeet MLX STT model"""
@@ -519,34 +662,44 @@ class VoiceAssistantServer:
             return None
 
     async def process_with_llm(self, api: APIClient, text: str) -> Optional[str]:
-        """LLM with Qwen via llama.cpp (OpenAI-compatible API)"""
+        """LLM with SmolLM3 via llama.cpp (OpenAI-compatible API)"""
         import json
 
         logger.info(f'LLM input: "{text}"')
 
         try:
+            # Build system prompt with available entities
+            system_prompt = (
+                "/no_think Tu es un assistant vocal pour la maison connectée. "
+                "Réponds en français, en 1-2 phrases courtes maximum. "
+                "Pas de markdown, pas de listes, pas de mise en forme. "
+                "Parle naturellement comme à l'oral. "
+                "Utilise les fonctions disponibles quand c'est approprié."
+            )
+            if self.ha_client:
+                entity_list = self.ha_client.get_entity_list_for_prompt()
+                if entity_list:
+                    system_prompt += f"\nAppareils disponibles: {entity_list}"
+
+            tools = self.get_available_functions()
+
             payload = {
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": "/no_think Tu es un assistant vocal pour la maison connectée. Réponds en français, en 1-2 phrases courtes maximum. Pas de markdown, pas de listes, pas de mise en forme. Parle naturellement comme à l'oral. Utilise les fonctions disponibles quand c'est approprié.",
-                    },
-                    {
-                        "role": "user",
-                        "content": text,
-                    },
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": text},
                 ],
-                "tools": [
-                    {"type": "function", "function": func}
-                    for func in self.get_available_functions()
-                ],
-                "max_tokens": 50,
+                "max_tokens": 150,
                 "temperature": 0.7,
             }
+            if tools:
+                payload["tools"] = [
+                    {"type": "function", "function": func} for func in tools
+                ]
 
-            tool_names = [t["function"]["name"] for t in payload["tools"]]
+            tool_names = [t["function"]["name"] for t in payload.get("tools", [])]
             logger.info(f'LLM prompt: [system] ...voice assistant... [user] "{text}"')
-            logger.info(f"Tools: {tool_names}")
+            if tool_names:
+                logger.info(f"Tools: {tool_names}")
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -573,14 +726,8 @@ class VoiceAssistantServer:
                                 )
                                 logger.info(f"Function result: {function_result}")
 
-                                assistant_response = message.get("content", "C'est fait")
-                                if assistant_response:
-                                    assistant_response = assistant_response.strip()
-                                else:
-                                    assistant_response = "C'est fait"
-
-                                logger.info(f'LLM response (with function): "{assistant_response}"')
-                                return assistant_response
+                                # Use the function result directly for TTS (no 2nd LLM call)
+                                return function_result
 
                             except Exception as e:
                                 logger.error(f"Function execution error: {e}")
@@ -605,8 +752,60 @@ class VoiceAssistantServer:
             traceback.print_exc()
             return None
 
+    async def text_to_speech_file(self, text: str) -> str:
+        """Generate a TTS WAV file and return its URL."""
+        import numpy as np
+        import hashlib
+        import re
+
+        filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.wav"
+        output_path = self.tts_dir / filename
+
+        # Strip markdown artifacts before TTS
+        clean_text = re.sub(r'\*+', '', text)
+        clean_text = re.sub(r'#+\s*', '', clean_text)
+        clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean_text)
+        clean_text = re.sub(r'`([^`]+)`', r'\1', clean_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+
+        logger.info(f"Synthesizing: '{clean_text[:80]}...'")
+
+        # French phonemization via espeak
+        phonemes = self.tts_g2p(clean_text)
+        logger.info(f"Phonemes: {phonemes}")
+
+        # Generate audio with Kokoro (runs sync, use executor)
+        loop = asyncio.get_event_loop()
+        audio_24k, sr = await loop.run_in_executor(
+            None,
+            lambda: self.tts_engine.create(
+                phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True
+            ),
+        )
+
+        logger.info(f"Kokoro output: {len(audio_24k)} samples at {sr}Hz")
+
+        # Resample 24kHz -> 16kHz (ESP expects 16kHz)
+        target_sr = 16000
+        num_samples_16k = int(len(audio_24k) * target_sr / sr)
+        indices = np.linspace(0, len(audio_24k) - 1, num_samples_16k)
+        audio_16k = np.interp(indices, np.arange(len(audio_24k)), audio_24k).astype(np.float32)
+
+        # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
+        audio_int16 = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16)
+
+        # Save as WAV file
+        with wave.open(str(output_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(target_sr)
+            wav_file.writeframes(audio_int16.tobytes())
+
+        logger.info(f"TTS generated: {output_path} ({output_path.stat().st_size} bytes)")
+        return f"{self.http_base_url}{filename}"
+
     async def text_to_speech(self, api: APIClient, text: str):
-        """Text-to-Speech with Kokoro (24kHz) resampled to 16kHz for ESP"""
+        """Text-to-Speech with ESP events (for live pipeline)"""
         logger.info(f'TTS: generating audio for "{text}"')
 
         api.send_voice_assistant_event(
@@ -615,58 +814,7 @@ class VoiceAssistantServer:
         logger.info("TTS_START sent")
 
         try:
-            import numpy as np
-            import hashlib
-
-            filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.wav"
-            output_path = self.tts_dir / filename
-
-            # Strip markdown artifacts before TTS
-            import re
-            clean_text = re.sub(r'\*+', '', text)        # **bold**, *italic*
-            clean_text = re.sub(r'#+\s*', '', clean_text) # ### headers
-            clean_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', clean_text)  # [link](url)
-            clean_text = re.sub(r'`([^`]+)`', r'\1', clean_text)  # `code`
-            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-
-            logger.info(f"Synthesizing: '{clean_text[:80]}...'")
-
-            # French phonemization via espeak
-            phonemes = self.tts_g2p(clean_text)
-            logger.info(f"Phonemes: {phonemes}")
-
-            # Generate audio with Kokoro (runs sync, use executor)
-            loop = asyncio.get_event_loop()
-            audio_24k, sr = await loop.run_in_executor(
-                None,
-                lambda: self.tts_engine.create(
-                    phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True
-                ),
-            )
-
-            logger.info(f"Kokoro output: {len(audio_24k)} samples at {sr}Hz")
-
-            # Resample 24kHz -> 16kHz (ESP expects 16kHz)
-            target_sr = 16000
-            num_samples_16k = int(len(audio_24k) * target_sr / sr)
-            indices = np.linspace(0, len(audio_24k) - 1, num_samples_16k)
-            audio_16k = np.interp(indices, np.arange(len(audio_24k)), audio_24k).astype(np.float32)
-
-            # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
-            audio_int16 = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16)
-
-            # Save as WAV file
-            with wave.open(str(output_path), "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(target_sr)
-                wav_file.writeframes(audio_int16.tobytes())
-
-            logger.info(f"TTS generated: {output_path} ({output_path.stat().st_size} bytes)")
-
-            # URL accessible by the ESP
-            audio_url = f"{self.http_base_url}{filename}"
-
+            audio_url = await self.text_to_speech_file(text)
             api.send_voice_assistant_event(
                 VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": audio_url}
             )
@@ -696,7 +844,7 @@ async def main():
     """Main entry point"""
     print("Custom Voice Assistant Server for ESPHome (Python)")
     print("Replaces Home Assistant for voice pipeline")
-    print("STT: Parakeet MLX | LLM: SmolLM3 (llama.cpp) | TTS: Kokoro\n")
+    print("STT: Parakeet MLX | LLM: Qwen 3 4B (llama.cpp) | TTS: Kokoro\n")
 
     server = VoiceAssistantServer()
 

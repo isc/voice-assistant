@@ -57,3 +57,15 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: Piper TTS (fr_FR-gilles-low) had poor French accent quality ("québécois et bizarre"). Kokoro-82M has a French voice (ff_siwis) with significantly better pronunciation when paired with explicit French phonemization via misaki/espeak.
 - **Decision**: Use kokoro-onnx with misaki EspeakG2P(language='fr-fr') for French phonemization. Resample 24kHz output to 16kHz for ESP compatibility.
 - **Trade-off**: Kokoro outputs at 24kHz (requires resampling to 16kHz for ESP). Only 1 French voice available (ff_siwis). Model is larger (~310MB vs ~30MB for Piper). Requires espeak-ng system dependency.
+
+## 2026-03-21: Home Assistant integration
+
+### AD-012: Control Home Assistant via REST API with 6 generic LLM tools
+- **Context**: The voice assistant needs to control real home automation devices. User has a local Home Assistant installation.
+- **Decision**: Connect to HA REST API (local, no cloud) with a long-lived access token. Expose 6 generic tools to the LLM: turn_on, turn_off, open_cover, close_cover, set_temperature, get_state. Entity resolution uses fuzzy matching on friendly_name (the LLM says "lumière salon", Python matches it to `light.salon`).
+- **Trade-off**: 6 tools is the max a small model can handle reliably. No second LLM round-trip after tool execution (function result goes directly to TTS for lower latency). Entity list injected into system prompt for context.
+
+### AD-013: Switch from SmolLM3 3B to Qwen 3 4B for LLM
+- **Context**: SmolLM3 3B does not support function/tool calling — it returns text responses instead of tool_calls JSON. Qwen 3 4B has native tool calling support (trained with function calling in its chat template).
+- **Decision**: Use Qwen 3 4B Q4_K_M via llama.cpp with --jinja flag. Keep /no_think prefix to disable reasoning mode.
+- **Trade-off**: Slightly slower than SmolLM3 (~5s cold, ~1.5s warm vs ~1.3s), but tool calling actually works. Still fits in 16GB RAM alongside Parakeet STT and Kokoro TTS.
