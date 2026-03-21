@@ -230,6 +230,8 @@ class HAClient:
                     if info["domain"] not in domain_hints:
                         continue
                     norm_area = normalize(info.get("area_name", ""))
+                    if not norm_area:
+                        continue
                     if norm_r not in norm_area and norm_area not in norm_r:
                         continue
                     if eid not in entity_ids:
@@ -250,6 +252,8 @@ class HAClient:
                         continue
                     if norm_r:
                         norm_area = normalize(info.get("area_name", ""))
+                        if not norm_area:
+                            continue
                         if norm_r not in norm_area and norm_area not in norm_r:
                             continue
                     if eid not in entity_ids:

@@ -75,3 +75,13 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: Entities in different rooms can have the same name (e.g., "Plafonnier" in Chambre Charlie and Chambre invités). Flat entity lists caused the LLM to pick the wrong one.
 - **Decision**: Fetch HA areas via template API, group entities by room in the system prompt, add `room` parameter to all LLM tools. Entity resolution scopes by room first, falls back to global search.
 - **Trade-off**: More template API calls at startup (~1 per area). Slightly larger prompt but better structured for the LLM.
+
+### AD-015: Room groups for multi-room commands
+- **Context**: User wants to say "ferme les volets des enfants" or "éteins toutes les lumières" and have it affect multiple rooms.
+- **Decision**: Define ROOM_GROUPS in ha_client.py (e.g., "enfants" → [Chambre Zoé, Chambre Charlie], "tout/partout" → all rooms). When a room group is detected, return ALL entities of the target domain across all rooms in the group. LLM passes the group name as the room parameter.
+- **Trade-off**: Server-side compensation for the small LLM's inability to reliably make multiple tool calls. Groups are hardcoded (not dynamic from HA).
+
+### AD-016: Stay on Qwen 3 4B Q4_K_M (benchmarked vs 8B)
+- **Context**: Benchmarked Qwen 3 8B Q4_K_M on M1 16GB. Warm latency: 3.1s (vs 1.7s for 4B). RAM: ~5GB (vs ~950MB). Tool calling works with both thanks to Python compensation.
+- **Decision**: Stay on 4B for lower latency. Revisit if tool calling reliability becomes an issue or if a better model becomes available.
+- **Trade-off**: Less capable for complex reasoning, but acceptable for home automation commands.
