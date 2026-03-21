@@ -4,6 +4,8 @@ Custom Voice Assistant Server for ESPHome
 Remplace Home Assistant pour le pipeline vocal
 """
 
+# ./build/bin/llama-server --jinja -fa on -hf ggml-org/Voxtral-Mini-3B-2507-GGUF
+
 import asyncio
 import logging
 import sys
@@ -386,17 +388,18 @@ class VoiceAssistantServer:
 
     async def analyze_audio_vad(self, audio_bytes: bytes):
         """
-        Analyser l'audio avec WebRTC VAD pour détecter la fin de parole
+        Analyser l'audio avec Silero VAD pour détecter la fin de parole
         """
-        import webrtcvad
+        from silero_vad_lite import SileroVAD
+        import array
 
         if not hasattr(self, "vad"):
-            self.vad = webrtcvad.Vad(2)  # Agressivité 0-3 (2 = moyen)
+            self.vad = SileroVAD(16000)
 
-        # WebRTC VAD analyse par frames de 10/20/30ms
-        # Audio 16kHz, 16-bit = 320 bytes pour 10ms
-        frame_duration_ms = 30  # 30ms
-        frame_size = int(16000 * 2 * frame_duration_ms / 1000)  # 960 bytes
+        # Silero VAD analyse par frames de 32ms (512 samples à 16kHz)
+        # Input : float32 [-1, 1], soit 512 samples = 1024 bytes en int16
+        frame_samples = 512  # 32ms à 16kHz
+        frame_size = frame_samples * 2  # 1024 bytes en int16
 
         # Traiter l'audio par frames
         for i in range(0, len(audio_bytes), frame_size):
@@ -405,7 +408,15 @@ class VoiceAssistantServer:
                 continue  # Frame incomplète, ignorer
 
             try:
-                is_speech = self.vad.is_speech(frame, 16000)
+                # Convertir int16 PCM → float32 [-1, 1] pour Silero
+                int16_samples = array.array("h")
+                int16_samples.frombytes(frame)
+                float_samples = array.array(
+                    "f", [s / 32768.0 for s in int16_samples]
+                )
+
+                speech_prob = self.vad.process(float_samples)
+                is_speech = speech_prob > 0.5
 
                 if is_speech:
                     self.vad_speech_frames += 1
@@ -417,8 +428,8 @@ class VoiceAssistantServer:
                     if self.vad_has_speech:
                         self.vad_silence_frames += 1
 
-                # Arrêter après 1 seconde de silence (33 frames de 30ms)
-                if self.vad_has_speech and self.vad_silence_frames >= 33:
+                # Arrêter après ~1 seconde de silence (31 frames de 32ms)
+                if self.vad_has_speech and self.vad_silence_frames >= 31:
                     logger.info(
                         f"🤫 Silence détecté après parole ({self.vad_silence_frames} frames)"
                     )
@@ -500,6 +511,46 @@ class VoiceAssistantServer:
             logger.error(f"💥 Erreur pipeline: {e}")
             await self.send_error_to_device(api, f"Pipeline error: {e}")
 
+    # === FUNCTION CALLING ===
+
+    def get_available_functions(self) -> list:
+        """
+        Retourne la liste des fonctions disponibles pour le function calling
+        """
+        return [
+            {
+                "name": "close_shutters",
+                "description": "Fermer les volets de la maison",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "room": {
+                            "type": "string",
+                            "description": "La pièce où fermer les volets (salon, chambre, etc.)",
+                        }
+                    },
+                    "required": ["room"],
+                },
+            }
+        ]
+
+    async def execute_function(self, function_name: str, arguments: dict) -> str:
+        """
+        Exécute une fonction appelée par le LLM
+        """
+        if function_name == "close_shutters":
+            return await self.close_shutters(**arguments)
+        else:
+            return f"Fonction inconnue: {function_name}"
+
+    async def close_shutters(self, room: str) -> str:
+        """
+        Fermer les volets d'une pièce (pour le moment juste du logging)
+        """
+        logger.info(f"🪟 FONCTION APPELÉE: close_shutters(room={room})")
+        logger.info(f"   → Simulation: fermeture des volets du {room}")
+        return f"Les volets du {room} ont été fermés"
+
     async def process_audio_with_voxtral(
         self, api: APIClient, audio_bytes: bytes
     ) -> Optional[str]:
@@ -514,6 +565,7 @@ class VoiceAssistantServer:
             import wave
             import tempfile
             import os
+            import json
 
             # URL OpenAI-compatible de llama.cpp
             llama_url = "http://localhost:8080/v1/chat/completions"
@@ -537,13 +589,13 @@ class VoiceAssistantServer:
             audio_b64 = base64.b64encode(audio_data).decode("utf-8")
             logger.info(f"📦 Base64: {len(audio_b64)} caractères")
 
-            # Préparer la requête OpenAI-compatible pour assistant vocal
+            # Préparer la requête OpenAI-compatible pour assistant vocal avec function calling
             payload = {
                 "model": "voxtral",
                 "messages": [
                     {
                         "role": "system",
-                        "content": "Tu es un assistant vocal pour la maison connectée. Réponds de manière concise et naturelle en français. Tu peux contrôler les lumières, donner la météo, et répondre aux questions.",
+                        "content": "Tu es un assistant vocal pour la maison connectée. Réponds de manière concise et naturelle en français. Tu peux contrôler les lumières, les volets, donner la météo, et répondre aux questions. Utilise les fonctions disponibles quand c'est approprié.",
                     },
                     {
                         "role": "user",
@@ -554,6 +606,10 @@ class VoiceAssistantServer:
                             }
                         ],
                     },
+                ],
+                "tools": [
+                    {"type": "function", "function": func}
+                    for func in self.get_available_functions()
                 ],
                 "max_tokens": 256,
                 "temperature": 0.7,
@@ -566,15 +622,53 @@ class VoiceAssistantServer:
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
-                        assistant_response = result["choices"][0]["message"][
-                            "content"
-                        ].strip()
-                        logger.info(f'🤖 Réponse Voxtral: "{assistant_response}"')
+                        message = result["choices"][0]["message"]
 
-                        # Nettoyer
-                        os.unlink(temp_wav.name)
+                        # Vérifier si le LLM veut appeler une fonction
+                        if "tool_calls" in message and message["tool_calls"]:
+                            tool_call = message["tool_calls"][0]
+                            function_name = tool_call["function"]["name"]
+                            function_args = json.loads(
+                                tool_call["function"]["arguments"]
+                            )
 
-                        return assistant_response if assistant_response else None
+                            logger.info(
+                                f"🔧 Function call: {function_name}({function_args})"
+                            )
+
+                            # Exécuter la fonction (pas de deuxième appel LLM)
+                            try:
+                                function_result = await self.execute_function(
+                                    function_name, function_args
+                                )
+                                logger.info(f"✅ Résultat fonction: {function_result}")
+
+                                # Voxtral a déjà généré une réponse appropriée dans content
+                                # On l'utilise directement
+                                assistant_response = message.get(
+                                    "content", "C'est fait"
+                                )
+                                if assistant_response:
+                                    assistant_response = assistant_response.strip()
+                                else:
+                                    assistant_response = "C'est fait"
+
+                                logger.info(
+                                    f'🤖 Réponse Voxtral (avec fonction): "{assistant_response}"'
+                                )
+                                os.unlink(temp_wav.name)
+                                return assistant_response
+
+                            except Exception as e:
+                                logger.error(f"❌ Erreur exécution fonction: {e}")
+                                os.unlink(temp_wav.name)
+                                return f"Désolé, une erreur s'est produite lors de l'exécution de {function_name}"
+                        else:
+                            # Pas de function call, réponse directe
+                            assistant_response = message["content"].strip()
+                            logger.info(f'🤖 Réponse Voxtral: "{assistant_response}"')
+                            os.unlink(temp_wav.name)
+                            return assistant_response if assistant_response else None
                     else:
                         error_text = await response.text()
                         logger.error(

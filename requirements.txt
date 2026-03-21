@@ -1,12 +1,5 @@
-aioesphomeapi>=21.0.0
-asyncio-mqtt
-websockets
-fastapi
-uvicorn
-python-multipart
-aiofiles
-pydantic
-aiohttp
-webrtcvad
-setuptools
+aioesphomeapi>=44.0.0
+aiohttp>=3.13.3
+silero-vad-lite
 piper-tts
+numpy
