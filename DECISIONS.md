@@ -133,12 +133,27 @@ This document tracks all architecture and technology decisions made for this pro
 - **Decision**: After tool execution, send results back with tools still available (up to 3 rounds). Add system reminder listing already-called functions to nudge the model to handle remaining parts of the request.
 - **Trade-off**: Up to 3 LLM round-trips per user query. In practice, 2 rounds handle 99% of cases. Adds ~1s for multi-part requests.
 
+### AD-026: Continuous conversation via announcement API
+- **Context**: User had to say the wake word between every turn, breaking conversational flow.
+- **Decision**: After TTS generation, deliver audio via `send_voice_assistant_announcement_await_response(start_conversation=True)` instead of event-based TTS_END. The ESP automatically starts a new pipeline without wake word. 500ms audio skip at follow-up start to avoid TTS echo pickup. 5s timeout for follow-up silence (extends to 30s once speech detected). `end_conversation` LLM tool for clean closure ("merci", "bonne nuit") — skips follow-up and clears history.
+- **Trade-off**: Slightly more complex pipeline flow. The announcement API replaces event-based TTS delivery. ESP stays in active mode between turns (LEDs on, mic open).
+
 ### AD-027: Server-side timer manager with ESP native timer events
 - **Context**: User wants timers ("mets un timer de 5 minutes") and alarms ("réveille-moi à 7h"). ESPHome supports timers natively via `send_voice_assistant_timer_event()` (feature flag `VoiceAssistantFeature.TIMERS`), handling LED animations and sounds on the device.
 - **Decision**: Server-side `TimerManager` in `timer.py` using asyncio tasks. Three LLM tools: `set_timer` (duration), `set_alarm` (absolute time), `cancel_timer`. Timer lifecycle sends events to ESP: STARTED, UPDATED (tick every 1s), CANCELLED, FINISHED. On FINISHED, additionally play a TTS announcement via the announcement API with `start_conversation=True` for follow-up.
 - **Trade-off**: Timers are in-memory only — lost on server restart. Acceptable for kitchen timers; persistent alarms would need disk storage. The 1s tick loop is lightweight but adds continuous traffic to the ESP while timers are active.
 
-### AD-026: Continuous conversation via announcement API
-- **Context**: User had to say the wake word between every turn, breaking conversational flow.
-- **Decision**: After TTS generation, deliver audio via `send_voice_assistant_announcement_await_response(start_conversation=True)` instead of event-based TTS_END. The ESP automatically starts a new pipeline without wake word. 500ms audio skip at follow-up start to avoid TTS echo pickup. 5s timeout for follow-up silence (extends to 30s once speech detected). `end_conversation` LLM tool for clean closure ("merci", "bonne nuit") — skips follow-up and clears history.
-- **Trade-off**: Slightly more complex pipeline flow. The announcement API replaces event-based TTS delivery. ESP stays in active mode between turns (LEDs on, mic open).
+### AD-028: Partial cover position support
+- **Context**: Users want to say "ouvre les volets à 50%" instead of just fully open/close.
+- **Decision**: Add `set_cover_position` tool with a `position` parameter (0-100). Update `ha_client.py` to call `cover.set_cover_position` and report the position in state descriptions when partially open/closed.
+- **Trade-off**: One more tool for the LLM to handle. Stays within budget since it's in the same domain as open/close.
+
+### AD-029: Automatic ESP reconnection with ReconnectLogic
+- **Context**: Server blocked on startup if ESP was unavailable, and crashed on disconnect with no recovery.
+- **Decision**: Use aioesphomeapi's `ReconnectLogic` for automatic reconnection with exponential backoff. Server starts even if ESP is offline and connects when available.
+- **Trade-off**: Slightly more complex connection lifecycle, but eliminates manual restart on transient network issues.
+
+### AD-030: Dynamic plist generation and .env for configuration
+- **Context**: `com.voice-assistant.server.plist` contained hardcoded home directory paths. ESP/HA IP addresses were hardcoded as defaults in `voice_server.py`. Both problematic for public repo.
+- **Decision**: Generate plist dynamically in `ctl.sh install` using `$SCRIPT_DIR`. Move IP/port config to `.env` file (gitignored), sourced by `run.sh`. Secrets remain in macOS Keychain.
+- **Trade-off**: Requires `./ctl.sh install` on first setup instead of just copying the plist.
