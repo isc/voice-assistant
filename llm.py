@@ -199,7 +199,7 @@ async def chat_completion(
     messages: list,
     tools: list | None = None,
     temperature: float = 0.3,
-    max_tokens: int = 150,
+    max_tokens: int = 500,
 ) -> dict | None:
     """Send a chat completion request to an OpenAI-compatible API.
     Returns the message dict from the first choice, or None on error.

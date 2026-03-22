@@ -88,6 +88,14 @@ def setup_routes(app, server):
         response_text = await server.process_with_llm(None, text)
         timings["llm"] = round(time.time() - t0, 2)
         if not response_text:
+            server.exchange_log.add(
+                "web",
+                text,
+                text,
+                "[Erreur LLM: pas de réponse]",
+                timings=timings,
+                conversation_id=server.conversation_id,
+            )
             return web.json_response({"error": "LLM returned no response"}, status=500)
 
         t0 = time.time()
@@ -130,6 +138,13 @@ def setup_routes(app, server):
         logger.info(f'[TEST] Input: "{text}"')
         response_text = await server.process_with_llm(None, text)
         if not response_text:
+            server.exchange_log.add(
+                "web",
+                text,
+                text,
+                "[Erreur LLM: pas de réponse]",
+                conversation_id=server.conversation_id,
+            )
             return web.json_response({"error": "LLM returned no response"}, status=500)
 
         tts_url = await server.text_to_speech_file(text=response_text)

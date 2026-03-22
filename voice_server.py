@@ -425,6 +425,14 @@ class VoiceAssistantServer:
             response_text = await self.process_with_llm(api, transcript)
             timings["llm"] = round(time.time() - t0, 2)
             if not response_text:
+                self.exchange_log.add(
+                    "voice",
+                    transcript,
+                    transcript,
+                    "[Erreur LLM: pas de réponse]",
+                    timings=timings,
+                    conversation_id=self.conversation_id,
+                )
                 await self.send_error_to_device(api, "LLM processing failed")
                 return
 
