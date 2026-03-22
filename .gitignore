@@ -30,3 +30,4 @@ venv.bak/
 
 .DS_Store
 *.log
+exchanges.json

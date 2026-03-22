@@ -95,3 +95,40 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: Local Qwen 3 4B struggles with multi-turn tool calling (responds with text instead of structured tool_calls). Tested GPT-5.4 Nano via OpenAI API as interim solution.
 - **Decision**: Support both local (llama.cpp) and cloud (OpenAI-compatible API) via env vars LLM_URL, LLM_API_KEY, LLM_MODEL. GPT-5.4 Nano: reliable tool calls, pronoun resolution, ~1.3s latency, ~$0.39/month.
 - **Trade-off**: Introduces cloud dependency (breaks 100% local goal), but temporary until dedicated hardware (Zotac + 14B local model). Local mode remains the default.
+
+## 2026-03-22: Service management, refactoring, weather
+
+### AD-019: macOS Keychain for secrets
+- **Context**: HA token stored in env vars was lost on context compaction. User had to regenerate tokens.
+- **Decision**: Store secrets in macOS Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`). `run.sh` reads them at launch and exports as env vars. Voice server only reads env vars.
+- **Trade-off**: macOS-specific. Secrets survive context compaction and system restarts.
+
+### AD-020: launchd service management with signal-based control
+- **Context**: No standardized way to start/stop/restart/reload the server.
+- **Decision**: Use launchd plist (`com.voice-assistant.server.plist`) for daemon management. `ctl.sh` wraps launchctl commands. SIGHUP triggers hot-reload of HA entities. SIGTERM triggers graceful shutdown. `run.sh` uses `exec` so signals reach Python directly.
+- **Trade-off**: macOS-specific (launchd vs systemd). `ctl.sh` polls log markers instead of sleeping for ready detection.
+
+### AD-021: Refactoring into modules
+- **Context**: `voice_server.py` grew to 1315 lines — hard to navigate and maintain.
+- **Decision**: Extract into 6 modules: `stt.py`, `tts.py`, `llm.py`, `ha_client.py`, `weather.py`, `web_ui.py`. `voice_server.py` remains the orchestrator (~660 lines).
+- **Trade-off**: More files, but each module has a clear responsibility and can be understood in isolation.
+
+### AD-022: Web UI for debugging and text input
+- **Context**: No way to visualize exchanges or test without the ESP hardware.
+- **Decision**: Web UI at `:8888` with exchange log, debug panel (timings, tool calls), and text input. OS-adaptive light/dark theme via `prefers-color-scheme`. Exchange log persisted to `exchanges.json` to survive restarts.
+- **Trade-off**: Adds ~280 lines to `web_ui.py`. JSON persistence is simple but not concurrent-safe (acceptable for single-user).
+
+### AD-023: Weather tool via Open-Meteo
+- **Context**: User wants to ask the assistant about weather. Needs to work without API keys (100% local goal).
+- **Decision**: Use Open-Meteo API (free, no key). Default to Paris 15e. Geocoding for other cities. Returns structured JSON with current conditions + 5-day forecast. WMO codes mapped to French descriptions.
+- **Trade-off**: Requires internet (not truly local), but no API key or account needed. Open-Meteo has generous rate limits.
+
+### AD-024: Second LLM round-trip for natural tool responses
+- **Context**: Raw tool results (e.g., weather JSON, "Plafonnier éteint") went directly to TTS — sounded robotic and unnatural.
+- **Decision**: After tool execution, send results back to LLM for natural language formulation. The LLM receives tool results and generates a spoken response.
+- **Trade-off**: Adds ~0.5-1s latency per response. Worth it for much better TTS output quality.
+
+### AD-025: Multi-round tool loop
+- **Context**: GPT-5.4 Nano doesn't always emit all needed tool calls in one shot (e.g., "éteins la lumière et dis-moi la météo" only called turn_off).
+- **Decision**: After tool execution, send results back with tools still available (up to 3 rounds). Add system reminder listing already-called functions to nudge the model to handle remaining parts of the request.
+- **Trade-off**: Up to 3 LLM round-trips per user query. In practice, 2 rounds handle 99% of cases. Adds ~1s for multi-part requests.
