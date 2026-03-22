@@ -27,3 +27,8 @@ Beyond the current 5-exchange sliding window (2 min expiry), the assistant shoul
 - **Structured extraction**: extract key facts (preferences, recurring topics) into a knowledge base
 
 Trade-offs: prompt size vs relevance, local embedding model (RAM budget), staleness of old memories.
+
+## Media
+
+### Spotify voice control
+Control Spotify playback on connected speakers (e.g., "mets du jazz dans le salon", "joue la playlist du matin"). Requires Spotify integration via HA media_player entities or direct Spotify Connect API. LLM tools: play_music (artist/song/playlist/genre query + target speaker), pause/resume, skip, volume.
