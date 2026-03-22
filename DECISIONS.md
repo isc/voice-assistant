@@ -85,3 +85,13 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: Benchmarked Qwen 3 8B Q4_K_M on M1 16GB. Warm latency: 3.1s (vs 1.7s for 4B). RAM: ~5GB (vs ~950MB). Tool calling works with both thanks to Python compensation.
 - **Decision**: Stay on 4B for lower latency. Revisit if tool calling reliability becomes an issue or if a better model becomes available.
 - **Trade-off**: Less capable for complex reasoning, but acceptable for home automation commands.
+
+### AD-017: Conversation history for multi-turn context
+- **Context**: Each LLM call was stateless — no memory between turns. Impossible to say "allume la lumière du salon" then "éteins-la".
+- **Decision**: Keep last 5 exchanges in memory, expire after 2 min of inactivity. Add French action verb fallback parser for when local LLM responds with text instead of tool calls.
+- **Trade-off**: More tokens per request (~200 extra for history). Fallback parser is a workaround for small local models — unnecessary with cloud APIs.
+
+### AD-018: Cloud LLM API support (GPT-5.4 Nano)
+- **Context**: Local Qwen 3 4B struggles with multi-turn tool calling (responds with text instead of structured tool_calls). Tested GPT-5.4 Nano via OpenAI API as interim solution.
+- **Decision**: Support both local (llama.cpp) and cloud (OpenAI-compatible API) via env vars LLM_URL, LLM_API_KEY, LLM_MODEL. GPT-5.4 Nano: reliable tool calls, pronoun resolution, ~1.3s latency, ~$0.39/month.
+- **Trade-off**: Introduces cloud dependency (breaks 100% local goal), but temporary until dedicated hardware (Zotac + 14B local model). Local mode remains the default.
