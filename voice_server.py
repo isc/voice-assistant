@@ -258,8 +258,11 @@ class VoiceAssistantServer:
         logger.info(f"   Wake word: {wake_word_phrase}")
         logger.info(f"   Audio settings: {audio_settings}")
 
-        self.conversation_id = conversation_id
         self.is_followup = wake_word_phrase is None
+        # Only overwrite conversation_id for new conversations (wake word detected).
+        # Follow-ups keep the server-assigned ID so exchanges group correctly.
+        if not self.is_followup:
+            self.conversation_id = None
 
         # Cancel any previous recording timeout
         if self.recording_task and not self.recording_task.done():
@@ -453,6 +456,8 @@ class VoiceAssistantServer:
             t0 = time.time()
             response_text = await self.process_with_llm(api, transcript)
             timings["llm"] = round(time.time() - t0, 2)
+            # Capture conversation_id now — TTS triggers ESP follow-up which overwrites it
+            conversation_id = self.conversation_id
             if not response_text:
                 self.exchange_log.add(
                     "voice",
@@ -460,18 +465,22 @@ class VoiceAssistantServer:
                     transcript,
                     "[Erreur LLM: pas de réponse]",
                     timings=timings,
-                    conversation_id=self.conversation_id,
+                    conversation_id=conversation_id,
                 )
                 await self.send_error_to_device(api, "LLM processing failed")
                 return
 
             # 3. TTS
             t0 = time.time()
-            tts_timings = await self.text_to_speech(api, response_text)
-            timings["tts_gen"] = tts_timings["gen"]
-            timings["tts_play"] = tts_timings["play"]
-            timings["tts"] = round(time.time() - t0, 2)
-            timings["total"] = round(timings["stt"] + timings["llm"] + timings["tts_gen"], 2)
+            try:
+                tts_timings = await self.text_to_speech(api, response_text)
+                timings["tts_gen"] = tts_timings["gen"]
+                timings["tts_play"] = tts_timings["play"]
+                timings["tts"] = round(time.time() - t0, 2)
+            except Exception as e:
+                logger.error(f"TTS failed, but exchange will still be logged: {e}")
+                await self.send_error_to_device(api, f"TTS error: {e}")
+            timings["total"] = round(timings["stt"] + timings["llm"] + timings.get("tts_gen", 0), 2)
 
             self.exchange_log.add(
                 "voice",
@@ -480,12 +489,12 @@ class VoiceAssistantServer:
                 response_text,
                 timings=timings,
                 tool_calls=self._last_tool_calls,
-                conversation_id=self.conversation_id,
+                conversation_id=conversation_id,
             )
             self._last_tool_calls = []
             logger.info(
                 f"Pipeline: STT={timings['stt']}s LLM={timings['llm']}s "
-                f"TTS={timings['tts_gen']}s+{timings['tts_play']}s "
+                f"TTS={timings.get('tts_gen', '?')}s+{timings.get('tts_play', '?')}s "
                 f"total={timings['total']}s"
             )
 
@@ -869,7 +878,12 @@ class VoiceAssistantServer:
         play_time = 0.0
 
         try:
-            sentences = self._split_sentences(text)
+            # Don't split sentences for end_conversation — multiple announcements
+            # with start_conversation=False cause the ESP to miss AnnounceFinished.
+            if self._end_conversation:
+                sentences = [text]
+            else:
+                sentences = self._split_sentences(text)
             logger.info(f"TTS: {len(sentences)} sentence(s) to generate")
 
             # Generate first sentence
@@ -897,12 +911,15 @@ class VoiceAssistantServer:
                     await self._play_tts_and_continue(api, current_url)
                 elif is_last and self._end_conversation:
                     logger.info("End of conversation - no follow-up")
-                    await api.send_voice_assistant_announcement_await_response(
-                        media_id=current_url,
-                        timeout=30.0,
-                        text="",
-                        start_conversation=False,
-                    )
+                    try:
+                        await api.send_voice_assistant_announcement_await_response(
+                            media_id=current_url,
+                            timeout=30.0,
+                            text="",
+                            start_conversation=False,
+                        )
+                    except TimeoutError:
+                        logger.warning("End-of-conversation announcement timed out")
                     self.conversation_history = []
                     self.conversation_id = None
                     logger.info("Conversation ended, history cleared")
