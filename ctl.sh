@@ -5,6 +5,50 @@
 SERVICE="com.voice-assistant.server"
 DOMAIN="gui/$(id -u)"
 LOG="/tmp/voice-assistant.log"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLIST="$SCRIPT_DIR/$SERVICE.plist"
+
+generate_plist() {
+    cat > "$PLIST" <<PLIST_EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$SERVICE</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$SCRIPT_DIR/run.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>$SCRIPT_DIR</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/voice-assistant.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/voice-assistant.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>
+PLIST_EOF
+}
 
 wait_for_ready() {
     local timeout=${1:-30}
@@ -76,7 +120,8 @@ case "${1:-status}" in
         tail -f "$LOG"
         ;;
     install)
-        cp "$(dirname "$0")/com.voice-assistant.server.plist" "$HOME/Library/LaunchAgents/$SERVICE.plist"
+        generate_plist
+        cp "$PLIST" "$HOME/Library/LaunchAgents/$SERVICE.plist"
         > "$LOG"
         launchctl bootstrap "$DOMAIN" "$HOME/Library/LaunchAgents/$SERVICE.plist"
         wait_for_ready
