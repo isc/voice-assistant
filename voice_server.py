@@ -61,6 +61,11 @@ class VoiceAssistantServer:
         # Home Assistant client
         self.ha_client = None
 
+        # Conversation history for multi-turn context
+        self.conversation_history = []
+        self.last_interaction_time = 0
+        self.CONVERSATION_TIMEOUT = 120  # seconds — forget context after 2 min of silence
+
         # HTTP server for serving TTS audio files
         self.http_server = None
         self.tts_dir = Path(tempfile.gettempdir()) / "voice_assistant_tts"
@@ -728,11 +733,33 @@ class VoiceAssistantServer:
             if args:
                 return m.group(1), args
 
+        # Pattern 4: French natural language action (e.g. "Éteins les appliques salon.")
+        # Only triggered when conversation history exists (follow-up command)
+        if self.conversation_history:
+            action_map = {
+                "allume": "turn_on", "rallume": "turn_on",
+                "éteins": "turn_off", "eteins": "turn_off",
+                "ferme": "close_cover", "ouvre": "open_cover",
+            }
+            lower = content.lower().rstrip(".")
+            for verb, func in action_map.items():
+                if lower.startswith(verb):
+                    entity_part = lower[len(verb):].strip()
+                    # Strip articles
+                    for article in ("les ", "le ", "la ", "l'", "l'"):
+                        if entity_part.startswith(article):
+                            entity_part = entity_part[len(article):]
+                            break
+                    if entity_part:
+                        logger.info(f"French action fallback: '{content}' -> {func}('{entity_part}')")
+                        return func, {"entity": entity_part}
+
         return None, None
 
     async def process_with_llm(self, api: APIClient, text: str) -> Optional[str]:
         """LLM with Qwen 3 4B via llama.cpp (OpenAI-compatible API)"""
         import json
+        import time
 
         logger.info(f'LLM input: "{text}"')
 
@@ -742,7 +769,7 @@ class VoiceAssistantServer:
                 "/no_think Tu es un assistant vocal pour la maison connectée. "
                 "Réponds en français, en 1-2 phrases courtes maximum. "
                 "Pas de markdown. Parle naturellement comme à l'oral. "
-                "Quand on te demande de contrôler un appareil, utilise TOUJOURS les fonctions disponibles. "
+                "Quand on te demande de contrôler un appareil (même avec un pronom comme 'la' ou 'les'), utilise TOUJOURS les fonctions disponibles. "
                 "Passe le paramètre room quand la pièce est mentionnée. "
                 "Utilise les noms de groupes tels quels (ex: room='enfants'), ne les décompose pas."
             )
@@ -753,11 +780,21 @@ class VoiceAssistantServer:
 
             tools = self.get_available_functions()
 
+            # Expire old conversation history
+            now = time.time()
+            if now - self.last_interaction_time > self.CONVERSATION_TIMEOUT:
+                if self.conversation_history:
+                    logger.info("Conversation history expired, starting fresh")
+                self.conversation_history = []
+            self.last_interaction_time = now
+
+            # Build messages: system + history + current user message
+            messages = [{"role": "system", "content": system_prompt}]
+            messages.extend(self.conversation_history)
+            messages.append({"role": "user", "content": text})
+
             payload = {
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text},
-                ],
+                "messages": messages,
                 "max_tokens": 150,
                 "temperature": 0.3,
             }
@@ -780,6 +817,14 @@ class VoiceAssistantServer:
                         logger.info(f"LLM raw response: {json.dumps(result, ensure_ascii=False, indent=2)}")
                         message = result["choices"][0]["message"]
 
+                        # Helper to save exchange to conversation history
+                        def save_to_history(response_text):
+                            self.conversation_history.append({"role": "user", "content": text})
+                            self.conversation_history.append({"role": "assistant", "content": response_text})
+                            # Keep last 5 exchanges (10 messages) to limit prompt size
+                            if len(self.conversation_history) > 10:
+                                self.conversation_history = self.conversation_history[-10:]
+
                         # Check if the LLM wants to call a function
                         if "tool_calls" in message and message["tool_calls"]:
                             tool_call = message["tool_calls"][0]
@@ -796,7 +841,7 @@ class VoiceAssistantServer:
                                 )
                                 logger.info(f"Function result: {function_result}")
 
-                                # Use the function result directly for TTS (no 2nd LLM call)
+                                save_to_history(function_result)
                                 return function_result
 
                             except Exception as e:
@@ -817,11 +862,14 @@ class VoiceAssistantServer:
                                     logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
                                     result = await self.execute_function(fn_name, fn_args)
                                     logger.info(f"Function result: {result}")
+                                    save_to_history(result)
                                     return result
                                 except Exception as e:
                                     logger.warning(f"Failed to execute text tool call: {e}")
 
                             logger.info(f'LLM response: "{content}"')
+                            if content:
+                                save_to_history(content)
                             return content if content else None
                     else:
                         error_text = await response.text()
