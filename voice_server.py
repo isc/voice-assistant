@@ -545,6 +545,7 @@ class VoiceAssistantServer:
             "turn_off": ["light", "switch", "media_player"],
             "open_cover": ["cover"],
             "close_cover": ["cover"],
+            "set_cover_position": ["cover"],
             "set_temperature": ["climate"],
             "get_state": None,
         }
@@ -565,6 +566,7 @@ class VoiceAssistantServer:
             "turn_off": "turn_off",
             "open_cover": "open_cover",
             "close_cover": "close_cover",
+            "set_cover_position": "set_cover_position",
             "set_temperature": "set_temperature",
         }.get(function_name, function_name)
 
@@ -573,6 +575,8 @@ class VoiceAssistantServer:
             extra["temperature"] = arguments["temperature"]
         if function_name == "turn_on" and "brightness" in arguments:
             extra["brightness"] = round(arguments["brightness"] * 255 / 100)
+        if function_name == "set_cover_position" and "position" in arguments:
+            extra["position"] = arguments["position"]
 
         for entity_id in entity_ids:
             domain = entity_id.split(".")[0]
@@ -588,6 +592,7 @@ class VoiceAssistantServer:
                 action_map = {
                     "close_cover": "Tous les volets en cours de fermeture",
                     "open_cover": "Tous les volets en cours d'ouverture",
+                    "set_cover_position": f"Tous les volets réglés à {arguments.get('position', '?')}%",
                     "turn_on": "Toutes les lumières allumées",
                     "turn_off": "Toutes les lumières éteintes",
                 }
@@ -596,6 +601,7 @@ class VoiceAssistantServer:
                 action_map = {
                     "close_cover": f"Volets {room_label} en cours de fermeture",
                     "open_cover": f"Volets {room_label} en cours d'ouverture",
+                    "set_cover_position": f"Volets {room_label} réglés à {arguments.get('position', '?')}%",
                     "turn_on": f"Lumières {room_label} allumées",
                     "turn_off": f"Lumières {room_label} éteintes",
                 }

@@ -409,6 +409,7 @@ class HAClient:
             ("switch", "turn_off"): f"{display_name} éteint",
             ("cover", "open_cover"): f"{display_name} en cours d'ouverture",
             ("cover", "close_cover"): f"{display_name} en cours de fermeture",
+            ("cover", "set_cover_position"): f"{display_name} réglé à {kwargs.get('position', '?')}%",
             ("cover", "stop_cover"): f"{display_name} arrêté",
             (
                 "climate",
@@ -441,7 +442,11 @@ class HAClient:
                 "opening": "en cours d'ouverture",
                 "closing": "en cours de fermeture",
             }
-            return f"{friendly} est {state_map.get(state, state)}"
+            position = state_data.get("attributes", {}).get("current_position")
+            label = state_map.get(state, state)
+            if position is not None and 0 < position < 100:
+                return f"{friendly} est {label} à {position} pourcent"
+            return f"{friendly} est {label}"
 
         if domain == "climate":
             temp = state_data.get("attributes", {}).get("current_temperature")

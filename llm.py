@@ -14,6 +14,7 @@ _TOOL_NAMES = {
     "turn_off",
     "open_cover",
     "close_cover",
+    "set_cover_position",
     "set_temperature",
     "get_state",
     "set_timer",
@@ -145,7 +146,7 @@ def get_tool_definitions(ha_client) -> list:
         },
         {
             "name": "close_cover",
-            "description": "Fermer un volet ou un store",
+            "description": "Fermer un volet ou un store entièrement",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -153,6 +154,22 @@ def get_tool_definitions(ha_client) -> list:
                     "room": room_param,
                 },
                 "required": ["entity"],
+            },
+        },
+        {
+            "name": "set_cover_position",
+            "description": "Régler la position d'un volet (0 = complètement fermé, 100 = complètement ouvert). Exemples : « ferme à moitié » = 50, « ouvre un peu » = 30, « ferme presque » = 10.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string", "description": "Nom du volet"},
+                    "room": room_param,
+                    "position": {
+                        "type": "integer",
+                        "description": "Position du volet en pourcentage (0 = fermé, 100 = ouvert)",
+                    },
+                },
+                "required": ["entity", "position"],
             },
         },
         {
