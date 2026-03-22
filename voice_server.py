@@ -429,9 +429,11 @@ class VoiceAssistantServer:
 
             # 3. TTS
             t0 = time.time()
-            await self.text_to_speech(api, response_text)
+            tts_timings = await self.text_to_speech(api, response_text)
+            timings["tts_gen"] = tts_timings["gen"]
+            timings["tts_play"] = tts_timings["play"]
             timings["tts"] = round(time.time() - t0, 2)
-            timings["total"] = round(sum(timings.values()), 2)
+            timings["total"] = round(timings["stt"] + timings["llm"] + timings["tts_gen"], 2)
 
             self.exchange_log.add(
                 "voice",
@@ -443,7 +445,7 @@ class VoiceAssistantServer:
             )
             self._last_tool_calls = []
             logger.info(
-                f"Pipeline completed: STT={timings['stt']}s LLM={timings['llm']}s TTS={timings['tts']}s total={timings['total']}s"
+                f"Pipeline completed: STT={timings['stt']}s LLM={timings['llm']}s TTS gen={timings['tts_gen']}s play={timings['tts_play']}s total={timings['total']}s"
             )
 
         except Exception as e:
@@ -502,7 +504,7 @@ class VoiceAssistantServer:
         if function_name == "set_temperature" and "temperature" in arguments:
             extra["temperature"] = arguments["temperature"]
         if function_name == "turn_on" and "brightness" in arguments:
-            extra["brightness_pct"] = arguments["brightness"]
+            extra["brightness"] = round(arguments["brightness"] * 255 / 100)
 
         for entity_id in entity_ids:
             domain = entity_id.split(".")[0]
@@ -695,32 +697,91 @@ class VoiceAssistantServer:
         """Generate a TTS WAV file and return its URL."""
         return await self.tts.synthesize_to_file(text, self.tts_dir, self.http_base_url)
 
-    async def text_to_speech(self, api: APIClient, text: str):
-        """Generate TTS audio, play via announcement API, and optionally start follow-up."""
+    @staticmethod
+    def _split_sentences(text: str) -> list[str]:
+        """Split text into sentences for chunked TTS generation."""
+        import re
+
+        # Split on sentence-ending punctuation followed by space
+        parts = re.split(r"(?<=[.!?;])\s+", text)
+        sentences = [s.strip() for s in parts if s.strip()]
+        # Don't split very short texts
+        if len(sentences) <= 1:
+            return [text]
+        return sentences
+
+    async def text_to_speech(self, api: APIClient, text: str) -> dict:
+        """Generate TTS sentence-by-sentence with pipelined playback.
+        Each sentence is played as soon as generated while the next one
+        generates in parallel, reducing perceived latency.
+        Returns timing dict with 'gen' (generation) and 'play' (playback) durations.
+        """
         logger.info(f'TTS: generating audio for "{text}"')
 
         api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": text})
 
-        try:
-            audio_url = await self.text_to_speech_file(text)
+        gen_time = 0.0
+        play_time = 0.0
 
-            # End the current pipeline before playing announcement
+        try:
+            sentences = self._split_sentences(text)
+            logger.info(f"TTS: {len(sentences)} sentence(s) to generate")
+
+            # Generate first sentence
+            t0 = time.time()
+            next_url = await self.text_to_speech_file(sentences[0])
+            gen_time += time.time() - t0
+
+            # End pipeline before playing announcements
             api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
 
-            if self._end_conversation:
-                # LLM called end_conversation: play TTS without follow-up
-                logger.info("End of conversation - playing TTS without follow-up")
-                await api.send_voice_assistant_announcement_await_response(
-                    media_id=audio_url,
-                    timeout=30.0,
-                    text="",
-                    start_conversation=False,
-                )
-                self.conversation_history = []
-                logger.info("Conversation ended, history cleared")
-            else:
-                # Normal: play TTS and start follow-up listening
-                await self._play_tts_and_continue(api, audio_url)
+            for i in range(len(sentences)):
+                current_url = next_url
+                is_last = i == len(sentences) - 1
+
+                # Pipeline: start generating next sentence while playing current
+                gen_task = None
+                if not is_last:
+                    gen_task = asyncio.create_task(self.text_to_speech_file(sentences[i + 1]))
+
+                # Play current sentence
+                logger.info(f"TTS: playing sentence {i + 1}/{len(sentences)}")
+                t_play = time.time()
+
+                if is_last and not self._end_conversation:
+                    await self._play_tts_and_continue(api, current_url)
+                elif is_last and self._end_conversation:
+                    logger.info("End of conversation - no follow-up")
+                    await api.send_voice_assistant_announcement_await_response(
+                        media_id=current_url,
+                        timeout=30.0,
+                        text="",
+                        start_conversation=False,
+                    )
+                    self.conversation_history = []
+                    logger.info("Conversation ended, history cleared")
+                else:
+                    await api.send_voice_assistant_announcement_await_response(
+                        media_id=current_url,
+                        timeout=30.0,
+                        text="",
+                        start_conversation=False,
+                    )
+
+                play_time += time.time() - t_play
+
+                # Await next sentence generation (should already be done during playback)
+                if gen_task:
+                    t0 = time.time()
+                    next_url = await gen_task
+                    extra_gen = time.time() - t0
+                    gen_time += extra_gen
+                    if extra_gen > 0.05:
+                        logger.info(f"TTS: waited {extra_gen:.2f}s for next sentence generation")
+
+            timings = {"gen": round(gen_time, 2), "play": round(play_time, 2)}
+            logger.info(f"TTS done: gen={timings['gen']}s play={timings['play']}s")
+            return timings
 
         except Exception as e:
             logger.error(f"TTS error: {e}")

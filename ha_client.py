@@ -397,6 +397,11 @@ class HAClient:
 
     def _build_response(self, domain: str, service: str, display_name: str, kwargs: dict) -> str:
         """Build a natural French TTS response for a service call."""
+        # Include brightness in response when specified
+        if domain == "light" and service == "turn_on" and "brightness" in kwargs:
+            pct = round(kwargs["brightness"] / 255 * 100)
+            return f"{display_name} réglé à {pct}%"
+
         responses = {
             ("light", "turn_on"): f"{display_name} allumé",
             ("light", "turn_off"): f"{display_name} éteint",
