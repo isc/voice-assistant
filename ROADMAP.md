@@ -35,6 +35,11 @@ Automatic French/English detection for guests. Would require language-aware STT 
 ### Automatic room detection
 Use UniFi Wi-Fi client tracking to detect which room the user is in (phone → nearest AP → room). When room is known, the `room` parameter becomes implicit: "éteins la lumière" targets the current room without needing to specify it.
 
+## Services
+
+### Google Calendar integration
+Connect to the household's Google Calendars to answer scheduling questions ("qu'est-ce que j'ai demain?", "à quelle heure est le rendez-vous?") and create events by voice ("ajoute un rendez-vous dentiste mardi à 14h"). Requires Google Calendar API with OAuth2 or service account. LLM tools: query_calendar (date range, search), create_event (title, datetime, duration, attendees). Combined with voice identification, the assistant can query and write to the correct person's calendar automatically.
+
 ## Memory and context
 
 ### Family profile (static knowledge)
@@ -58,6 +63,11 @@ Progressive Web App installable on home screen. Use Web Speech API or stream aud
 
 ### Step 3: Native iOS app (optional)
 Mic active on app open, background mode, possible local wake word detection, Siri Shortcut integration. Best UX but significant development effort — only worth it if PWA limitations become a real pain point.
+
+## Identity
+
+### Voice identification (speaker recognition)
+Identify who is speaking based on voice characteristics. Phase 1: adapt responses to the speaker's age (simpler language for children, detailed answers for adults). Phase 2: use the identified speaker's personal accounts for services like Spotify (play their playlists, recommendations, etc.).
 
 ## Media
 
