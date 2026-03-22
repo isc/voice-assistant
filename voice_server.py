@@ -273,7 +273,7 @@ class VoiceAssistantServer:
             await asyncio.sleep(30.0)
 
         if self.is_recording:
-            logger.warning(f"SAFETY TIMEOUT reached ({max_recording_time}s)")
+            logger.warning("SAFETY TIMEOUT reached (30s)")
             await self.stop_recording(api, "timeout")
 
     async def stop_recording(self, api: APIClient, reason: str):
@@ -455,7 +455,9 @@ class VoiceAssistantServer:
             )
             self._last_tool_calls = []
             logger.info(
-                f"Pipeline completed: STT={timings['stt']}s LLM={timings['llm']}s TTS gen={timings['tts_gen']}s play={timings['tts_play']}s total={timings['total']}s"
+                f"Pipeline: STT={timings['stt']}s LLM={timings['llm']}s "
+                f"TTS={timings['tts_gen']}s+{timings['tts_play']}s "
+                f"total={timings['total']}s"
             )
 
         except Exception as e:
@@ -567,10 +569,16 @@ class VoiceAssistantServer:
             "Tu es un assistant vocal pour la maison connectée. "
             "Réponds en français, en 1-2 phrases courtes maximum. "
             "Pas de markdown. Parle naturellement comme à l'oral. "
-            "Quand on te demande de contrôler un appareil (même avec un pronom comme 'la' ou 'les'), utilise TOUJOURS les fonctions disponibles. "
+            "Quand on te demande de contrôler un appareil "
+            "(même avec un pronom comme 'la' ou 'les'), "
+            "utilise TOUJOURS les fonctions disponibles. "
             "Passe le paramètre room quand la pièce est mentionnée. "
-            "Utilise les noms de groupes tels quels (ex: room='enfants'), ne les décompose pas. "
-            "Si la demande couvre plusieurs actions ou sujets (ex: contrôler un appareil ET demander la météo), appelle TOUTES les fonctions nécessaires en parallèle dans ta réponse.\n"
+            "Utilise les noms de groupes tels quels "
+            "(ex: room='enfants'), ne les décompose pas. "
+            "Si la demande couvre plusieurs actions ou sujets "
+            "(ex: contrôler un appareil ET demander la météo), "
+            "appelle TOUTES les fonctions nécessaires "
+            "en parallèle dans ta réponse.\n"
             f"Date et heure actuelles: {now_str}."
         )
         if is_local:

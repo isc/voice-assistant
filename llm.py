@@ -129,7 +129,10 @@ def get_tool_definitions(ha_client) -> list:
         weather_tool,
         {
             "name": "end_conversation",
-            "description": "Terminer la conversation. Appeler quand l'utilisateur dit au revoir, merci, ok merci, bonne nuit, c'est tout, etc.",
+            "description": (
+                "Terminer la conversation. Appeler quand l'utilisateur dit "
+                "au revoir, merci, ok merci, bonne nuit, c'est tout, etc."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {},
