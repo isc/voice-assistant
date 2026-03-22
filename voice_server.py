@@ -20,6 +20,7 @@ from aioesphomeapi import (
     APIClient,
     VoiceAssistantEventType,
 )
+from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -68,6 +69,7 @@ class VoiceAssistantServer:
 
     def __init__(self):
         self.devices: Dict[str, APIClient] = {}
+        self._reconnect_logic: Optional[ReconnectLogic] = None
 
         # Voice pipeline state
         self.conversation_id = None
@@ -176,32 +178,29 @@ class VoiceAssistantServer:
     # === ESP CONNECTION ===
 
     async def connect_to_device(self, host: str):
-        """Connect to a specific ESPHome device"""
-        try:
-            logger.info(f"Connecting to {host}...")
+        """Connect to an ESPHome device with automatic reconnection."""
+        logger.info(f"Connecting to {host}...")
 
-            if ESP_NOISE_PSK:
-                logger.info("Auth: Noise encryption")
-                api = APIClient(
-                    host,
-                    ESP_PORT,
-                    None,
-                    noise_psk=ESP_NOISE_PSK,
-                    client_info="voice-server-python",
-                )
-            else:
-                api = APIClient(
-                    host,
-                    ESP_PORT,
-                    ESP_PASSWORD,
-                    client_info="voice-server-python",
-                )
+        if ESP_NOISE_PSK:
+            logger.info("Auth: Noise encryption")
+            api = APIClient(
+                host,
+                ESP_PORT,
+                None,
+                noise_psk=ESP_NOISE_PSK,
+                client_info="voice-server-python",
+            )
+        else:
+            api = APIClient(
+                host,
+                ESP_PORT,
+                ESP_PASSWORD,
+                client_info="voice-server-python",
+            )
 
-            await api.connect(login=True)
-            logger.info(f"Connected to {host}")
-
+        async def on_connect() -> None:
             device_info = await api.device_info()
-            logger.info(f"Device: {device_info.name} (v{device_info.esphome_version})")
+            logger.info(f"Connected to {host}: {device_info.name} (v{device_info.esphome_version})")
 
             if device_info.voice_assistant_feature_flags:
                 logger.info(f"Voice assistant supported (flags: {device_info.voice_assistant_feature_flags})")
@@ -212,12 +211,20 @@ class VoiceAssistantServer:
             self.current_device = host
             await self.setup_voice_assistant(api, host)
 
-        except Exception as e:
-            logger.error(f"Connection error {host}: {e}")
-            logger.info("Check that:")
-            logger.info("   - The ESP is powered on and connected to WiFi")
-            logger.info("   - The IP address is correct")
-            logger.info("   - ESP_PASSWORD or ESP_NOISE_PSK is configured")
+        async def on_disconnect(expected_disconnect: bool) -> None:
+            reason = "expected" if expected_disconnect else "unexpected"
+            logger.warning(f"ESP {host} disconnected ({reason}), will reconnect automatically")
+            self.devices.pop(host, None)
+            if self.current_device == host:
+                self.current_device = None
+
+        self._reconnect_logic = ReconnectLogic(
+            client=api,
+            on_connect=on_connect,
+            on_disconnect=on_disconnect,
+            name=host,
+        )
+        await self._reconnect_logic.start()
 
     async def setup_voice_assistant(self, api: APIClient, device_host: str):
         """Set up voice assistant subscription"""
@@ -987,6 +994,9 @@ async def main():
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
+    finally:
+        if server._reconnect_logic:
+            await server._reconnect_logic.stop()
 
     logger.info("Server stopped")
 
