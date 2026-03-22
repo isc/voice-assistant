@@ -132,3 +132,8 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: GPT-5.4 Nano doesn't always emit all needed tool calls in one shot (e.g., "éteins la lumière et dis-moi la météo" only called turn_off).
 - **Decision**: After tool execution, send results back with tools still available (up to 3 rounds). Add system reminder listing already-called functions to nudge the model to handle remaining parts of the request.
 - **Trade-off**: Up to 3 LLM round-trips per user query. In practice, 2 rounds handle 99% of cases. Adds ~1s for multi-part requests.
+
+### AD-026: Continuous conversation via announcement API
+- **Context**: User had to say the wake word between every turn, breaking conversational flow.
+- **Decision**: After TTS generation, deliver audio via `send_voice_assistant_announcement_await_response(start_conversation=True)` instead of event-based TTS_END. The ESP automatically starts a new pipeline without wake word. 500ms audio skip at follow-up start to avoid TTS echo pickup. 5s timeout for follow-up silence (extends to 30s once speech detected). `end_conversation` LLM tool for clean closure ("merci", "bonne nuit") — skips follow-up and clears history.
+- **Trade-off**: Slightly more complex pipeline flow. The announcement API replaces event-based TTS delivery. ESP stays in active mode between turns (LEDs on, mic open).

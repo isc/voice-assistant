@@ -4,8 +4,8 @@ Features and improvements planned for the voice assistant.
 
 ## Conversation flow
 
-### Continuous conversation (no wake word between turns)
-After the assistant finishes speaking, keep listening for a few seconds so the user can ask a follow-up without saying the wake word again. Requires a timeout or explicit "merci" to end the conversation.
+### ~~Continuous conversation (no wake word between turns)~~ DONE
+Implemented via announcement API with `start_conversation=True`. 5s follow-up timeout, `end_conversation` tool for clean closure.
 
 ### More concise, less repetitive responses
 The LLM tends to repeat context unnecessarily (e.g., "à Paris, avec un risque de pluie à 0%" on every weather response). Tune the system prompt to encourage shorter, more natural follow-ups — especially when answering a continuation like "et demain?", the response should be minimal ("Non plus, 0% de pluie").

@@ -38,7 +38,9 @@ ESP (wake word) → audio stream → voice_server.py
 5. If tool_calls → execute each, loop back to LLM with results + tools (up to 3 rounds) until text response
 6. If text response → check fallback parser for French action verbs (local LLM workaround)
 7. Final LLM round formulates natural spoken response from tool results
-8. TTS: Kokoro generates WAV, ESP plays it via URL
+8. TTS: Kokoro generates WAV, played via announcement API with `start_conversation=True`
+9. ESP automatically starts listening for follow-up (no wake word needed)
+10. If no speech within 5s → conversation ends. If `end_conversation` tool was called → no follow-up.
 
 ## Key design patterns
 
@@ -47,6 +49,7 @@ ESP (wake word) → audio stream → voice_server.py
 - **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls. A system reminder lists already-called functions to encourage completeness.
 - **Conversation history**: last 5 exchanges (10 messages), expires after 2 min inactivity.
 - **DateTime injection**: current date/time injected into system prompt so the LLM can answer time/date questions.
+- **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
 - **Text fallback parser**: catches when local LLM outputs tool calls as plain text instead of structured JSON (4 patterns: JSON args, quoted string, Python kwargs, French verbs).
 - **Secrets**: stored in macOS Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`), read by `run.sh` and exported as env vars.
 
