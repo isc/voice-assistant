@@ -48,6 +48,17 @@ Beyond the current 5-exchange sliding window (2 min expiry), the assistant shoul
 
 Trade-offs: prompt size vs relevance, local embedding model (RAM budget), staleness of old memories.
 
+## Mobile client
+
+### Step 1: Mobile-optimized web UI
+Adapt the current web UI for mobile use. Full-screen chat interface, large touch targets, iOS keyboard dictation for text input. Quick win, no app to install.
+
+### Step 2: PWA with voice input
+Progressive Web App installable on home screen. Use Web Speech API or stream audio to server-side Parakeet for STT. Tap-to-talk button that activates the mic immediately. No App Store needed, reuses existing backend. Limitation: Safari restricts mic access in background.
+
+### Step 3: Native iOS app (optional)
+Mic active on app open, background mode, possible local wake word detection, Siri Shortcut integration. Best UX but significant development effort — only worth it if PWA limitations become a real pain point.
+
 ## Media
 
 ### Spotify voice control
