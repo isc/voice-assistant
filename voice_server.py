@@ -69,6 +69,7 @@ class VoiceAssistantServer:
 
         # Conversation history for multi-turn context
         self.conversation_history = []
+        self.conversation_id = None  # Groups exchanges in the same conversation
         self.last_interaction_time = 0
         self.CONVERSATION_TIMEOUT = 120  # seconds — forget context after 2 min of silence
 
@@ -442,6 +443,7 @@ class VoiceAssistantServer:
                 response_text,
                 timings=timings,
                 tool_calls=self._last_tool_calls,
+                conversation_id=self.conversation_id,
             )
             self._last_tool_calls = []
             logger.info(
@@ -578,7 +580,12 @@ class VoiceAssistantServer:
             if self.conversation_history:
                 logger.info("Conversation history expired, starting fresh")
             self.conversation_history = []
+            self.conversation_id = None
         self.last_interaction_time = now
+
+        # Assign conversation ID for first exchange in a conversation
+        if not self.conversation_id:
+            self.conversation_id = int(now)
 
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]
@@ -759,6 +766,7 @@ class VoiceAssistantServer:
                         start_conversation=False,
                     )
                     self.conversation_history = []
+                    self.conversation_id = None
                     logger.info("Conversation ended, history cleared")
                 else:
                     await api.send_voice_assistant_announcement_await_response(

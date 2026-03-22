@@ -25,8 +25,13 @@
   header { padding: 14px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   header h1 { font-size: 17px; font-weight: 600; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); }
-  #exchanges { flex: 1; overflow-y: auto; padding: 12px 20px; display: flex; flex-direction: column; gap: 10px; }
-  .exchange { background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 12px 14px; }
+  #exchanges { flex: 1; overflow-y: auto; padding: 12px 20px; display: flex; flex-direction: column; gap: 16px; }
+  .conversation { display: flex; flex-direction: column; gap: 2px; }
+  .conversation .exchange:first-child { border-radius: 10px 10px 4px 4px; }
+  .conversation .exchange:last-child { border-radius: 4px 4px 10px 10px; }
+  .conversation .exchange:only-child { border-radius: 10px; }
+  .conversation .exchange:not(:first-child):not(:last-child) { border-radius: 4px; }
+  .exchange { background: var(--card); border: 1px solid var(--card-border); padding: 12px 14px; }
   .meta { font-size: 11px; color: var(--fg2); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
   .badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
   .badge.voice { background: var(--accent); color: #fff; }
@@ -97,25 +102,40 @@ function fmtDebug(e) {
   return s;
 }
 
+function renderExchange(e, i, isFirst) {
+  const hasDebug = (e.timings && Object.keys(e.timings).length) || (e.tool_calls && e.tool_calls.length);
+  return `<div class="exchange">
+    <div class="meta">
+      ${isFirst ? '<span class="badge ' + e.source + '">' + e.source + '</span><span>' + e.timestamp + '</span>' : ''}
+      ${e.timings && e.timings.total ? '<span class="timings">' + e.timings.total + 's</span>' : ''}
+    </div>
+    <div class="input-line">${esc(e.input)}</div>
+    <div class="response-line">${esc(e.response)}</div>
+    <div class="actions">
+      ${e.tts_url ? '<button onclick="playAudio(\'' + e.tts_url + '\')">Ecouter</button>' : ''}
+      ${hasDebug ? '<button onclick="toggleDebug(' + i + ')">Debug</button>' : ''}
+    </div>
+    ${hasDebug ? '<div class="debug" id="dbg-' + i + '">' + fmtDebug(e) + '</div>' : ''}
+  </div>`;
+}
+
 function render(data) {
   if (!data.length) { ex.innerHTML = '<div class="empty">Aucun echange pour le moment</div>'; return; }
-  ex.innerHTML = data.map((e, i) => {
-    const hasDebug = (e.timings && Object.keys(e.timings).length) || (e.tool_calls && e.tool_calls.length);
-    return `<div class="exchange">
-      <div class="meta">
-        <span class="badge ${e.source}">${e.source}</span>
-        <span>${e.timestamp}</span>
-        ${e.timings && e.timings.total ? '<span class="timings">' + e.timings.total + 's</span>' : ''}
-      </div>
-      <div class="input-line">${esc(e.input)}</div>
-      <div class="response-line">${esc(e.response)}</div>
-      <div class="actions">
-        ${e.tts_url ? '<button onclick="playAudio(\'' + e.tts_url + '\')">Ecouter</button>' : ''}
-        ${hasDebug ? '<button onclick="toggleDebug(' + i + ')">Debug</button>' : ''}
-      </div>
-      ${hasDebug ? '<div class="debug" id="dbg-' + i + '">' + fmtDebug(e) + '</div>' : ''}
-    </div>`;
-  }).join('');
+  // Group consecutive exchanges by conversation_id
+  const groups = [];
+  let current = null;
+  data.forEach((e, i) => {
+    const cid = e.conversation_id;
+    if (cid && current && current.cid === cid) {
+      current.items.push({e, i});
+    } else {
+      current = {cid, items: [{e, i}]};
+      groups.push(current);
+    }
+  });
+  ex.innerHTML = groups.map(g =>
+    '<div class="conversation">' + g.items.map(({e, i}, idx) => renderExchange(e, i, idx === 0)).join('') + '</div>'
+  ).join('');
   ex.scrollTop = ex.scrollHeight;
 }
 

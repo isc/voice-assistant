@@ -44,6 +44,7 @@ class ExchangeLog:
         tts_url=None,
         timings=None,
         tool_calls=None,
+        conversation_id=None,
     ):
         entry = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -54,6 +55,7 @@ class ExchangeLog:
             "tts_url": tts_url,
             "timings": timings or {},
             "tool_calls": tool_calls or [],
+            "conversation_id": conversation_id,
         }
         self.entries.append(entry)
         if len(self.entries) > self.max_entries:
@@ -103,6 +105,7 @@ def setup_routes(app, server):
             tts_url,
             timings=timings,
             tool_calls=tool_calls,
+            conversation_id=server.conversation_id,
         )
         return web.json_response(
             {
@@ -132,7 +135,7 @@ def setup_routes(app, server):
         tts_url = await server.text_to_speech_file(text=response_text)
         result = {"input": text, "response": response_text, "tts_url": tts_url}
         logger.info(f"[TEST] Result: {json.dumps(result, ensure_ascii=False)}")
-        server.exchange_log.add("web", text, text, response_text, tts_url)
+        server.exchange_log.add("web", text, text, response_text, tts_url, conversation_id=server.conversation_id)
         return web.json_response(result)
 
     app.router.add_get("/", handle_web_ui)
