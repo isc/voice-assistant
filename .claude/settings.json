@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.command // \"\"' | grep -q 'git commit' && { ruff check --fix --quiet *.py 2>/dev/null; ruff format --quiet *.py 2>/dev/null; git add -u -- '*.py' 2>/dev/null; true; } || true",
+            "command": "jq -r '.tool_input.command // \"\"' | grep -q 'git commit' && { STAGED=$(git diff --cached --name-only --diff-filter=ACM -- '*.py'); [ -n \"$STAGED\" ] && { echo \"$STAGED\" | xargs ruff check --fix --quiet 2>/dev/null; echo \"$STAGED\" | xargs ruff format --quiet 2>/dev/null; echo \"$STAGED\" | xargs git add 2>/dev/null; }; true; } || true",
             "timeout": 30,
             "statusMessage": "Running ruff..."
           }
