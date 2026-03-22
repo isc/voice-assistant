@@ -72,6 +72,10 @@ class VoiceAssistantServer:
         self.last_interaction_time = 0
         self.CONVERSATION_TIMEOUT = 120  # seconds — forget context after 2 min of silence
 
+        # Continuous conversation
+        self.is_followup = False  # True when pipeline was started without wake word
+        self._end_conversation = False  # Set by end_conversation tool
+
         # Exchange log for web UI (persisted to disk)
         from web_ui import ExchangeLog
 
@@ -201,7 +205,6 @@ class VoiceAssistantServer:
                 handle_start=self.handle_voice_assistant_start,
                 handle_stop=self.handle_voice_assistant_stop,
                 handle_audio=self.handle_voice_assistant_audio,
-                handle_announcement_finished=self.handle_announcement_finished,
             )
             self.va_unsubscribe = unsubscribe
             logger.info("Voice assistant subscription successful")
@@ -226,17 +229,25 @@ class VoiceAssistantServer:
         logger.info(f"   Audio settings: {audio_settings}")
 
         self.conversation_id = conversation_id
+        self.is_followup = wake_word_phrase is None
+
+        # Cancel any previous recording timeout
+        if self.recording_task and not self.recording_task.done():
+            self.recording_task.cancel()
+
         self.audio_buffer = bytearray()
         self.is_recording = True
         self.vad_speech_frames = 0
         self.vad_silence_frames = 0
         self.vad_has_speech = False
+        # In follow-up mode, skip initial audio to avoid picking up TTS echo
+        self.skip_audio_until = time.time() + 0.5 if self.is_followup else 0
 
         if self.current_device:
             api = self.devices[self.current_device]
             try:
                 api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_START, {})
-                logger.info("STT_START sent - ESP will send audio")
+                logger.info(f"STT_START sent - {'follow-up' if self.is_followup else 'wake word'} mode")
                 self.recording_task = asyncio.create_task(self.monitor_recording_timeout(api))
             except Exception as e:
                 logger.error(f"Error sending STT_START: {e}")
@@ -244,10 +255,21 @@ class VoiceAssistantServer:
         return 0
 
     async def monitor_recording_timeout(self, api: APIClient):
-        """Safety timeout: stop recording after 30 seconds max"""
-        max_recording_time = 30.0
-        logger.info(f"Safety timeout: {max_recording_time}s")
-        await asyncio.sleep(max_recording_time)
+        """Safety timeout. In follow-up mode, wait 5s for speech to start,
+        then extend to 30s once speech is detected."""
+        if self.is_followup:
+            # Short timeout: end if nobody speaks
+            await asyncio.sleep(5.0)
+            if self.is_recording and not self.vad_has_speech:
+                logger.info("No speech in follow-up - stopping")
+                await self.stop_recording(api, "no speech")
+                return
+            # Speech detected: switch to normal timeout for the rest
+            remaining = 25.0  # 30s total max
+            logger.info("Speech detected in follow-up, extending timeout to 30s")
+            await asyncio.sleep(remaining)
+        else:
+            await asyncio.sleep(30.0)
 
         if self.is_recording:
             logger.warning(f"SAFETY TIMEOUT reached ({max_recording_time}s)")
@@ -286,18 +308,32 @@ class VoiceAssistantServer:
         else:
             logger.info("No audio to process")
 
-    async def handle_announcement_finished(self, announcement_finished):
-        """Called when the ESP finishes playing TTS audio"""
-        logger.info("Announcement finished received from ESP")
-
-        if self.current_device:
-            api = self.devices[self.current_device]
-            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
-            logger.info("RUN_END sent - Pipeline complete, LEDs idle")
+    async def _play_tts_and_continue(self, api: APIClient, audio_url: str):
+        """Play TTS audio via announcement API and start follow-up listening.
+        Uses send_voice_assistant_announcement_await_response which both plays
+        the audio and tells the ESP to start a new pipeline when done.
+        """
+        try:
+            logger.info(f"Playing TTS and requesting follow-up: {audio_url}")
+            result = await api.send_voice_assistant_announcement_await_response(
+                media_id=audio_url,
+                timeout=30.0,
+                text="",
+                start_conversation=True,
+            )
+            logger.info(f"TTS playback done, follow-up started (success={result.success})")
+        except TimeoutError:
+            logger.warning("TTS announcement timed out")
+        except Exception as e:
+            logger.warning(f"TTS announcement error: {e}")
 
     async def handle_voice_assistant_audio(self, audio_bytes: bytes):
         """Handle audio received from the ESP with VAD detection"""
         if self.is_recording:
+            # Skip early audio in follow-up mode to avoid TTS echo
+            if self.skip_audio_until and time.time() < self.skip_audio_until:
+                return
+
             self.audio_buffer.extend(audio_bytes)
             self.last_audio_time = time.time()
 
@@ -359,6 +395,7 @@ class VoiceAssistantServer:
     async def process_voice_pipeline(self, api: APIClient, audio_bytes: bytes):
         """Main pipeline: Audio -> STT -> LLM -> TTS"""
         logger.info("Starting full voice pipeline")
+        self._end_conversation = False
 
         try:
             timings = {}
@@ -368,7 +405,12 @@ class VoiceAssistantServer:
             transcript = await self.stt.transcribe(audio_bytes)
             timings["stt"] = round(time.time() - t0, 2)
             if not transcript:
-                await self.send_error_to_device(api, "STT failed")
+                if self.is_followup:
+                    # Normal: no speech during follow-up, end conversation quietly
+                    logger.info("No speech during follow-up - ending conversation")
+                    api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
+                else:
+                    await self.send_error_to_device(api, "STT failed")
                 return
 
             api.send_voice_assistant_event(
@@ -412,6 +454,10 @@ class VoiceAssistantServer:
 
     async def execute_function(self, function_name: str, arguments: dict) -> str:
         """Execute a function call from the LLM."""
+        if function_name == "end_conversation":
+            self._end_conversation = True
+            return "Conversation terminée"
+
         # Weather — standalone, doesn't need HA
         if function_name == "get_weather":
             from weather import get_weather
@@ -650,16 +696,31 @@ class VoiceAssistantServer:
         return await self.tts.synthesize_to_file(text, self.tts_dir, self.http_base_url)
 
     async def text_to_speech(self, api: APIClient, text: str):
-        """Text-to-Speech with ESP events (for live pipeline)"""
+        """Generate TTS audio, play via announcement API, and optionally start follow-up."""
         logger.info(f'TTS: generating audio for "{text}"')
 
         api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": text})
-        logger.info("TTS_START sent")
 
         try:
             audio_url = await self.text_to_speech_file(text)
-            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": audio_url})
-            logger.info(f"TTS_END sent with URL: {audio_url}")
+
+            # End the current pipeline before playing announcement
+            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
+
+            if self._end_conversation:
+                # LLM called end_conversation: play TTS without follow-up
+                logger.info("End of conversation - playing TTS without follow-up")
+                await api.send_voice_assistant_announcement_await_response(
+                    media_id=audio_url,
+                    timeout=30.0,
+                    text="",
+                    start_conversation=False,
+                )
+                self.conversation_history = []
+                logger.info("Conversation ended, history cleared")
+            else:
+                # Normal: play TTS and start follow-up listening
+                await self._play_tts_and_continue(api, audio_url)
 
         except Exception as e:
             logger.error(f"TTS error: {e}")
@@ -669,14 +730,15 @@ class VoiceAssistantServer:
             raise
 
     async def send_error_to_device(self, api: APIClient, error_message: str):
-        """Send an error event to the ESP"""
+        """Send an error event and end the pipeline."""
         logger.error(f"Sending error to ESP: {error_message}")
         try:
             api.send_voice_assistant_event(
                 VoiceAssistantEventType.VOICE_ASSISTANT_ERROR,
                 {"code": "server_error", "message": error_message},
             )
-            logger.info("VOICE_ASSISTANT_ERROR event sent to ESP")
+            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
+            logger.info("ERROR + RUN_END sent to ESP")
         except Exception as e:
             logger.error(f"Error sending error: {e}")
 
