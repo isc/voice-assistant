@@ -31,3 +31,6 @@ venv.bak/
 .DS_Store
 *.log
 exchanges.json
+
+# Claude Code
+.claude/settings.local.json
