@@ -34,6 +34,7 @@ exchanges.json
 
 # Claude Code
 .claude/settings.local.json
+.claude/worktrees/
 
 # Generated plist (contains absolute paths)
 com.voice-assistant.server.plist
