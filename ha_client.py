@@ -3,9 +3,9 @@ Home Assistant REST API client for voice assistant integration.
 Handles entity discovery with area grouping, fuzzy matching, and service calls.
 """
 
+import difflib
 import logging
 import unicodedata
-import difflib
 from typing import Optional
 
 import aiohttp
@@ -48,9 +48,7 @@ ROOM_GROUPS = {
 def normalize(text: str) -> str:
     """Normalize text for fuzzy matching: lowercase, strip accents and stopwords."""
     text = text.lower().strip()
-    text = "".join(
-        c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn"
-    )
+    text = "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
     words = [w for w in text.split() if w not in STOPWORDS]
     return " ".join(words)
 
@@ -97,9 +95,7 @@ class HAClient:
         try:
             r = await self._session.post(
                 f"{self.base_url}/api/template",
-                json={
-                    "template": "{% for a in areas() %}{{ a }}|{{ area_name(a) }}\n{% endfor %}"
-                },
+                json={"template": "{% for a in areas() %}{{ a }}|{{ area_name(a) }}\n{% endfor %}"},
             )
             if r.status != 200:
                 logger.warning("Could not fetch areas")
@@ -121,9 +117,7 @@ class HAClient:
             try:
                 r = await self._session.post(
                     f"{self.base_url}/api/template",
-                    json={
-                        "template": f"{{% for e in area_entities('{area_id}') %}}{{{{ e }}}}\n{{% endfor %}}"
-                    },
+                    json={"template": f"{{% for e in area_entities('{area_id}') %}}{{{{ e }}}}\n{{% endfor %}}"},
                 )
                 if r.status == 200:
                     text = await r.text()
@@ -193,9 +187,7 @@ class HAClient:
         by_area: dict[str, list[str]] = {}
         for eid, info in self.entities.items():
             area = info["area_name"] or "Sans pièce"
-            by_area.setdefault(area, []).append(
-                f"{info['friendly_name']} ({info['domain']})"
-            )
+            by_area.setdefault(area, []).append(f"{info['friendly_name']} ({info['domain']})")
         for area, items in sorted(by_area.items()):
             logger.info(f"  {area}: {', '.join(items)}")
         logger.info(f"Total: {len(self.entities)} entities in {len(by_area)} areas")
@@ -212,9 +204,7 @@ class HAClient:
                 "climate": "thermostats",
                 "media_player": "médias",
             }.get(info["domain"], info["domain"])
-            by_area.setdefault(area, {}).setdefault(domain_label, []).append(
-                info["friendly_name"]
-            )
+            by_area.setdefault(area, {}).setdefault(domain_label, []).append(info["friendly_name"])
 
         parts = []
         for area, devices in sorted(by_area.items()):
@@ -224,9 +214,7 @@ class HAClient:
             parts.append(f"{area} ({'; '.join(device_parts)})")
         # Append room groups
         if ROOM_GROUPS:
-            group_parts = [
-                f"{name} = {' + '.join(rooms)}" for name, rooms in ROOM_GROUPS.items()
-            ]
+            group_parts = [f"{name} = {' + '.join(rooms)}" for name, rooms in ROOM_GROUPS.items()]
             parts.append(f"Groupes: {', '.join(group_parts)}")
         return ". ".join(parts)
 
@@ -336,9 +324,7 @@ class HAClient:
         # If room narrows to a single entity of the matching domain, use it directly
         if len(candidates) == 1:
             eid = next(iter(candidates))
-            logger.info(
-                f"Entity match: '{name}' (room='{room}') -> {eid} (only match in room)"
-            )
+            logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (only match in room)")
             return eid
 
         # Exact substring match
@@ -357,17 +343,13 @@ class HAClient:
             "volets",
         ):
             eid = next(iter(candidates))
-            logger.info(
-                f"Entity match: '{name}' (room='{room}') -> {eid} (generic name, first in room)"
-            )
+            logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (generic name, first in room)")
             return eid
 
         # Fuzzy match with difflib
         if norm_input:
             norm_to_eid = {v: k for k, v in candidates.items()}
-            matches = difflib.get_close_matches(
-                norm_input, norm_to_eid.keys(), n=1, cutoff=0.4
-            )
+            matches = difflib.get_close_matches(norm_input, norm_to_eid.keys(), n=1, cutoff=0.4)
             if matches:
                 eid = norm_to_eid[matches[0]]
                 logger.info(f"Entity match: '{name}' -> {eid} (fuzzy: {matches[0]})")
@@ -376,9 +358,7 @@ class HAClient:
         logger.warning(f"No entity match for '{name}' (room={room})")
         return None
 
-    async def call_service(
-        self, domain: str, service: str, entity_id: str, **kwargs
-    ) -> str:
+    async def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
         """Call a HA service and return a French result string for TTS."""
         payload = {"entity_id": entity_id}
         payload.update(kwargs)
@@ -387,11 +367,7 @@ class HAClient:
         friendly = info.get("friendly_name", entity_id)
         area = info.get("area_name", "")
         # Include room name in response for generic names like "Plafonnier" or "Volet"
-        display_name = (
-            f"{friendly} {area}"
-            if area and friendly in ("Plafonnier", "Volet")
-            else friendly
-        )
+        display_name = f"{friendly} {area}" if area and friendly in ("Plafonnier", "Volet") else friendly
 
         try:
             url = f"{self.base_url}/api/services/{domain}/{service}"
@@ -411,9 +387,7 @@ class HAClient:
     async def get_entity_state(self, entity_id: str) -> Optional[dict]:
         """Get the current state of an entity."""
         try:
-            async with self._session.get(
-                f"{self.base_url}/api/states/{entity_id}"
-            ) as resp:
+            async with self._session.get(f"{self.base_url}/api/states/{entity_id}") as resp:
                 if resp.status == 200:
                     return await resp.json()
                 return None
@@ -421,9 +395,7 @@ class HAClient:
             logger.error(f"Error getting state for {entity_id}: {e}")
             return None
 
-    def _build_response(
-        self, domain: str, service: str, display_name: str, kwargs: dict
-    ) -> str:
+    def _build_response(self, domain: str, service: str, display_name: str, kwargs: dict) -> str:
         """Build a natural French TTS response for a service call."""
         responses = {
             ("light", "turn_on"): f"{display_name} allumé",

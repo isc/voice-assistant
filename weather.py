@@ -120,9 +120,7 @@ async def get_weather(location: str = "") -> str:
                 "min": mins[i] if i < len(mins) else None,
                 "max": maxs[i] if i < len(maxs) else None,
                 "pluie_pct": rain[i] if i < len(rain) else None,
-                "conditions": _WMO_CODES.get(codes[i], "inconnu")
-                if i < len(codes)
-                else "inconnu",
+                "conditions": _WMO_CODES.get(codes[i], "inconnu") if i < len(codes) else "inconnu",
             }
         )
 

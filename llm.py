@@ -130,9 +130,7 @@ def get_tool_definitions(ha_client) -> list:
     ]
 
 
-def parse_text_tool_call(
-    content: str, has_history: bool
-) -> tuple[Optional[str], Optional[dict]]:
+def parse_text_tool_call(content: str, has_history: bool) -> tuple[Optional[str], Optional[dict]]:
     """Parse tool calls that local LLMs output as plain text instead of structured tool_calls.
     Handles: fn({"entity":"X","room":"Y"}), fn("X"), fn(entity="X", room="Y"),
     and French natural language actions as fallback.
@@ -179,9 +177,7 @@ def parse_text_tool_call(
                         entity_part = entity_part[len(article) :]
                         break
                 if entity_part:
-                    logger.info(
-                        f"French action fallback: '{content}' -> {func}('{entity_part}')"
-                    )
+                    logger.info(f"French action fallback: '{content}' -> {func}('{entity_part}')")
                     return func, {"entity": entity_part}
 
     return None, None
@@ -215,9 +211,7 @@ async def chat_completion(
         headers["Authorization"] = f"Bearer {api_key}"
 
     tool_names = [t["function"]["name"] for t in payload.get("tools", [])]
-    logger.info(
-        f'LLM prompt: [system] ...voice assistant... [user] "{messages[-1]["content"]}"'
-    )
+    logger.info(f'LLM prompt: [system] ...voice assistant... [user] "{messages[-1]["content"]}"')
     if tool_names:
         logger.info(f"Tools: {tool_names}")
 
@@ -231,9 +225,7 @@ async def chat_completion(
             ) as response:
                 if response.status == 200:
                     result = await response.json()
-                    logger.info(
-                        f"LLM raw response: {json.dumps(result, ensure_ascii=False, indent=2)}"
-                    )
+                    logger.info(f"LLM raw response: {json.dumps(result, ensure_ascii=False, indent=2)}")
                     return result["choices"][0]["message"]
                 else:
                     error_text = await response.text()

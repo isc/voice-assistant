@@ -36,14 +36,10 @@ class ParakeetSTT:
                 wav_file.setframerate(16000)
                 wav_file.writeframes(audio_bytes)
 
-            logger.info(
-                f"Audio WAV: {temp_wav.name} ({os.path.getsize(temp_wav.name)} bytes)"
-            )
+            logger.info(f"Audio WAV: {temp_wav.name} ({os.path.getsize(temp_wav.name)} bytes)")
 
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, self.model.transcribe, temp_wav.name
-            )
+            result = await loop.run_in_executor(None, self.model.transcribe, temp_wav.name)
             transcript = result.text.strip()
 
             os.unlink(temp_wav.name)

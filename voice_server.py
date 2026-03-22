@@ -5,25 +5,24 @@ Replaces Home Assistant for the voice pipeline
 """
 
 import asyncio
-import logging
 import locale
+import logging
 import os
 import signal
+import socket
 import sys
-from typing import Dict, Any, Optional
+import tempfile
 import time
 from pathlib import Path
-from aiohttp import web
-import socket
-import tempfile
+from typing import Any, Dict, Optional
+
 from aioesphomeapi import (
     APIClient,
     VoiceAssistantEventType,
 )
+from aiohttp import web
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 try:
@@ -38,9 +37,7 @@ ESP_PASSWORD = os.environ.get("ESP_PASSWORD", "")
 ESP_NOISE_PSK = os.environ.get("ESP_NOISE_PSK", "")
 LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_MODEL = os.environ.get(
-    "LLM_MODEL", ""
-)  # e.g. "gpt-5.4-nano" — empty = local llama.cpp
+LLM_MODEL = os.environ.get("LLM_MODEL", "")  # e.g. "gpt-5.4-nano" — empty = local llama.cpp
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 HA_URL = os.environ.get("HA_URL", "")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
@@ -73,9 +70,7 @@ class VoiceAssistantServer:
         # Conversation history for multi-turn context
         self.conversation_history = []
         self.last_interaction_time = 0
-        self.CONVERSATION_TIMEOUT = (
-            120  # seconds — forget context after 2 min of silence
-        )
+        self.CONVERSATION_TIMEOUT = 120  # seconds — forget context after 2 min of silence
 
         # Exchange log for web UI (persisted to disk)
         from web_ui import ExchangeLog
@@ -119,9 +114,7 @@ class VoiceAssistantServer:
 
         self.ha_client = HAClient(HA_URL, HA_TOKEN)
         if await self.ha_client.connect():
-            logger.info(
-                f"Home Assistant: {len(self.ha_client.entities)} entities discovered"
-            )
+            logger.info(f"Home Assistant: {len(self.ha_client.entities)} entities discovered")
         else:
             logger.warning("Home Assistant not reachable, device control disabled")
             self.ha_client = None
@@ -184,9 +177,7 @@ class VoiceAssistantServer:
             logger.info(f"Device: {device_info.name} (v{device_info.esphome_version})")
 
             if device_info.voice_assistant_feature_flags:
-                logger.info(
-                    f"Voice assistant supported (flags: {device_info.voice_assistant_feature_flags})"
-                )
+                logger.info(f"Voice assistant supported (flags: {device_info.voice_assistant_feature_flags})")
             else:
                 logger.warning("Voice assistant may not be supported")
 
@@ -244,13 +235,9 @@ class VoiceAssistantServer:
         if self.current_device:
             api = self.devices[self.current_device]
             try:
-                api.send_voice_assistant_event(
-                    VoiceAssistantEventType.VOICE_ASSISTANT_STT_START, {}
-                )
+                api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_START, {})
                 logger.info("STT_START sent - ESP will send audio")
-                self.recording_task = asyncio.create_task(
-                    self.monitor_recording_timeout(api)
-                )
+                self.recording_task = asyncio.create_task(self.monitor_recording_timeout(api))
             except Exception as e:
                 logger.error(f"Error sending STT_START: {e}")
 
@@ -276,9 +263,7 @@ class VoiceAssistantServer:
         logger.info(f"Recording stopped ({reason}): {len(audio_data)} bytes")
 
         try:
-            api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {}
-            )
+            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
             logger.info("STT_VAD_END sent - LEDs orange (thinking)")
 
             if len(audio_data) > 0:
@@ -307,9 +292,7 @@ class VoiceAssistantServer:
 
         if self.current_device:
             api = self.devices[self.current_device]
-            api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {}
-            )
+            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
             logger.info("RUN_END sent - Pipeline complete, LEDs idle")
 
     async def handle_voice_assistant_audio(self, audio_bytes: bytes):
@@ -327,8 +310,9 @@ class VoiceAssistantServer:
 
     async def analyze_audio_vad(self, audio_bytes: bytes):
         """Analyze audio with Silero VAD to detect end of speech"""
-        from silero_vad_lite import SileroVAD
         import array
+
+        from silero_vad_lite import SileroVAD
 
         if not hasattr(self, "vad"):
             self.vad = SileroVAD(16000)
@@ -360,9 +344,7 @@ class VoiceAssistantServer:
                         self.vad_silence_frames += 1
 
                 if self.vad_has_speech and self.vad_silence_frames >= 31:
-                    logger.info(
-                        f"Silence detected after speech ({self.vad_silence_frames} frames)"
-                    )
+                    logger.info(f"Silence detected after speech ({self.vad_silence_frames} frames)")
                     if self.current_device and self.is_recording:
                         api = self.devices[self.current_device]
                         await self.stop_recording(api, "VAD silence")
@@ -452,9 +434,7 @@ class VoiceAssistantServer:
         }
         domains = domain_map.get(function_name)
 
-        entity_ids = self.ha_client.resolve_all_entities(
-            entity_name, room=room, domain_hints=domains
-        )
+        entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
         if not entity_ids:
             return f"Appareil {entity_name} non trouvé"
 
@@ -508,17 +488,13 @@ class VoiceAssistantServer:
         return self.ha_client._build_response(
             entity_ids[0].split(".")[0],
             service,
-            self.ha_client.entities.get(entity_ids[0], {}).get(
-                "friendly_name", entity_ids[0]
-            ),
+            self.ha_client.entities.get(entity_ids[0], {}).get("friendly_name", entity_ids[0]),
             extra,
         )
 
     # === LLM ===
 
-    async def process_with_llm(
-        self, api: Optional[APIClient], text: str
-    ) -> Optional[str]:
+    async def process_with_llm(self, api: Optional[APIClient], text: str) -> Optional[str]:
         """LLM via OpenAI-compatible API (local llama.cpp or cloud provider)"""
         from llm import chat_completion, get_tool_definitions, parse_text_tool_call
 
@@ -573,9 +549,7 @@ class VoiceAssistantServer:
 
         def save_to_history(response_text):
             self.conversation_history.append({"role": "user", "content": text})
-            self.conversation_history.append(
-                {"role": "assistant", "content": response_text}
-            )
+            self.conversation_history.append({"role": "assistant", "content": response_text})
             if len(self.conversation_history) > 10:
                 self.conversation_history = self.conversation_history[-10:]
 
@@ -635,11 +609,7 @@ class VoiceAssistantServer:
             )
             if not message:
                 # Fallback: join raw results if follow-up call fails
-                response = ". ".join(
-                    tc.get("result", "")
-                    for tc in self._last_tool_calls
-                    if tc.get("result")
-                )
+                response = ". ".join(tc.get("result", "") for tc in self._last_tool_calls if tc.get("result"))
                 save_to_history(response)
                 return response
 
@@ -647,11 +617,7 @@ class VoiceAssistantServer:
             # LLM returned text after tool execution
             response = (message.get("content") or "").strip()
             if not response:
-                response = ". ".join(
-                    tc.get("result", "")
-                    for tc in self._last_tool_calls
-                    if tc.get("result")
-                )
+                response = ". ".join(tc.get("result", "") for tc in self._last_tool_calls if tc.get("result"))
             save_to_history(response)
             return response
 
@@ -661,9 +627,7 @@ class VoiceAssistantServer:
             content = content.split("</think>")[-1]
         content = content.strip()
 
-        fn_name, fn_args = parse_text_tool_call(
-            content, bool(self.conversation_history)
-        )
+        fn_name, fn_args = parse_text_tool_call(content, bool(self.conversation_history))
         if fn_name and fn_args:
             try:
                 logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
@@ -689,16 +653,12 @@ class VoiceAssistantServer:
         """Text-to-Speech with ESP events (for live pipeline)"""
         logger.info(f'TTS: generating audio for "{text}"')
 
-        api.send_voice_assistant_event(
-            VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": text}
-        )
+        api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": text})
         logger.info("TTS_START sent")
 
         try:
             audio_url = await self.text_to_speech_file(text)
-            api.send_voice_assistant_event(
-                VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": audio_url}
-            )
+            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_END, {"url": audio_url})
             logger.info(f"TTS_END sent with URL: {audio_url}")
 
         except Exception as e:
@@ -750,9 +710,7 @@ async def main():
         while not stop_event.is_set():
             reload_task = asyncio.create_task(reload_event.wait())
             stop_task = asyncio.create_task(stop_event.wait())
-            done, _ = await asyncio.wait(
-                {reload_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
-            )
+            done, _ = await asyncio.wait({reload_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
             for t in {reload_task, stop_task} - done:
                 t.cancel()
 
