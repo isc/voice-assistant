@@ -133,6 +133,11 @@ This document tracks all architecture and technology decisions made for this pro
 - **Decision**: After tool execution, send results back with tools still available (up to 3 rounds). Add system reminder listing already-called functions to nudge the model to handle remaining parts of the request.
 - **Trade-off**: Up to 3 LLM round-trips per user query. In practice, 2 rounds handle 99% of cases. Adds ~1s for multi-part requests.
 
+### AD-027: Server-side timer manager with ESP native timer events
+- **Context**: User wants timers ("mets un timer de 5 minutes") and alarms ("réveille-moi à 7h"). ESPHome supports timers natively via `send_voice_assistant_timer_event()` (feature flag `VoiceAssistantFeature.TIMERS`), handling LED animations and sounds on the device.
+- **Decision**: Server-side `TimerManager` in `timer.py` using asyncio tasks. Three LLM tools: `set_timer` (duration), `set_alarm` (absolute time), `cancel_timer`. Timer lifecycle sends events to ESP: STARTED, UPDATED (tick every 1s), CANCELLED, FINISHED. On FINISHED, additionally play a TTS announcement via the announcement API with `start_conversation=True` for follow-up.
+- **Trade-off**: Timers are in-memory only — lost on server restart. Acceptable for kitchen timers; persistent alarms would need disk storage. The 1s tick loop is lightweight but adds continuous traffic to the ESP while timers are active.
+
 ### AD-026: Continuous conversation via announcement API
 - **Context**: User had to say the wake word between every turn, breaking conversational flow.
 - **Decision**: After TTS generation, deliver audio via `send_voice_assistant_announcement_await_response(start_conversation=True)` instead of event-based TTS_END. The ESP automatically starts a new pipeline without wake word. 500ms audio skip at follow-up start to avoid TTS echo pickup. 5s timeout for follow-up silence (extends to 30s once speech detected). `end_conversation` LLM tool for clean closure ("merci", "bonne nuit") — skips follow-up and clears history.

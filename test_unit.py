@@ -10,6 +10,7 @@ Usage:
     python test_unit.py -k normalize
 """
 
+import asyncio
 import unittest
 
 from ha_client import HAClient, normalize
@@ -338,6 +339,154 @@ class TestFormatState(unittest.TestCase):
         }
         r = self.client.format_state_for_speech("cover.volet_charlie", state)
         self.assertIn("ouvert", r)
+
+
+# ---------------------------------------------------------------------------
+# Tests: TimerManager
+# ---------------------------------------------------------------------------
+
+
+class TestTimerManager(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from timer import TimerManager
+
+        self.manager = TimerManager()
+        self.events = []
+
+    async def _on_event(self, event_type, timer):
+        self.events.append((event_type, timer.id, timer.seconds_left, timer.is_active))
+
+    async def test_start_timer(self):
+        timer = self.manager.start_timer(10, "test", self._on_event)
+        self.assertEqual(timer.total_seconds, 10)
+        self.assertEqual(timer.name, "test")
+        self.assertTrue(timer.is_active)
+        # Wait for STARTED event
+        await asyncio.sleep(0.05)
+        self.assertTrue(any(e[0].value == 0 for e in self.events))  # STARTED = 0
+        self.manager.cancel_all()
+
+    async def test_cancel_timer_by_name(self):
+        self.manager.start_timer(60, "pâtes", self._on_event)
+        await asyncio.sleep(0.05)
+        cancelled = self.manager.cancel_timer(name="pâtes")
+        self.assertIsNotNone(cancelled)
+        self.assertEqual(cancelled.name, "pâtes")
+        self.assertEqual(len(self.manager.get_timers()), 0)
+
+    async def test_cancel_only_timer(self):
+        """When there's only one timer, cancel it even if the name doesn't match."""
+        self.manager.start_timer(60, None, self._on_event)
+        await asyncio.sleep(0.05)
+        cancelled = self.manager.cancel_timer(name="whatever")
+        self.assertIsNotNone(cancelled)
+        self.assertEqual(len(self.manager.get_timers()), 0)
+
+    async def test_cancel_nonexistent(self):
+        result = self.manager.cancel_timer(name="nope")
+        self.assertIsNone(result)
+
+    async def test_timer_finishes(self):
+        self.manager.start_timer(1, None, self._on_event)
+        # Wait for timer to finish (1s + margin)
+        await asyncio.sleep(1.3)
+        finished_events = [e for e in self.events if e[0].value == 3]  # FINISHED = 3
+        self.assertEqual(len(finished_events), 1)
+        self.assertEqual(len(self.manager.get_timers()), 0)
+
+    async def test_get_timers(self):
+        self.manager.start_timer(60, "a", self._on_event)
+        self.manager.start_timer(30, "b", self._on_event)
+        timers = self.manager.get_timers()
+        self.assertEqual(len(timers), 2)
+        # Sorted by fire_at (b fires first since it's shorter)
+        self.assertEqual(timers[0].name, "b")
+        self.manager.cancel_all()
+
+    async def test_seconds_left(self):
+        timer = self.manager.start_timer(60, None, self._on_event)
+        await asyncio.sleep(0.05)
+        self.assertGreater(timer.seconds_left, 55)
+        self.assertLessEqual(timer.seconds_left, 60)
+        self.manager.cancel_all()
+
+
+# ---------------------------------------------------------------------------
+# Tests: timer._parse_time
+# ---------------------------------------------------------------------------
+
+
+class TestParseTime(unittest.TestCase):
+    def test_hhmm_colon(self):
+        from timer import _parse_time
+
+        self.assertEqual(_parse_time("07:00"), (7, 0))
+        self.assertEqual(_parse_time("14:30"), (14, 30))
+
+    def test_french_h_format(self):
+        from timer import _parse_time
+
+        self.assertEqual(_parse_time("7h"), (7, 0))
+        self.assertEqual(_parse_time("7h30"), (7, 30))
+        self.assertEqual(_parse_time("14h00"), (14, 0))
+
+    def test_invalid(self):
+        from timer import _parse_time
+
+        with self.assertRaises(ValueError):
+            _parse_time("abc")
+
+
+# ---------------------------------------------------------------------------
+# Tests: format_timers_for_prompt
+# ---------------------------------------------------------------------------
+
+
+class TestFormatTimersForPrompt(unittest.TestCase):
+    def test_empty(self):
+        from timer import format_timers_for_prompt
+
+        self.assertEqual(format_timers_for_prompt([]), "")
+
+    def test_with_timers(self):
+        import time
+
+        from timer import Timer, format_timers_for_prompt
+
+        timers = [
+            Timer(id="abc", name="pâtes", total_seconds=300, fire_at=time.time() + 192),
+        ]
+        result = format_timers_for_prompt(timers)
+        self.assertIn("Minuteurs", result)
+        self.assertIn("pâtes", result)
+        self.assertIn("min", result)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _format_duration (voice_server)
+# ---------------------------------------------------------------------------
+
+
+class TestFormatDuration(unittest.TestCase):
+    def test_seconds(self):
+        from voice_server import _format_duration
+
+        self.assertEqual(_format_duration(30), "30 secondes")
+        self.assertEqual(_format_duration(1), "1 seconde")
+
+    def test_minutes(self):
+        from voice_server import _format_duration
+
+        self.assertEqual(_format_duration(60), "1 minute")
+        self.assertEqual(_format_duration(300), "5 minutes")
+        self.assertEqual(_format_duration(90), "1 minute 30s")
+
+    def test_hours(self):
+        from voice_server import _format_duration
+
+        self.assertEqual(_format_duration(3600), "1 heure")
+        self.assertEqual(_format_duration(7200), "2 heures")
+        self.assertEqual(_format_duration(5400), "1h30")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ _TOOL_NAMES = {
     "close_cover",
     "set_temperature",
     "get_state",
+    "set_timer",
+    "set_alarm",
+    "cancel_timer",
 }
 
 
@@ -37,8 +40,62 @@ def get_tool_definitions(ha_client) -> list:
         },
     }
 
+    # Timer tools are always available (no HA dependency)
+    timer_tools = [
+        {
+            "name": "set_timer",
+            "description": "Mettre un minuteur (ex: 5 minutes, 1 heure 30)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "duration_minutes": {
+                        "type": "number",
+                        "description": "Durée en minutes (ex: 5, 1.5, 90)",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Nom optionnel du timer (ex: pâtes, lessive)",
+                    },
+                },
+                "required": ["duration_minutes"],
+            },
+        },
+        {
+            "name": "set_alarm",
+            "description": "Mettre une alarme ou un réveil à une heure précise",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "time": {
+                        "type": "string",
+                        "description": "Heure au format HH:MM (ex: 07:00, 14:30)",
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Nom optionnel (ex: réveil, sieste)",
+                    },
+                },
+                "required": ["time"],
+            },
+        },
+        {
+            "name": "cancel_timer",
+            "description": "Annuler un minuteur ou une alarme en cours",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Nom du timer à annuler",
+                    },
+                },
+                "required": [],
+            },
+        },
+    ]
+
     if not ha_client:
-        return [weather_tool]
+        return [weather_tool] + timer_tools
 
     room_param = {
         "type": "string",
@@ -127,6 +184,7 @@ def get_tool_definitions(ha_client) -> list:
             },
         },
         weather_tool,
+        *timer_tools,
         {
             "name": "end_conversation",
             "description": (

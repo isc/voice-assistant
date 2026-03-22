@@ -23,8 +23,8 @@ If Kokoro crashes or fails, fall back to raw espeak for audio output. The respon
 
 ## UX
 
-### Timers and alarms
-"Réveille-moi à 7h", "mets un timer de 5 minutes". The ESP already supports TIMERS (feature flag 8). Needs LLM tools for set_timer/set_alarm and a callback mechanism to trigger the ESP announcement when the timer fires.
+### ~~Timers and alarms~~ DONE
+LLM tools `set_timer`, `set_alarm`, `cancel_timer` with server-side `TimerManager` (asyncio scheduling). Timer events forwarded to ESP via native `send_voice_assistant_timer_event()` API (STARTED/UPDATED/CANCELLED/FINISHED). ESP handles LED animations and sounds. TTS announcement on timer finish with `start_conversation=True` for follow-up.
 
 ### Notifications (proactive announcements)
 The assistant announces events without wake word: washing machine done, doorbell, reminders. Requires event listeners on HA entities and a push mechanism to the ESP via announcement API.

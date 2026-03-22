@@ -43,6 +43,23 @@ HA_URL = os.environ.get("HA_URL", "")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
 
+def _format_duration(total_seconds: int) -> str:
+    """Format seconds into a French human-readable duration."""
+    if total_seconds >= 3600:
+        h = total_seconds // 3600
+        m = (total_seconds % 3600) // 60
+        if m:
+            return f"{h}h{m:02d}"
+        return f"{h} heure{'s' if h > 1 else ''}"
+    if total_seconds >= 60:
+        m = total_seconds // 60
+        s = total_seconds % 60
+        if s:
+            return f"{m} minute{'s' if m > 1 else ''} {s}s"
+        return f"{m} minute{'s' if m > 1 else ''}"
+    return f"{total_seconds} seconde{'s' if total_seconds > 1 else ''}"
+
+
 class VoiceAssistantServer:
     """
     Custom voice assistant server for ESPHome
@@ -66,6 +83,11 @@ class VoiceAssistantServer:
 
         # Home Assistant client
         self.ha_client = None
+
+        # Timer manager
+        from timer import TimerManager
+
+        self.timer_manager = TimerManager()
 
         # Conversation history for multi-turn context
         self.conversation_history = []
@@ -472,6 +494,40 @@ class VoiceAssistantServer:
             self._end_conversation = True
             return "Conversation terminée"
 
+        # Timers — standalone, doesn't need HA
+        if function_name == "set_timer":
+            duration_minutes = arguments.get("duration_minutes", 0)
+            total_seconds = int(duration_minutes * 60)
+            label = arguments.get("label")
+            timer = self.timer_manager.start_timer(total_seconds, label, self._handle_timer_event)
+            if label:
+                return f"Timer {label} de {_format_duration(total_seconds)} lancé"
+            return f"Timer de {_format_duration(total_seconds)} lancé"
+
+        if function_name == "set_alarm":
+            time_str = arguments.get("time", "")
+            label = arguments.get("label")
+            timer = self.timer_manager.start_alarm(time_str, label, self._handle_timer_event)
+            return f"Alarme programmée pour {time_str}"
+
+        if function_name == "cancel_timer":
+            label = arguments.get("label")
+            timer = self.timer_manager.cancel_timer(name=label)
+            if timer:
+                from aioesphomeapi import VoiceAssistantTimerEventType
+
+                await self._handle_timer_event(
+                    VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED, timer
+                )
+                if timer.is_alarm and timer.target_time:
+                    desc = f"l'alarme pour {timer.target_time}"
+                elif timer.name:
+                    desc = f'le timer "{timer.name}"'
+                else:
+                    desc = f"le timer de {_format_duration(timer.total_seconds)}"
+                return f"Annulé: {desc}"
+            return "Aucun timer actif"
+
         # Weather — standalone, doesn't need HA
         if function_name == "get_weather":
             from weather import get_weather
@@ -552,6 +608,48 @@ class VoiceAssistantServer:
             extra,
         )
 
+    # === TIMER EVENTS ===
+
+    async def _handle_timer_event(self, event_type, timer):
+        """Forward timer events to the ESP device. On FINISHED, also play TTS announcement."""
+        api = self.devices.get(self.current_device) if self.current_device else None
+        if api:
+            try:
+                api.send_voice_assistant_timer_event(
+                    event_type,
+                    timer.id,
+                    timer.name,
+                    timer.total_seconds,
+                    timer.seconds_left,
+                    timer.is_active,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to send timer event to ESP: {e}")
+
+        from aioesphomeapi import VoiceAssistantTimerEventType
+
+        if event_type == VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_FINISHED and api:
+            await self._announce_timer_finished(api, timer)
+
+    async def _announce_timer_finished(self, api, timer):
+        """Generate TTS and play announcement when a timer finishes."""
+        if timer.name:
+            text = f"Le timer {timer.name} est terminé !"
+        else:
+            text = f"Le timer de {_format_duration(timer.total_seconds)} est terminé !"
+
+        try:
+            audio_url = await self.text_to_speech_file(text)
+            logger.info(f"Timer finished announcement: {text}")
+            await api.send_voice_assistant_announcement_await_response(
+                media_id=audio_url,
+                timeout=30.0,
+                text="",
+                start_conversation=True,
+            )
+        except Exception as e:
+            logger.error(f"Timer announcement error: {e}")
+
     # === LLM ===
 
     async def process_with_llm(self, api: Optional[APIClient], text: str, dry_run: bool = False) -> Optional[str]:
@@ -587,6 +685,12 @@ class VoiceAssistantServer:
             entity_list = self.ha_client.get_entity_list_for_prompt()
             if entity_list:
                 system_prompt += f"\nAppareils disponibles: {entity_list}"
+
+        from timer import format_timers_for_prompt
+
+        timers_info = format_timers_for_prompt(self.timer_manager.get_timers())
+        if timers_info:
+            system_prompt += f"\n{timers_info}"
 
         tools = get_tool_definitions(self.ha_client)
 

@@ -198,6 +198,37 @@ def test_multi_turn():
     assert "brightness" in args, f"Turn 2: expected brightness in args, got {args}"
 
 
+@test("set_timer: 5 minutes")
+def test_set_timer():
+    data = send("mets un timer de 5 minutes")
+    assert has_tool(data, "set_timer"), f"Expected set_timer, got {tool_names(data)}"
+    args = tool_args(data, "set_timer")
+    assert args.get("duration_minutes") == 5, f"Expected duration_minutes=5, got {args}"
+
+
+@test("set_timer: with label")
+def test_set_timer_label():
+    data = send("mets un timer de 10 minutes pour les pâtes")
+    assert has_tool(data, "set_timer"), f"Expected set_timer, got {tool_names(data)}"
+    args = tool_args(data, "set_timer")
+    assert args.get("duration_minutes") == 10, f"Expected duration_minutes=10, got {args}"
+    assert args.get("label"), f"Expected label in args, got {args}"
+
+
+@test("set_alarm: specific time")
+def test_set_alarm():
+    data = send("réveille-moi à 7 heures")
+    assert has_tool(data, "set_alarm"), f"Expected set_alarm, got {tool_names(data)}"
+    args = tool_args(data, "set_alarm")
+    assert "07" in args.get("time", ""), f"Expected time with '07', got {args}"
+
+
+@test("cancel_timer")
+def test_cancel_timer():
+    data = send("annule le timer")
+    assert has_tool(data, "cancel_timer"), f"Expected cancel_timer, got {tool_names(data)}"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
