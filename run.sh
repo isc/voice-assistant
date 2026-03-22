@@ -4,6 +4,13 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="$SCRIPT_DIR/venv/bin/python3"
 
+# Load .env if present (non-sensitive config like IPs and ports)
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
+
 # Install deps if needed
 if ! $PYTHON -c "import aiohttp" 2>/dev/null; then
     echo "Installing dependencies..."

@@ -58,14 +58,14 @@ ESP (wake word) → audio stream → voice_server.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `ESP_HOST` | `(required)` | ESPHome device IP |
+| `ESP_HOST` | (required) | ESPHome device IP |
 | `ESP_PORT` | `6053` | ESPHome native API port |
 | `ESP_PASSWORD` | (empty) | Legacy password auth |
 | `ESP_NOISE_PSK` | (empty) | Noise encryption key (preferred) |
 | `LLM_URL` | `http://localhost:8080/v1/chat/completions` | LLM endpoint |
 | `LLM_API_KEY` | (empty) | If set, enables cloud mode |
 | `LLM_MODEL` | (empty) | Model name for cloud API (e.g. `gpt-5.4-nano`) |
-| `HA_URL` | `(required)` | Home Assistant URL |
+| `HA_URL` | (required) | Home Assistant URL |
 | `HA_TOKEN` | (empty) | HA long-lived access token |
 | `HTTP_PORT` | `8888` | HTTP server port (TTS files + web UI) |
 
