@@ -58,5 +58,8 @@ Control Spotify playback on connected speakers (e.g., "mets du jazz dans le salo
 ### Health check endpoint
 `/health` endpoint returning status of STT, TTS, LLM, and HA connectivity. Useful for monitoring and alerting when a service goes down.
 
+### Isolated test server instance
+Currently e2e tests (`test_e2e.py`) run against the live server via `/api/dry-run` — tool calls are not executed but conversation state is shared. If someone uses the assistant during tests, the reset clears their conversation. Refactor to launch a lightweight test instance (LLM + entity list only, no STT/TTS/ESP) on a separate port for full isolation.
+
 ### Dedicated hardware migration (Zotac)
 Move from M1 Mac + cloud LLM to a Zotac Magnus EN275060TC (RTX 5060 Ti 16GB VRAM). Target: Qwen 3 14B Q6_K (~30 tok/s, ~1.0s latency). Would enable removing Python workarounds (room groups, text tool call parser, generic names) as a 14B model handles tool calling natively. See `HARDWARE.md` for detailed specs and benchmarks. Quality vs GPT-5.4 Nano is uncertain — needs benchmarking once hardware is available.

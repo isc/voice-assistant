@@ -153,8 +153,39 @@ def setup_routes(app, server):
         server.exchange_log.add("web", text, text, response_text, tts_url, conversation_id=server.conversation_id)
         return web.json_response(result)
 
+    async def handle_dry_run(request):
+        """LLM-only endpoint: produces tool calls without executing them."""
+        try:
+            body = await request.json()
+            text = body.get("text", "")
+        except Exception:
+            text = (await request.text()).strip()
+
+        if not text:
+            return web.json_response({"error": "missing 'text' field"}, status=400)
+
+        server._last_tool_calls = []
+        response_text = await server.process_with_llm(None, text, dry_run=True)
+        tool_calls = server._last_tool_calls
+        server._last_tool_calls = []
+        return web.json_response(
+            {
+                "input": text,
+                "response": response_text or "",
+                "tool_calls": tool_calls,
+            }
+        )
+
+    async def handle_reset_conversation(request):
+        """Clear conversation history. Used by tests for isolation."""
+        server.conversation_history = []
+        server.conversation_id = None
+        return web.json_response({"status": "ok"})
+
     app.router.add_get("/", handle_web_ui)
     app.router.add_get("/api/exchanges", handle_get_exchanges)
     app.router.add_post("/api/send", handle_web_send)
+    app.router.add_post("/api/dry-run", handle_dry_run)
+    app.router.add_post("/api/reset-conversation", handle_reset_conversation)
     app.router.add_post("/test", handle_test_prompt)
     app.router.add_static("/static", STATIC_DIR)

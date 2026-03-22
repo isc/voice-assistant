@@ -554,7 +554,7 @@ class VoiceAssistantServer:
 
     # === LLM ===
 
-    async def process_with_llm(self, api: Optional[APIClient], text: str) -> Optional[str]:
+    async def process_with_llm(self, api: Optional[APIClient], text: str, dry_run: bool = False) -> Optional[str]:
         """LLM via OpenAI-compatible API (local llama.cpp or cloud provider)"""
         from llm import chat_completion, get_tool_definitions, parse_text_tool_call
 
@@ -639,14 +639,19 @@ class VoiceAssistantServer:
                 function_args = json.loads(tool_call["function"]["arguments"])
                 logger.info(f"Function call: {function_name}({function_args})")
                 tc_entry = {"function": function_name, "args": function_args}
-                try:
-                    result = await self.execute_function(function_name, function_args)
-                    logger.info(f"Function result: {result}")
+                if dry_run:
+                    result = "OK"
                     tc_entry["result"] = result
-                except Exception as e:
-                    logger.error(f"Function execution error: {e}")
-                    result = f"Erreur: {e}"
-                    tc_entry["error"] = str(e)
+                    logger.info(f"Dry run: {function_name}({function_args})")
+                else:
+                    try:
+                        result = await self.execute_function(function_name, function_args)
+                        logger.info(f"Function result: {result}")
+                        tc_entry["result"] = result
+                    except Exception as e:
+                        logger.error(f"Function execution error: {e}")
+                        result = f"Erreur: {e}"
+                        tc_entry["error"] = str(e)
                 self._last_tool_calls.append(tc_entry)
                 tool_messages.append(
                     {
