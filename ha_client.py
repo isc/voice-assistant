@@ -3,9 +3,9 @@ Home Assistant REST API client for voice assistant integration.
 Handles entity discovery with area grouping, fuzzy matching, and service calls.
 """
 
+import difflib
 import logging
 import unicodedata
-import difflib
 from typing import Optional
 
 import aiohttp
@@ -21,19 +21,34 @@ STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
 # Room groups for multi-room commands (e.g. "ferme les volets des enfants")
 ROOM_GROUPS = {
     "enfants": ["Chambre Zoé", "Chambre Charlie"],
-    "tout": ["Chambre Zoé", "Chambre Charlie", "Chambre parents", "Chambre invités", "Living Room"],
-    "toute la maison": ["Chambre Zoé", "Chambre Charlie", "Chambre parents", "Chambre invités", "Living Room"],
-    "partout": ["Chambre Zoé", "Chambre Charlie", "Chambre parents", "Chambre invités", "Living Room"],
+    "tout": [
+        "Chambre Zoé",
+        "Chambre Charlie",
+        "Chambre parents",
+        "Chambre invités",
+        "Living Room",
+    ],
+    "toute la maison": [
+        "Chambre Zoé",
+        "Chambre Charlie",
+        "Chambre parents",
+        "Chambre invités",
+        "Living Room",
+    ],
+    "partout": [
+        "Chambre Zoé",
+        "Chambre Charlie",
+        "Chambre parents",
+        "Chambre invités",
+        "Living Room",
+    ],
 }
 
 
 def normalize(text: str) -> str:
     """Normalize text for fuzzy matching: lowercase, strip accents and stopwords."""
     text = text.lower().strip()
-    text = "".join(
-        c for c in unicodedata.normalize("NFD", text)
-        if unicodedata.category(c) != "Mn"
-    )
+    text = "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
     words = [w for w in text.split() if w not in STOPWORDS]
     return " ".join(words)
 
@@ -145,7 +160,13 @@ class HAClient:
             if "_2_2_" in entity_id or entity_id.endswith("_2_2"):
                 continue
             # Skip entities with generic names
-            if friendly_name.strip() in ("Dimmer 2", "Double Smart Module", "Single Switch 2", "Smart Module", ""):
+            if friendly_name.strip() in (
+                "Dimmer 2",
+                "Double Smart Module",
+                "Single Switch 2",
+                "Smart Module",
+                "",
+            ):
                 continue
             if state["state"] == "unavailable":
                 continue
@@ -199,9 +220,14 @@ class HAClient:
 
     # Generic names that mean "all entities of this domain in the room"
     _GENERIC_NAMES = {
-        "volet": "cover", "volets": "cover", "les volets": "cover",
-        "lumière": "light", "lumières": "light", "les lumières": "light",
-        "lumiere": "light", "lumieres": "light",
+        "volet": "cover",
+        "volets": "cover",
+        "les volets": "cover",
+        "lumière": "light",
+        "lumières": "light",
+        "les lumières": "light",
+        "lumiere": "light",
+        "lumieres": "light",
     }
 
     def resolve_all_entities(
@@ -309,7 +335,13 @@ class HAClient:
 
         # If we have a room and multiple candidates, pick the first one
         # (common case: user says "la lumière" and there's only one light in that room)
-        if norm_room and norm_input in ("lumiere", "lumières", "lumiere", "volet", "volets"):
+        if norm_room and norm_input in (
+            "lumiere",
+            "lumières",
+            "lumiere",
+            "volet",
+            "volets",
+        ):
             eid = next(iter(candidates))
             logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (generic name, first in room)")
             return eid
@@ -373,7 +405,10 @@ class HAClient:
             ("cover", "open_cover"): f"{display_name} en cours d'ouverture",
             ("cover", "close_cover"): f"{display_name} en cours de fermeture",
             ("cover", "stop_cover"): f"{display_name} arrêté",
-            ("climate", "set_temperature"): f"Température réglée à {kwargs.get('temperature', '?')} degrés",
+            (
+                "climate",
+                "set_temperature",
+            ): f"Température réglée à {kwargs.get('temperature', '?')} degrés",
             ("media_player", "turn_on"): f"{display_name} allumé",
             ("media_player", "turn_off"): f"{display_name} éteint",
         }
@@ -395,7 +430,12 @@ class HAClient:
             return f"{friendly} est éteint"
 
         if domain == "cover":
-            state_map = {"open": "ouvert", "closed": "fermé", "opening": "en cours d'ouverture", "closing": "en cours de fermeture"}
+            state_map = {
+                "open": "ouvert",
+                "closed": "fermé",
+                "opening": "en cours d'ouverture",
+                "closing": "en cours de fermeture",
+            }
             return f"{friendly} est {state_map.get(state, state)}"
 
         if domain == "climate":
