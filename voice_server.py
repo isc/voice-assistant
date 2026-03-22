@@ -31,7 +31,9 @@ ESP_HOST = os.environ.get("ESP_HOST", "")
 ESP_PORT = int(os.environ.get("ESP_PORT", "6053"))
 ESP_PASSWORD = os.environ.get("ESP_PASSWORD", "")
 ESP_NOISE_PSK = os.environ.get("ESP_NOISE_PSK", "")
-LLAMA_URL = os.environ.get("LLAMA_URL", "http://localhost:8080/v1/chat/completions")
+LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
+LLM_MODEL = os.environ.get("LLM_MODEL", "")  # e.g. "gpt-5.4-nano" — empty = local llama.cpp
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 HA_URL = os.environ.get("HA_URL", "http://localhost:8123")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
@@ -172,7 +174,7 @@ class VoiceAssistantServer:
     async def start(self):
         """Start the server and connect to devices"""
         logger.info("Voice Assistant Server started")
-        logger.info(f"ESP: {ESP_HOST}:{ESP_PORT} | LLM: {LLAMA_URL} | HTTP: {HTTP_PORT}")
+        logger.info(f"ESP: {ESP_HOST}:{ESP_PORT} | LLM: {LLM_URL} | HTTP: {HTTP_PORT}")
 
         await self.init_stt_engine()
         await self.init_tts_engine()
@@ -757,22 +759,27 @@ class VoiceAssistantServer:
         return None, None
 
     async def process_with_llm(self, api: APIClient, text: str) -> Optional[str]:
-        """LLM with Qwen 3 4B via llama.cpp (OpenAI-compatible API)"""
+        """LLM via OpenAI-compatible API (local llama.cpp or cloud provider)"""
         import json
         import time
 
         logger.info(f'LLM input: "{text}"')
 
+        is_local = not LLM_API_KEY
+
         try:
             # Build system prompt with available entities
             system_prompt = (
-                "/no_think Tu es un assistant vocal pour la maison connectée. "
+                "Tu es un assistant vocal pour la maison connectée. "
                 "Réponds en français, en 1-2 phrases courtes maximum. "
                 "Pas de markdown. Parle naturellement comme à l'oral. "
                 "Quand on te demande de contrôler un appareil (même avec un pronom comme 'la' ou 'les'), utilise TOUJOURS les fonctions disponibles. "
                 "Passe le paramètre room quand la pièce est mentionnée. "
                 "Utilise les noms de groupes tels quels (ex: room='enfants'), ne les décompose pas."
             )
+            # Qwen-specific: disable thinking for lower latency
+            if is_local:
+                system_prompt = "/no_think " + system_prompt
             if self.ha_client:
                 entity_list = self.ha_client.get_entity_list_for_prompt()
                 if entity_list:
@@ -793,11 +800,14 @@ class VoiceAssistantServer:
             messages.extend(self.conversation_history)
             messages.append({"role": "user", "content": text})
 
+            max_tokens_key = "max_completion_tokens" if LLM_API_KEY else "max_tokens"
             payload = {
                 "messages": messages,
-                "max_tokens": 150,
+                max_tokens_key: 150,
                 "temperature": 0.3,
             }
+            if LLM_MODEL:
+                payload["model"] = LLM_MODEL
             if tools:
                 payload["tools"] = [
                     {"type": "function", "function": func} for func in tools
@@ -808,9 +818,14 @@ class VoiceAssistantServer:
             if tool_names:
                 logger.info(f"Tools: {tool_names}")
 
+            headers = {"Content-Type": "application/json"}
+            if LLM_API_KEY:
+                headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    LLAMA_URL, json=payload, timeout=aiohttp.ClientTimeout(total=60)
+                    LLM_URL, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60)
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
@@ -851,7 +866,7 @@ class VoiceAssistantServer:
                             # Direct response
                             content = message.get("content", "")
                             # Qwen 3 in thinking mode may wrap in <think>...</think>
-                            if "</think>" in content:
+                            if is_local and "</think>" in content:
                                 content = content.split("</think>")[-1]
                             content = content.strip()
 
