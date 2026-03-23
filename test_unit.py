@@ -489,5 +489,103 @@ class TestFormatDuration(unittest.TestCase):
         self.assertEqual(_format_duration(5400), "1h30")
 
 
+# ---------------------------------------------------------------------------
+# Tests: calendar_client helpers
+# ---------------------------------------------------------------------------
+
+
+class TestCalendarFormatEvent(unittest.TestCase):
+    def test_timed_event(self):
+        from calendar_client import _format_event
+
+        item = {
+            "summary": "Dentiste",
+            "start": {"dateTime": "2026-03-25T14:30:00+01:00"},
+            "end": {"dateTime": "2026-03-25T15:30:00+01:00"},
+        }
+        result = _format_event(item)
+        self.assertEqual(result["title"], "Dentiste")
+        self.assertEqual(result["start"], "14:30")
+        self.assertEqual(result["end"], "15:30")
+        self.assertEqual(result["date"], "2026-03-25")
+
+    def test_all_day_event(self):
+        from calendar_client import _format_event
+
+        item = {
+            "summary": "Vacances",
+            "start": {"date": "2026-04-01"},
+            "end": {"date": "2026-04-08"},
+        }
+        result = _format_event(item)
+        self.assertEqual(result["title"], "Vacances")
+        self.assertEqual(result["start"], "toute la journée")
+        self.assertEqual(result["date"], "2026-04-01")
+        self.assertNotIn("end", result)
+
+    def test_no_title(self):
+        from calendar_client import _format_event
+
+        item = {
+            "start": {"dateTime": "2026-03-25T10:00:00+01:00"},
+            "end": {"dateTime": "2026-03-25T11:00:00+01:00"},
+        }
+        result = _format_event(item)
+        self.assertEqual(result["title"], "(sans titre)")
+
+
+class TestCalendarFormatDate(unittest.TestCase):
+    def test_format_date_fr(self):
+        from datetime import datetime
+
+        from calendar_client import TZ, _format_date_fr
+
+        dt = datetime(2026, 3, 25, tzinfo=TZ)  # Wednesday
+        self.assertEqual(_format_date_fr(dt), "mercredi 25 mars 2026")
+
+    def test_format_datetime_fr(self):
+        from datetime import datetime
+
+        from calendar_client import TZ, _format_datetime_fr
+
+        dt = datetime(2026, 3, 25, 14, 30, tzinfo=TZ)
+        self.assertEqual(_format_datetime_fr(dt), "mercredi 25 mars 2026 à 14:30")
+
+
+class TestCalendarQueryValidation(unittest.IsolatedAsyncioTestCase):
+    async def test_query_without_service(self):
+        import json
+
+        from calendar_client import CalendarClient
+
+        client = CalendarClient.__new__(CalendarClient)
+        client._service = None
+        result = await client.query_events("not-a-date")
+        data = json.loads(result)
+        self.assertEqual(data["error"], "Agenda non disponible")
+
+    async def test_create_without_service(self):
+        import json
+
+        from calendar_client import CalendarClient
+
+        client = CalendarClient.__new__(CalendarClient)
+        client._service = None
+        result = await client.create_event("Test", "bad-datetime")
+        data = json.loads(result)
+        self.assertEqual(data["error"], "Agenda non disponible")
+
+    async def test_service_unavailable_valid_date(self):
+        import json
+
+        from calendar_client import CalendarClient
+
+        client = CalendarClient.__new__(CalendarClient)
+        client._service = None
+        result = await client.query_events("2026-03-25")
+        data = json.loads(result)
+        self.assertEqual(data["error"], "Agenda non disponible")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -86,6 +86,9 @@ class VoiceAssistantServer:
         # Home Assistant client
         self.ha_client = None
 
+        # Google Calendar client
+        self.calendar_client = None
+
         # Timer manager
         from timer import TimerManager
 
@@ -130,6 +133,7 @@ class VoiceAssistantServer:
         await self.tts.init()
 
         await self.init_ha_client()
+        await self.init_calendar_client()
         await self.start_http_server()
         await self.connect_to_device(ESP_HOST)
 
@@ -147,6 +151,25 @@ class VoiceAssistantServer:
         else:
             logger.warning("Home Assistant not reachable, device control disabled")
             self.ha_client = None
+
+    async def init_calendar_client(self):
+        """Connect to Google Calendar API."""
+        from calendar_client import CalendarClient
+
+        project_dir = Path(__file__).parent
+        credentials_path = project_dir / os.environ.get("CALENDAR_CREDENTIALS", "client_secret.json")
+        token_path = project_dir / os.environ.get("CALENDAR_TOKEN", "token.json")
+
+        if not token_path.exists():
+            logger.info("No calendar token found (run setup_calendar.py), calendar disabled")
+            return
+
+        self.calendar_client = CalendarClient(credentials_path, token_path)
+        if await self.calendar_client.connect():
+            logger.info("Google Calendar connected")
+        else:
+            logger.warning("Google Calendar not available, calendar disabled")
+            self.calendar_client = None
 
     async def start_http_server(self):
         """Start HTTP server to host TTS audio files and web UI"""
@@ -532,9 +555,7 @@ class VoiceAssistantServer:
             if timer:
                 from aioesphomeapi import VoiceAssistantTimerEventType
 
-                await self._handle_timer_event(
-                    VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED, timer
-                )
+                await self._handle_timer_event(VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED, timer)
                 if timer.is_alarm and timer.target_time:
                     desc = f"l'alarme pour {timer.target_time}"
                 elif timer.name:
@@ -549,6 +570,25 @@ class VoiceAssistantServer:
             from weather import get_weather
 
             return await get_weather(arguments.get("location", ""))
+
+        # Calendar — standalone, no HA dependency
+        if function_name == "query_calendar":
+            if not self.calendar_client:
+                return "Agenda non disponible"
+            return await self.calendar_client.query_events(
+                start_date=arguments.get("start_date", ""),
+                end_date=arguments.get("end_date"),
+                search=arguments.get("search"),
+            )
+
+        if function_name == "create_event":
+            if not self.calendar_client:
+                return "Agenda non disponible"
+            return await self.calendar_client.create_event(
+                title=arguments.get("title", ""),
+                start_datetime=arguments.get("start_datetime", ""),
+                duration_minutes=arguments.get("duration_minutes", 60),
+            )
 
         if not self.ha_client:
             return "Home Assistant non disponible"
@@ -714,7 +754,7 @@ class VoiceAssistantServer:
         if timers_info:
             system_prompt += f"\n{timers_info}"
 
-        tools = get_tool_definitions(self.ha_client)
+        tools = get_tool_definitions(self.ha_client, self.calendar_client)
 
         # Expire old conversation history
         now = time.time()
@@ -1002,7 +1042,7 @@ async def main():
 
             if reload_event.is_set():
                 reload_event.clear()
-                logger.info("Reloading Home Assistant entities...")
+                logger.info("Reloading...")
                 await server.init_ha_client()
                 logger.info("Reload complete")
 
@@ -1014,6 +1054,8 @@ async def main():
     finally:
         if server._reconnect_logic:
             await server._reconnect_logic.stop()
+        if server.calendar_client:
+            await server.calendar_client.close()
 
     logger.info("Server stopped")
 

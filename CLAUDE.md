@@ -9,7 +9,8 @@ ESP (wake word) → audio stream → voice_server.py
                                    ├─ stt.py (Parakeet MLX) → transcript
                                    ├─ llm.py (OpenAI API / llama.cpp) → tool calls or text
                                    │    ├─ ha_client.py → Home Assistant REST API
-                                   │    └─ weather.py → Open-Meteo API (free, no key)
+                                   │    ├─ weather.py → Open-Meteo API (free, no key)
+                                   │    └─ calendar_client.py → Google Calendar API (OAuth2)
                                    ├─ tts.py (Kokoro-82M) → WAV file
                                    └─ web_ui.py → debug UI on :8888
 ```
@@ -25,6 +26,8 @@ ESP (wake word) → audio stream → voice_server.py
 | `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 24kHz→16kHz resampling |
 | `stt.py` | Parakeet TDT 0.6B v3 via MLX (Apple Silicon optimized) |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
+| `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, prompt summary |
+| `setup_calendar.py` | One-time OAuth setup script for Google Calendar (requires browser) |
 | `web_ui.py` | Web UI (HTML + routes), exchange log with persistence (`exchanges.json`) |
 | `run.sh` | Launcher: reads secrets from macOS Keychain, selects cloud/local LLM mode |
 | `ctl.sh` | Service control: start/stop/restart/reload/status/logs via launchd |
@@ -68,6 +71,8 @@ ESP (wake word) → audio stream → voice_server.py
 | `HA_URL` | (required) | Home Assistant URL |
 | `HA_TOKEN` | (empty) | HA long-lived access token |
 | `HTTP_PORT` | `8888` | HTTP server port (TTS files + web UI) |
+| `CALENDAR_CREDENTIALS` | `client_secret.json` | Google OAuth credentials file path |
+| `CALENDAR_TOKEN` | `token.json` | Google OAuth token file path |
 
 ## Service management
 

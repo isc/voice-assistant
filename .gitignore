@@ -38,3 +38,7 @@ exchanges.json
 
 # Generated plist (contains absolute paths)
 com.voice-assistant.server.plist
+
+# Google Calendar OAuth
+client_secret.json
+token.json

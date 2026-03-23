@@ -20,10 +20,12 @@ _TOOL_NAMES = {
     "set_timer",
     "set_alarm",
     "cancel_timer",
+    "query_calendar",
+    "create_event",
 }
 
 
-def get_tool_definitions(ha_client) -> list:
+def get_tool_definitions(ha_client, calendar_client=None) -> list:
     """Return LLM tool definitions."""
     # Weather is always available (no HA dependency)
     weather_tool = {
@@ -95,8 +97,58 @@ def get_tool_definitions(ha_client) -> list:
         },
     ]
 
+    # Calendar tools (standalone, no HA dependency)
+    calendar_tools = []
+    if calendar_client:
+        calendar_tools = [
+            {
+                "name": "query_calendar",
+                "description": "Consulter l'agenda. Chercher des événements par date ou mot-clé.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {
+                            "type": "string",
+                            "description": "Date de début au format AAAA-MM-JJ (ex: 2026-03-24)",
+                        },
+                        "end_date": {
+                            "type": "string",
+                            "description": "Date de fin au format AAAA-MM-JJ. Par défaut: même jour que start_date",
+                        },
+                        "search": {
+                            "type": "string",
+                            "description": "Texte à chercher dans les titres (ex: dentiste, école)",
+                        },
+                    },
+                    "required": ["start_date"],
+                },
+            },
+            {
+                "name": "create_event",
+                "description": "Ajouter un événement à l'agenda",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Titre de l'événement (ex: Dentiste, Réunion école)",
+                        },
+                        "start_datetime": {
+                            "type": "string",
+                            "description": "Date et heure au format AAAA-MM-JJ HH:MM (ex: 2026-03-25 14:00)",
+                        },
+                        "duration_minutes": {
+                            "type": "integer",
+                            "description": "Durée en minutes. Par défaut: 60",
+                        },
+                    },
+                    "required": ["title", "start_datetime"],
+                },
+            },
+        ]
+
     if not ha_client:
-        return [weather_tool] + timer_tools
+        return [weather_tool] + timer_tools + calendar_tools
 
     room_param = {
         "type": "string",
@@ -202,6 +254,7 @@ def get_tool_definitions(ha_client) -> list:
         },
         weather_tool,
         *timer_tools,
+        *calendar_tools,
         {
             "name": "end_conversation",
             "description": (

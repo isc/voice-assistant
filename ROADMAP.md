@@ -37,8 +37,8 @@ Use UniFi Wi-Fi client tracking to detect which room the user is in (phone → n
 
 ## Services
 
-### Google Calendar integration
-Connect to the household's Google Calendars to answer scheduling questions ("qu'est-ce que j'ai demain?", "à quelle heure est le rendez-vous?") and create events by voice ("ajoute un rendez-vous dentiste mardi à 14h"). Requires Google Calendar API with OAuth2 or service account. LLM tools: query_calendar (date range, search), create_event (title, datetime, duration, attendees). Combined with voice identification, the assistant can query and write to the correct person's calendar automatically.
+### ~~Google Calendar integration~~ DONE
+Connected to Google Calendar via OAuth2 (`calendar.events` scope). LLM tools: `query_calendar` (date range, search), `create_event` (title, datetime, duration). V1: single primary calendar. Multi-calendar with voice identification planned for later.
 
 ## Memory and context
 

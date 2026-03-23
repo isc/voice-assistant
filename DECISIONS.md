@@ -157,3 +157,20 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: `com.voice-assistant.server.plist` contained hardcoded home directory paths. ESP/HA IP addresses were hardcoded as defaults in `voice_server.py`. Both problematic for public repo.
 - **Decision**: Generate plist dynamically in `ctl.sh install` using `$SCRIPT_DIR`. Move IP/port config to `.env` file (gitignored), sourced by `run.sh`. Secrets remain in macOS Keychain.
 - **Trade-off**: Requires `./ctl.sh install` on first setup instead of just copying the plist.
+
+## 2026-03-23: Google Calendar integration
+
+### AD-031: Google Calendar via OAuth 2.0 with granular scope
+- **Context**: Google Calendar API requires OAuth 2.0 for personal accounts. Multiple scopes available from full access (`calendar`) to narrow event-level access (`calendar.events`).
+- **Decision**: Use `calendar.events` scope (read+write events only). One-time OAuth setup via `setup_calendar.py` (requires browser). Refresh token handles automatic renewal. Token stored in `token.json` (file-based, gitignored) — standard approach for google-auth-oauthlib.
+- **Trade-off**: File-based token is less secure than Keychain, but it's what Google's Python libraries use natively. Acceptable for a personal home server.
+
+### AD-032: Single primary calendar for v1
+- **Context**: Roadmap mentions multi-calendar with voice identification, but voice ID is not yet implemented.
+- **Decision**: v1 uses only the `primary` calendar. Multi-calendar support will come with voice identification.
+- **Trade-off**: Only one person's calendar is accessible for now.
+
+### AD-033: No calendar injection in system prompt
+- **Context**: Initially planned to inject a calendar summary into the system prompt. Testing showed GPT-5.4 Nano systematically calls the `query_calendar` tool regardless, making the injected summary redundant.
+- **Decision**: No prompt injection. The LLM calls `query_calendar` on demand, which returns fresh data directly from the Google API.
+- **Trade-off**: Every calendar question costs one tool round-trip (~1.5s), but the data is always fresh and the prompt stays lean.

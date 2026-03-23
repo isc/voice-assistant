@@ -45,6 +45,23 @@ All configuration via environment variables. See [CLAUDE.md](CLAUDE.md#configura
 ./ctl.sh logs
 ```
 
+## Google Calendar (optional)
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create a project (or select existing)
+3. Enable **Google Calendar API**
+4. Go to **Credentials** > **Create Credentials** > **OAuth client ID**
+5. Choose **Desktop App** as application type
+6. Download the JSON and save it as `client_secret.json` in the project directory
+
+Then run the setup script (requires a browser):
+
+```bash
+python setup_calendar.py
+```
+
+This opens a browser for Google sign-in, then saves the token to `token.json`. The server will automatically detect it on next start.
+
 ## Web UI
 
 Open `http://localhost:8888/` for the debug interface (exchange log, timings, text input).
