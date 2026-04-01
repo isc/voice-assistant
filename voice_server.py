@@ -368,18 +368,24 @@ class VoiceAssistantServer:
         """Play TTS audio via announcement API and start follow-up listening.
         Uses send_voice_assistant_announcement_await_response which both plays
         the audio and tells the ESP to start a new pipeline when done.
+
+        Note: with start_conversation=True, ESPHome firmware (v2025.6.2) only sends
+        VoiceAssistantAnnounceFinished after the full conversation cycle completes, not
+        after the audio ends. We use a short timeout to cancel the pending Future before
+        the ESP sends its late response (~25-37s), which would otherwise crash the API
+        connection and trigger an ESP soft-reset (red LEDs).
         """
         try:
             logger.info(f"Playing TTS and requesting follow-up: {audio_url}")
             result = await api.send_voice_assistant_announcement_await_response(
                 media_id=audio_url,
-                timeout=30.0,
+                timeout=8.0,
                 text="",
                 start_conversation=True,
             )
             logger.info(f"TTS playback done, follow-up started (success={result.success})")
         except TimeoutError:
-            logger.warning("TTS announcement timed out")
+            logger.info("TTS playing (follow-up starting, no announce confirmation)")
         except Exception as e:
             logger.warning(f"TTS announcement error: {e}")
 
@@ -705,7 +711,7 @@ class VoiceAssistantServer:
             logger.info(f"Timer finished announcement: {text}")
             await api.send_voice_assistant_announcement_await_response(
                 media_id=audio_url,
-                timeout=30.0,
+                timeout=8.0,
                 text="",
                 start_conversation=True,
             )
