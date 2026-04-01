@@ -69,6 +69,8 @@ Mic active on app open, background mode, possible local wake word detection, Sir
 ### Voice identification (speaker recognition)
 Identify who is speaking based on voice characteristics. Phase 1: adapt responses to the speaker's age (simpler language for children, detailed answers for adults). Phase 2: use the identified speaker's personal accounts for services like Spotify (play their playlists, recommendations, etc.).
 
+- **Per-speaker permissions**: restrict which tools/actions are available depending on who is speaking. Example: children cannot create calendar events or modify home automation settings.
+
 ## Media
 
 ### Spotify voice control
