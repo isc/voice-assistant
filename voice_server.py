@@ -5,6 +5,7 @@ Replaces Home Assistant for the voice pipeline
 """
 
 import asyncio
+import datetime
 import locale
 import logging
 import os
@@ -22,6 +23,8 @@ from aioesphomeapi import (
 )
 from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
+
+from ha_client import LOCAL_CONFIG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -59,6 +62,21 @@ def _format_duration(total_seconds: int) -> str:
             return f"{m} minute{'s' if m > 1 else ''} {s}s"
         return f"{m} minute{'s' if m > 1 else ''}"
     return f"{total_seconds} seconde{'s' if total_seconds > 1 else ''}"
+
+
+def _format_family_for_prompt(family: list) -> str:
+    """Format family member list with ages for injection into system prompt."""
+    today = datetime.date.today()
+    parts = []
+    role_fr = {"parent": "parent", "child": "enfant"}
+    for m in family:
+        age = today.year - int(m["birth_date"][:4])
+        # Adjust if birthday hasn't occurred yet this year
+        bday_this_year = datetime.date(today.year, int(m["birth_date"][5:7]), int(m["birth_date"][8:10]))
+        if bday_this_year > today:
+            age -= 1
+        parts.append(f"{m['name']} ({role_fr.get(m['role'], m['role'])}, {age} ans)")
+    return "Membres de la famille: " + ", ".join(parts)
 
 
 class VoiceAssistantServer:
@@ -747,6 +765,9 @@ class VoiceAssistantServer:
             "en parallèle dans ta réponse.\n"
             f"Date et heure actuelles: {now_str}."
         )
+        family = LOCAL_CONFIG.get("family", [])
+        if family:
+            system_prompt += "\n" + _format_family_for_prompt(family)
         if is_local:
             system_prompt = "/no_think " + system_prompt
         if self.ha_client:
