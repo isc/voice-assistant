@@ -42,3 +42,6 @@ com.voice-assistant.server.plist
 # Google Calendar OAuth
 client_secret.json
 token.json
+
+# Personal config (room names, family members, etc.)
+config.local.json

@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy this file to config.local.json and fill in your personal data. This file is versioned; config.local.json is gitignored.",
+
+  "room_groups": {
+    "enfants": ["Chambre Enfant 1", "Chambre Enfant 2"],
+    "tout": ["Chambre Enfant 1", "Chambre Enfant 2", "Chambre parents", "Chambre invités", "Living Room"],
+    "toute la maison": ["Chambre Enfant 1", "Chambre Enfant 2", "Chambre parents", "Chambre invités", "Living Room"],
+    "partout": ["Chambre Enfant 1", "Chambre Enfant 2", "Chambre parents", "Chambre invités", "Living Room"]
+  },
+
+  "family": [
+    {"name": "Parent 1", "role": "parent"},
+    {"name": "Parent 2", "role": "parent"},
+    {"name": "Enfant 1", "role": "child", "birth_date": "YYYY-MM-DD"},
+    {"name": "Enfant 2", "role": "child", "birth_date": "YYYY-MM-DD"}
+  ]
+}

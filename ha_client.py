@@ -4,7 +4,9 @@ Handles entity discovery with area grouping, fuzzy matching, and service calls.
 """
 
 import difflib
+import json
 import logging
+import os
 import unicodedata
 from typing import Optional
 
@@ -18,31 +20,16 @@ SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player"}
 # French stopwords to strip for fuzzy matching
 STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
 
-# Room groups for multi-room commands (e.g. "ferme les volets des enfants")
-ROOM_GROUPS = {
-    "enfants": ["Chambre Zoé", "Chambre Charlie"],
-    "tout": [
-        "Chambre Zoé",
-        "Chambre Charlie",
-        "Chambre parents",
-        "Chambre invités",
-        "Living Room",
-    ],
-    "toute la maison": [
-        "Chambre Zoé",
-        "Chambre Charlie",
-        "Chambre parents",
-        "Chambre invités",
-        "Living Room",
-    ],
-    "partout": [
-        "Chambre Zoé",
-        "Chambre Charlie",
-        "Chambre parents",
-        "Chambre invités",
-        "Living Room",
-    ],
-}
+# Room groups for multi-room commands — loaded from config.local.json (gitignored)
+_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.local.json")
+try:
+    with open(_CONFIG_PATH) as _f:
+        _local_config = json.load(_f)
+    ROOM_GROUPS: dict[str, list[str]] = _local_config.get("room_groups", {})
+    LOCAL_CONFIG = _local_config
+except FileNotFoundError:
+    ROOM_GROUPS = {}
+    LOCAL_CONFIG = {}
 
 
 def normalize(text: str) -> str:
