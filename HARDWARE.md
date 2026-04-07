@@ -35,8 +35,12 @@ A dedicated GPU with 16GB VRAM would allow a 14B+ model that handles all of this
 | Qwen 3 14B | Q4_K_M | ~8.5GB | ~35 tok/s |
 | Qwen 3 14B | Q6_K | ~11GB | ~30 tok/s |
 | Qwen 3 32B | Q3_K_M | ~14GB | ~15 tok/s |
+| **Gemma 4 26B A4B** | **Q4** | **~10-14GB** | **~50-80 tok/s** |
+| Gemma 4 31B | Q4_K_M | ~20-24GB | ❌ won't fit |
 
-Sweet spot: **Qwen 3 14B Q6_K** (~11GB, fits comfortably in 16GB VRAM).
+New sweet spot: **Gemma 4 26B A4B** — MoE architecture (25.2B total, 3.8B active, 128 experts). Only 3.8B params active per token = fast inference with 26B-level knowledge. Native function calling baked into the model. Apache 2.0 license. Released April 2026.
+
+Previous sweet spot: ~~Qwen 3 14B Q6_K~~ — still a strong fallback, but Gemma 4 26B A4B is likely faster (2-3x) with better tool calling at similar VRAM usage. Both should be benchmarked once hardware is available.
 
 ### Python code that could be simplified/removed
 
@@ -52,7 +56,7 @@ With a reliable 14B+ model for tool calling:
 - **GPU**: RTX 5060 8GB GDDR7
 - **CPU**: AMD Ryzen 9 8945HX (16 cores)
 - **Price**: ~1,440€ with 32GB RAM + 1TB SSD (ready to use)
-- **Limitation**: 8GB VRAM = max Qwen 3 8B Q8_0, no 14B
+- **Limitation**: 8GB VRAM = max Qwen 3 8B Q8_0, no 14B. Gemma 4 26B A4B might also fit (people run it on 12GB), but tight
 - **Link**: https://minisforumpc.eu/products/minisforum-atomman-g1-pro-minipc
 
 ## Comparative benchmark (warm latency, tool calling)
@@ -61,5 +65,7 @@ With a reliable 14B+ model for tool calling:
 |---|---|---|---|
 | M1 16GB (current) | Qwen 3 4B Q4_K_M | ~1.7s | ~21 |
 | M1 16GB | Qwen 3 8B Q4_K_M | ~3.1s | ~12 |
+| M1 16GB | Gemma 4 E4B (to test) | ? | ? |
 | RTX 5060 Ti 16GB (estimated) | Qwen 3 14B Q6_K | ~1.0s | ~30 |
 | RTX 5060 Ti 16GB (estimated) | Qwen 3 8B Q8_0 | ~0.5s | ~50 |
+| RTX 5060 Ti 16GB (estimated) | **Gemma 4 26B A4B Q4** | **~0.3-0.5s** | **~50-80** |
