@@ -55,8 +55,8 @@ Trade-offs: prompt size vs relevance, local embedding model (RAM budget), stalen
 
 ## Mobile client
 
-### Step 1: Mobile-optimized web UI
-Adapt the current web UI for mobile use. Full-screen chat interface, large touch targets, iOS keyboard dictation for text input. Quick win, no app to install.
+### ~~Step 1: Mobile-optimized web UI~~ DONE
+Safe area insets for notch/home indicator, 44px touch targets, 16px input font (prevents iOS zoom), `100dvh` viewport, add-to-home-screen meta tags. iOS keyboard dictation works natively via the standard text input.
 
 ### Step 2: PWA with voice input
 Progressive Web App installable on home screen. Use Web Speech API or stream audio to server-side Parakeet for STT. Tap-to-talk button that activates the mic immediately. No App Store needed, reuses existing backend. Limitation: Safari restricts mic access in background.
