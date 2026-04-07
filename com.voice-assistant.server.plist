@@ -8,11 +8,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/ivanschneider/Code/voice-server-python/run.sh</string>
+        <string>/Users/ivanschneider/Code/voice-assistant/run.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/ivanschneider/Code/voice-server-python</string>
+    <string>/Users/ivanschneider/Code/voice-assistant</string>
 
     <key>RunAtLoad</key>
     <true/>

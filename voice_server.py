@@ -226,14 +226,14 @@ class VoiceAssistantServer:
                 ESP_PORT,
                 None,
                 noise_psk=ESP_NOISE_PSK,
-                client_info="voice-server-python",
+                client_info="voice-assistant",
             )
         else:
             api = APIClient(
                 host,
                 ESP_PORT,
                 ESP_PASSWORD,
-                client_info="voice-server-python",
+                client_info="voice-assistant",
             )
 
         async def on_connect() -> None:
