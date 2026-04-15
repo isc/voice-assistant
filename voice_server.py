@@ -19,6 +19,8 @@ from typing import Any, Dict, Optional
 
 from aioesphomeapi import (
     APIClient,
+    MediaPlayerCommand,
+    MediaPlayerInfo,
     VoiceAssistantEventType,
 )
 from aioesphomeapi.reconnect_logic import ReconnectLogic
@@ -172,8 +174,11 @@ class VoiceAssistantServer:
         self.is_followup = False  # True when pipeline was started without wake word
         self._end_conversation = False  # Set by end_conversation tool
 
-        # Last media_player entity used (for "plus fort" follow-ups without room context)
-        self._last_media_entity: Optional[str] = None
+        # Media playback state
+        # ESP host -> media_player entity key (discovered at connect time)
+        self.device_media_keys: Dict[str, int] = {}
+        # Last media target for follow-ups: ("esp", host) or ("ha", entity_id)
+        self._last_media_target: Optional[tuple[str, str]] = None
 
         # Exchange log for web UI (persisted to disk)
         from web_ui import ExchangeLog
@@ -303,6 +308,7 @@ class VoiceAssistantServer:
 
             self.devices[host] = api
             self.current_device = host
+            await self._discover_device_entities(api, host)
             await self.setup_voice_assistant(api, host)
 
         async def on_disconnect(expected_disconnect: bool) -> None:
@@ -319,6 +325,22 @@ class VoiceAssistantServer:
             name=host,
         )
         await self._reconnect_logic.start()
+
+    async def _discover_device_entities(self, api: APIClient, device_host: str):
+        """List ESP entities and remember the media_player key (for direct radio playback)."""
+        try:
+            entities, _ = await api.list_entities_services()
+        except Exception as e:
+            logger.warning(f"Could not list entities on {device_host}: {e}")
+            return
+        media_players = [e for e in entities if isinstance(e, MediaPlayerInfo)]
+        if not media_players:
+            logger.info(f"{device_host} has no media_player entity — radio playback via HA only")
+            return
+        # Prefer an entity whose name doesn't look announcement-only
+        mp = media_players[0]
+        self.device_media_keys[device_host] = mp.key
+        logger.info(f"{device_host} media_player: key={mp.key} name={mp.name!r}")
 
     async def setup_voice_assistant(self, api: APIClient, device_host: str):
         """Set up voice assistant subscription"""
@@ -667,10 +689,9 @@ class VoiceAssistantServer:
                 duration_minutes=arguments.get("duration_minutes", 60),
             )
 
-        # Media player tools (radio + volume) — dispatch via HA media_player domain
+        # Media player tools (radio + volume) — default to the current ESP speaker,
+        # fall back to HA media_player entities when a room is named.
         if function_name in ("play_radio", "stop_media", "set_volume", "change_volume"):
-            if not self.ha_client:
-                return "Home Assistant non disponible"
             return await self._execute_media_function(function_name, arguments)
 
         if not self.ha_client:
@@ -755,54 +776,63 @@ class VoiceAssistantServer:
 
     # === MEDIA PLAYER ===
 
-    def _resolve_media_entities(self, room: Optional[str]) -> list[str]:
-        """Resolve media_player entity_ids from a room arg, with fallback to last-used speaker."""
-        if room:
+    def _resolve_media_target(self, room: Optional[str]) -> Optional[tuple[str, str]]:
+        """Resolve a media target to ("esp", host) or ("ha", entity_id).
+
+        Strategy:
+        - If room is provided and matches an HA media_player → use HA.
+        - Otherwise default to the current ESP (direct playback, no HA needed).
+        - With no room, follow-ups fall back to the last-used target.
+        """
+        # Explicit room → prefer HA (covers naming another room / a non-ESP speaker)
+        if room and self.ha_client:
             ids = self.ha_client.resolve_all_entities(room, room=room, domain_hints=["media_player"])
+            if not ids:
+                # Maybe user named the speaker itself (e.g. "sonos salon")
+                ids = self.ha_client.resolve_all_entities(room, room=None, domain_hints=["media_player"])
             if ids:
-                return ids
-            # Maybe user named the speaker itself (e.g. "sonos salon")
-            ids = self.ha_client.resolve_all_entities(room, room=None, domain_hints=["media_player"])
-            if ids:
-                return ids
-        # No room: prefer the last-used speaker
-        if self._last_media_entity and self._last_media_entity in self.ha_client.entities:
-            return [self._last_media_entity]
-        # Fallback: any available media_player
-        all_mp = [eid for eid, info in self.ha_client.entities.items() if info["domain"] == "media_player"]
-        if len(all_mp) == 1:
-            return all_mp
-        return []
+                return ("ha", ids[0])
+
+        # Follow-up without room: reuse the last target
+        if not room and self._last_media_target:
+            kind, ident = self._last_media_target
+            if kind == "esp" and ident in self.devices:
+                return self._last_media_target
+            if kind == "ha" and self.ha_client and ident in self.ha_client.entities:
+                return self._last_media_target
+
+        # Default: the current ESP, if it has a media_player
+        if self.current_device and self.current_device in self.device_media_keys:
+            return ("esp", self.current_device)
+
+        return None
 
     async def _execute_media_function(self, function_name: str, arguments: dict) -> str:
-        """Handle play_radio / stop_media / set_volume / change_volume tool calls."""
+        """Handle play_radio / stop_media / set_volume / change_volume tool calls.
+
+        Dispatches to the ESP's media_player directly when possible (no HA round-trip),
+        or to a HA media_player entity when the user names a specific room.
+        """
         room = arguments.get("room")
-        entity_ids = self._resolve_media_entities(room)
-        if not entity_ids:
+        target = self._resolve_media_target(room)
+        if not target:
             if room:
                 return f"Aucune enceinte trouvée pour {room}"
             return "Aucune enceinte disponible"
 
+        # Build the per-function payload, then dispatch once at the end
         if function_name == "play_radio":
             station_name = arguments.get("station", "")
             station = _resolve_station(station_name)
             if not station:
                 return f"Station {station_name} inconnue"
             display_name, url = station
-            for eid in entity_ids:
-                await self.ha_client.call_service(
-                    "media_player",
-                    "play_media",
-                    eid,
-                    media_content_id=url,
-                    media_content_type="music",
-                )
-            self._last_media_entity = entity_ids[0]
+            await self._media_play_url(target, url)
+            self._last_media_target = target
             return f"{display_name} en cours de lecture"
 
         if function_name == "stop_media":
-            for eid in entity_ids:
-                await self.ha_client.call_service("media_player", "media_stop", eid)
+            await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop")
             return "Lecture arrêtée"
 
         if function_name == "set_volume":
@@ -810,25 +840,71 @@ class VoiceAssistantServer:
             if level is None:
                 return "Niveau de volume manquant"
             level = max(0, min(100, int(level)))
-            for eid in entity_ids:
-                await self.ha_client.call_service(
-                    "media_player",
-                    "volume_set",
-                    eid,
-                    volume_level=level / 100.0,
-                )
-            self._last_media_entity = entity_ids[0]
+            await self._media_set_volume(target, level)
+            self._last_media_target = target
             return f"Volume à {level} pour cent"
 
         if function_name == "change_volume":
             direction = arguments.get("direction", "up")
-            service = "volume_up" if direction == "up" else "volume_down"
-            for eid in entity_ids:
-                await self.ha_client.call_service("media_player", service, eid)
-            self._last_media_entity = entity_ids[0]
-            return "Plus fort" if direction == "up" else "Moins fort"
+            if direction == "up":
+                await self._media_command(target, MediaPlayerCommand.VOLUME_UP, ha_service="volume_up")
+                label = "Plus fort"
+            else:
+                await self._media_command(target, MediaPlayerCommand.VOLUME_DOWN, ha_service="volume_down")
+                label = "Moins fort"
+            self._last_media_target = target
+            return label
 
         return "C'est fait"
+
+    async def _media_play_url(self, target: tuple[str, str], url: str) -> None:
+        """Start playback of an arbitrary media URL on the target speaker."""
+        kind, ident = target
+        if kind == "esp":
+            api = self.devices.get(ident)
+            key = self.device_media_keys.get(ident)
+            if api and key is not None:
+                logger.info(f"ESP media_player_command: play {url} on {ident} (key={key})")
+                api.media_player_command(key, media_url=url, announcement=False)
+            return
+        await self.ha_client.call_service(
+            "media_player",
+            "play_media",
+            ident,
+            media_content_id=url,
+            media_content_type="music",
+        )
+
+    async def _media_command(
+        self, target: tuple[str, str], command: MediaPlayerCommand, ha_service: str
+    ) -> None:
+        """Send a media control command (STOP, VOLUME_UP, VOLUME_DOWN...) to the target."""
+        kind, ident = target
+        if kind == "esp":
+            api = self.devices.get(ident)
+            key = self.device_media_keys.get(ident)
+            if api and key is not None:
+                logger.info(f"ESP media_player_command: {command.name} on {ident} (key={key})")
+                api.media_player_command(key, command=command)
+            return
+        await self.ha_client.call_service("media_player", ha_service, ident)
+
+    async def _media_set_volume(self, target: tuple[str, str], level: int) -> None:
+        """Set absolute volume (0-100) on the target speaker."""
+        kind, ident = target
+        if kind == "esp":
+            api = self.devices.get(ident)
+            key = self.device_media_keys.get(ident)
+            if api and key is not None:
+                logger.info(f"ESP media_player_command: volume={level}% on {ident} (key={key})")
+                api.media_player_command(key, volume=level / 100.0)
+            return
+        await self.ha_client.call_service(
+            "media_player",
+            "volume_set",
+            ident,
+            volume_level=level / 100.0,
+        )
 
     # === TIMER EVENTS ===
 

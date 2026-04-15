@@ -177,7 +177,11 @@ This document tracks all architecture and technology decisions made for this pro
 
 ## 2026-04-15: Web radio playback
 
-### AD-034: Web radio via HA media_player with local station dict
-- **Context**: User wants to play French web radios ("mets France Inter") on HA-integrated speakers, with volume follow-ups ("plus fort", "moins fort").
-- **Decision**: Four new tools — `play_radio(station, room)`, `stop_media(room)`, `set_volume(level, room)`, `change_volume(direction, room)`. Station names are fuzzy-resolved against a hardcoded `RADIO_STATIONS` dict in `voice_server.py` (18 French stations: Radio France family, RTL, Europe 1, NRJ, Skyrock, TSF Jazz, etc.). Execution dispatches to HA's `media_player.play_media`, `media_stop`, `volume_set`, `volume_up`, `volume_down` services. The last-used media_player entity is remembered so "plus fort" works without re-specifying the room.
-- **Trade-off**: Hardcoded station URLs need manual updates when Radio France changes stream endpoints. Using HA's `volume_up`/`volume_down` means the step size is whatever HA/integration is configured for (typically 10%), which is acceptable but not tunable from the voice side. A French fallback parser entry catches "plus fort"/"moins fort"/"monte le son"/"baisse le son" for local LLMs that emit text instead of structured tool calls.
+### AD-034: Web radio playback, direct-to-ESP by default, HA fallback by room
+- **Context**: User wants to play French web radios ("mets France Inter") with volume follow-ups ("plus fort", "moins fort"). The ESP32-S3 running `speaker.media_player` can decode MP3/FLAC/OPUS/WAV HTTP streams natively — no HA round-trip needed if the target is the ESP itself.
+- **Decision**: Four tools — `play_radio(station, room)`, `stop_media(room)`, `set_volume(level, room)`, `change_volume(direction, room)`. Station names are fuzzy-resolved against a hardcoded `RADIO_STATIONS` dict in `voice_server.py` (18 French stations: Radio France family, RTL, Europe 1, NRJ, Skyrock, TSF Jazz, etc.).
+  - Target resolution: `room` specified + matches an HA `media_player` entity → route via HA. Otherwise → the ESP that received the command, via `aioesphomeapi.APIClient.media_player_command()` (with `announcement=False` so the stream uses the default pipeline, not the TTS ducking pipeline).
+  - The ESP's `media_player` entity key is discovered once in `on_connect` via `list_entities_services()` and cached in `device_media_keys[host]`.
+  - `_last_media_target` (either `("esp", host)` or `("ha", entity_id)`) is remembered so "plus fort" after "mets france inter dans le salon" keeps targeting the right speaker.
+  - Tools are registered unconditionally (present even if HA is offline), since ESP direct playback doesn't need HA.
+- **Trade-off**: Hardcoded station URLs need manual updates when Radio France changes stream endpoints. Volume step for `change_volume` is whatever the ESP is configured for. A French fallback parser entry catches "plus fort"/"moins fort"/"monte le son"/"baisse le son" for local LLMs that emit text instead of structured tool calls.

@@ -151,8 +151,86 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
             },
         ]
 
+    # Media tools: work without HA (default to the current ESP speaker).
+    # With HA, the `room` parameter can route to other media_players.
+    media_room_param = {
+        "type": "string",
+        "description": "Pièce où jouer le média. Par défaut: l'enceinte de l'appareil vocal.",
+    }
+    media_tools = [
+        {
+            "name": "play_radio",
+            "description": (
+                "Lancer une radio en direct (ex: « mets France Inter », « joue FIP »). "
+                "Stations disponibles: France Inter, France Info, France Culture, "
+                "France Musique, France Bleu, FIP, Mouv', RTL, Europe 1, RMC, "
+                "NRJ, Skyrock, Nostalgie, Chérie FM, Rire et Chansons, "
+                "TSF Jazz, Radio Classique, RFI."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "station": {
+                        "type": "string",
+                        "description": "Nom de la station (ex: france inter, fip, rtl, nrj)",
+                    },
+                    "room": media_room_param,
+                },
+                "required": ["station"],
+            },
+        },
+        {
+            "name": "stop_media",
+            "description": "Arrêter la lecture (radio, musique) en cours",
+            "parameters": {
+                "type": "object",
+                "properties": {"room": media_room_param},
+                "required": [],
+            },
+        },
+        {
+            "name": "set_volume",
+            "description": (
+                "Régler le volume à un niveau précis. "
+                "Utiliser uniquement quand l'utilisateur donne un pourcentage "
+                "ou un niveau (ex: « mets le son à 40 », « volume à 70 »)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {
+                        "type": "integer",
+                        "description": "Niveau du volume de 0 à 100",
+                    },
+                    "room": media_room_param,
+                },
+                "required": ["level"],
+            },
+        },
+        {
+            "name": "change_volume",
+            "description": (
+                "Augmenter ou baisser le volume d'un cran. "
+                "À utiliser pour « plus fort », « moins fort », « monte le son », "
+                "« baisse le son »."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down"],
+                        "description": "« up » pour plus fort, « down » pour moins fort",
+                    },
+                    "room": media_room_param,
+                },
+                "required": ["direction"],
+            },
+        },
+    ]
+
     if not ha_client:
-        return [weather_tool] + timer_tools + calendar_tools
+        return [weather_tool] + timer_tools + calendar_tools + media_tools
 
     room_param = {
         "type": "string",
@@ -259,77 +337,7 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         weather_tool,
         *timer_tools,
         *calendar_tools,
-        {
-            "name": "play_radio",
-            "description": (
-                "Lancer une radio en direct (ex: « mets France Inter », « joue FIP »). "
-                "Stations disponibles: France Inter, France Info, France Culture, "
-                "France Musique, France Bleu, FIP, Mouv', RTL, Europe 1, RMC, "
-                "NRJ, Skyrock, Nostalgie, Chérie FM, Rire et Chansons, "
-                "TSF Jazz, Radio Classique, RFI."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "station": {
-                        "type": "string",
-                        "description": "Nom de la station (ex: france inter, fip, rtl, nrj)",
-                    },
-                    "room": room_param,
-                },
-                "required": ["station"],
-            },
-        },
-        {
-            "name": "stop_media",
-            "description": "Arrêter la lecture (radio, musique) sur une enceinte",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "room": room_param,
-                },
-                "required": [],
-            },
-        },
-        {
-            "name": "set_volume",
-            "description": (
-                "Régler le volume d'une enceinte à un niveau précis. "
-                "Utiliser uniquement quand l'utilisateur donne un pourcentage "
-                "ou un niveau (ex: « mets le son à 40 », « volume à 70 »)."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "level": {
-                        "type": "integer",
-                        "description": "Niveau du volume de 0 à 100",
-                    },
-                    "room": room_param,
-                },
-                "required": ["level"],
-            },
-        },
-        {
-            "name": "change_volume",
-            "description": (
-                "Augmenter ou baisser le volume d'un cran. "
-                "À utiliser pour « plus fort », « moins fort », « monte le son », "
-                "« baisse le son »."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "direction": {
-                        "type": "string",
-                        "enum": ["up", "down"],
-                        "description": "« up » pour plus fort, « down » pour moins fort",
-                    },
-                    "room": room_param,
-                },
-                "required": ["direction"],
-            },
-        },
+        *media_tools,
         {
             "name": "end_conversation",
             "description": (
