@@ -22,6 +22,10 @@ _TOOL_NAMES = {
     "cancel_timer",
     "query_calendar",
     "create_event",
+    "play_radio",
+    "stop_media",
+    "set_volume",
+    "change_volume",
 }
 
 
@@ -256,6 +260,77 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         *timer_tools,
         *calendar_tools,
         {
+            "name": "play_radio",
+            "description": (
+                "Lancer une radio en direct (ex: « mets France Inter », « joue FIP »). "
+                "Stations disponibles: France Inter, France Info, France Culture, "
+                "France Musique, France Bleu, FIP, Mouv', RTL, Europe 1, RMC, "
+                "NRJ, Skyrock, Nostalgie, Chérie FM, Rire et Chansons, "
+                "TSF Jazz, Radio Classique, RFI."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "station": {
+                        "type": "string",
+                        "description": "Nom de la station (ex: france inter, fip, rtl, nrj)",
+                    },
+                    "room": room_param,
+                },
+                "required": ["station"],
+            },
+        },
+        {
+            "name": "stop_media",
+            "description": "Arrêter la lecture (radio, musique) sur une enceinte",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "room": room_param,
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": "set_volume",
+            "description": (
+                "Régler le volume d'une enceinte à un niveau précis. "
+                "Utiliser uniquement quand l'utilisateur donne un pourcentage "
+                "ou un niveau (ex: « mets le son à 40 », « volume à 70 »)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {
+                        "type": "integer",
+                        "description": "Niveau du volume de 0 à 100",
+                    },
+                    "room": room_param,
+                },
+                "required": ["level"],
+            },
+        },
+        {
+            "name": "change_volume",
+            "description": (
+                "Augmenter ou baisser le volume d'un cran. "
+                "À utiliser pour « plus fort », « moins fort », « monte le son », "
+                "« baisse le son »."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": ["up", "down"],
+                        "description": "« up » pour plus fort, « down » pour moins fort",
+                    },
+                    "room": room_param,
+                },
+                "required": ["direction"],
+            },
+        },
+        {
             "name": "end_conversation",
             "description": (
                 "Terminer la conversation. Appeler quand l'utilisateur dit "
@@ -300,6 +375,19 @@ def parse_text_tool_call(content: str, has_history: bool) -> tuple[Optional[str]
     # Pattern 4: French natural language action (e.g. "Éteins les appliques salon.")
     # Only triggered when conversation history exists (follow-up command)
     if has_history:
+        lower = content.lower().rstrip(".!?")
+
+        # Volume follow-up shortcuts ("plus fort", "moins fort", "monte le son"...)
+        volume_phrases = {
+            "up": ("plus fort", "monte le son", "augmente le son", "monte le volume", "augmente le volume"),
+            "down": ("moins fort", "baisse le son", "baisse le volume"),
+        }
+        for direction, phrases in volume_phrases.items():
+            for phrase in phrases:
+                if phrase in lower:
+                    logger.info(f"French action fallback: '{content}' -> change_volume({direction})")
+                    return "change_volume", {"direction": direction}
+
         action_map = {
             "allume": "turn_on",
             "rallume": "turn_on",
@@ -308,7 +396,6 @@ def parse_text_tool_call(content: str, has_history: bool) -> tuple[Optional[str]
             "ferme": "close_cover",
             "ouvre": "open_cover",
         }
-        lower = content.lower().rstrip(".")
         for verb, func in action_map.items():
             if lower.startswith(verb):
                 entity_part = lower[len(verb) :].strip()

@@ -404,6 +404,16 @@ class HAClient:
             ): f"Température réglée à {kwargs.get('temperature', '?')} degrés",
             ("media_player", "turn_on"): f"{display_name} allumé",
             ("media_player", "turn_off"): f"{display_name} éteint",
+            ("media_player", "play_media"): f"Lecture sur {display_name}",
+            ("media_player", "media_stop"): f"{display_name} arrêté",
+            ("media_player", "media_pause"): f"{display_name} en pause",
+            ("media_player", "media_play"): f"Lecture sur {display_name}",
+            (
+                "media_player",
+                "volume_set",
+            ): f"Volume à {round(kwargs.get('volume_level', 0) * 100)} pour cent",
+            ("media_player", "volume_up"): "Plus fort",
+            ("media_player", "volume_down"): "Moins fort",
         }
         return responses.get((domain, service), "C'est fait")
 

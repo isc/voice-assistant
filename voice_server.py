@@ -47,6 +47,59 @@ HA_URL = os.environ.get("HA_URL", "")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
 
+# French web radio streams. Keys are normalized (lowercase, no accents/spaces)
+# so fuzzy lookups work. Values are (display_name, stream_url).
+RADIO_STATIONS: Dict[str, tuple[str, str]] = {
+    "franceinter": ("France Inter", "https://icecast.radiofrance.fr/franceinter-midfi.mp3"),
+    "franceinfo": ("France Info", "https://icecast.radiofrance.fr/franceinfo-midfi.mp3"),
+    "info": ("France Info", "https://icecast.radiofrance.fr/franceinfo-midfi.mp3"),
+    "franceculture": ("France Culture", "https://icecast.radiofrance.fr/franceculture-midfi.mp3"),
+    "culture": ("France Culture", "https://icecast.radiofrance.fr/franceculture-midfi.mp3"),
+    "francemusique": ("France Musique", "https://icecast.radiofrance.fr/francemusique-midfi.mp3"),
+    "musique": ("France Musique", "https://icecast.radiofrance.fr/francemusique-midfi.mp3"),
+    "francebleu": ("France Bleu", "https://icecast.radiofrance.fr/fbidf-midfi.mp3"),
+    "bleu": ("France Bleu", "https://icecast.radiofrance.fr/fbidf-midfi.mp3"),
+    "fip": ("FIP", "https://icecast.radiofrance.fr/fip-midfi.mp3"),
+    "mouv": ("Mouv'", "https://icecast.radiofrance.fr/mouv-midfi.mp3"),
+    "rtl": ("RTL", "https://streamer.radio.rtl.fr/rtl-1-48-192"),
+    "europe1": ("Europe 1", "https://europe1.lmn.fm/europe1.mp3"),
+    "rmc": ("RMC", "https://rmc.bfmtv.com/rmcinfo-mp3"),
+    "nrj": ("NRJ", "https://scdn.nrjaudio.fm/audio1/fr/30001/mp3_128.mp3"),
+    "skyrock": ("Skyrock", "http://icecast.skyrock.net/s/natio_mp3_128k"),
+    "nostalgie": ("Nostalgie", "https://scdn.nrjaudio.fm/audio1/fr/30601/mp3_128.mp3"),
+    "cheriefm": ("Chérie FM", "https://scdn.nrjaudio.fm/audio1/fr/30201/mp3_128.mp3"),
+    "cherie": ("Chérie FM", "https://scdn.nrjaudio.fm/audio1/fr/30201/mp3_128.mp3"),
+    "rireetchansons": ("Rire et Chansons", "https://scdn.nrjaudio.fm/audio1/fr/30401/mp3_128.mp3"),
+    "tsfjazz": ("TSF Jazz", "https://tsfjazz.ice.infomaniak.ch/tsfjazz-high.mp3"),
+    "jazz": ("TSF Jazz", "https://tsfjazz.ice.infomaniak.ch/tsfjazz-high.mp3"),
+    "radioclassique": ("Radio Classique", "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3"),
+    "classique": ("Radio Classique", "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3"),
+    "rfi": ("RFI", "https://live02.rfi.fr/rfimonde-64.mp3"),
+}
+
+
+def _normalize_station_key(name: str) -> str:
+    """Strip accents/spaces/punctuation for radio station lookup."""
+    import unicodedata
+
+    text = "".join(c for c in unicodedata.normalize("NFD", name.lower()) if unicodedata.category(c) != "Mn")
+    return "".join(c for c in text if c.isalnum())
+
+
+def _resolve_station(name: str) -> Optional[tuple[str, str]]:
+    """Fuzzy-resolve a station name to (display_name, url). Returns None if unknown."""
+    if not name:
+        return None
+    key = _normalize_station_key(name)
+    if key in RADIO_STATIONS:
+        return RADIO_STATIONS[key]
+    # Substring match both ways (e.g. "france inter sur FM" → franceinter)
+    for station_key, info in RADIO_STATIONS.items():
+        if station_key in key or key in station_key:
+            return info
+    return None
+
+
 def _format_duration(total_seconds: int) -> str:
     """Format seconds into a French human-readable duration."""
     if total_seconds >= 3600:
@@ -118,6 +171,9 @@ class VoiceAssistantServer:
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word
         self._end_conversation = False  # Set by end_conversation tool
+
+        # Last media_player entity used (for "plus fort" follow-ups without room context)
+        self._last_media_entity: Optional[str] = None
 
         # Exchange log for web UI (persisted to disk)
         from web_ui import ExchangeLog
@@ -611,6 +667,12 @@ class VoiceAssistantServer:
                 duration_minutes=arguments.get("duration_minutes", 60),
             )
 
+        # Media player tools (radio + volume) — dispatch via HA media_player domain
+        if function_name in ("play_radio", "stop_media", "set_volume", "change_volume"):
+            if not self.ha_client:
+                return "Home Assistant non disponible"
+            return await self._execute_media_function(function_name, arguments)
+
         if not self.ha_client:
             return "Home Assistant non disponible"
 
@@ -690,6 +752,83 @@ class VoiceAssistantServer:
             self.ha_client.entities.get(entity_ids[0], {}).get("friendly_name", entity_ids[0]),
             extra,
         )
+
+    # === MEDIA PLAYER ===
+
+    def _resolve_media_entities(self, room: Optional[str]) -> list[str]:
+        """Resolve media_player entity_ids from a room arg, with fallback to last-used speaker."""
+        if room:
+            ids = self.ha_client.resolve_all_entities(room, room=room, domain_hints=["media_player"])
+            if ids:
+                return ids
+            # Maybe user named the speaker itself (e.g. "sonos salon")
+            ids = self.ha_client.resolve_all_entities(room, room=None, domain_hints=["media_player"])
+            if ids:
+                return ids
+        # No room: prefer the last-used speaker
+        if self._last_media_entity and self._last_media_entity in self.ha_client.entities:
+            return [self._last_media_entity]
+        # Fallback: any available media_player
+        all_mp = [eid for eid, info in self.ha_client.entities.items() if info["domain"] == "media_player"]
+        if len(all_mp) == 1:
+            return all_mp
+        return []
+
+    async def _execute_media_function(self, function_name: str, arguments: dict) -> str:
+        """Handle play_radio / stop_media / set_volume / change_volume tool calls."""
+        room = arguments.get("room")
+        entity_ids = self._resolve_media_entities(room)
+        if not entity_ids:
+            if room:
+                return f"Aucune enceinte trouvée pour {room}"
+            return "Aucune enceinte disponible"
+
+        if function_name == "play_radio":
+            station_name = arguments.get("station", "")
+            station = _resolve_station(station_name)
+            if not station:
+                return f"Station {station_name} inconnue"
+            display_name, url = station
+            for eid in entity_ids:
+                await self.ha_client.call_service(
+                    "media_player",
+                    "play_media",
+                    eid,
+                    media_content_id=url,
+                    media_content_type="music",
+                )
+            self._last_media_entity = entity_ids[0]
+            return f"{display_name} en cours de lecture"
+
+        if function_name == "stop_media":
+            for eid in entity_ids:
+                await self.ha_client.call_service("media_player", "media_stop", eid)
+            return "Lecture arrêtée"
+
+        if function_name == "set_volume":
+            level = arguments.get("level")
+            if level is None:
+                return "Niveau de volume manquant"
+            level = max(0, min(100, int(level)))
+            for eid in entity_ids:
+                await self.ha_client.call_service(
+                    "media_player",
+                    "volume_set",
+                    eid,
+                    volume_level=level / 100.0,
+                )
+            self._last_media_entity = entity_ids[0]
+            return f"Volume à {level} pour cent"
+
+        if function_name == "change_volume":
+            direction = arguments.get("direction", "up")
+            service = "volume_up" if direction == "up" else "volume_down"
+            for eid in entity_ids:
+                await self.ha_client.call_service("media_player", service, eid)
+            self._last_media_entity = entity_ids[0]
+            return "Plus fort" if direction == "up" else "Moins fort"
+
+        return "C'est fait"
 
     # === TIMER EVENTS ===
 

@@ -174,3 +174,10 @@ This document tracks all architecture and technology decisions made for this pro
 - **Context**: Initially planned to inject a calendar summary into the system prompt. Testing showed GPT-5.4 Nano systematically calls the `query_calendar` tool regardless, making the injected summary redundant.
 - **Decision**: No prompt injection. The LLM calls `query_calendar` on demand, which returns fresh data directly from the Google API.
 - **Trade-off**: Every calendar question costs one tool round-trip (~1.5s), but the data is always fresh and the prompt stays lean.
+
+## 2026-04-15: Web radio playback
+
+### AD-034: Web radio via HA media_player with local station dict
+- **Context**: User wants to play French web radios ("mets France Inter") on HA-integrated speakers, with volume follow-ups ("plus fort", "moins fort").
+- **Decision**: Four new tools — `play_radio(station, room)`, `stop_media(room)`, `set_volume(level, room)`, `change_volume(direction, room)`. Station names are fuzzy-resolved against a hardcoded `RADIO_STATIONS` dict in `voice_server.py` (18 French stations: Radio France family, RTL, Europe 1, NRJ, Skyrock, TSF Jazz, etc.). Execution dispatches to HA's `media_player.play_media`, `media_stop`, `volume_set`, `volume_up`, `volume_down` services. The last-used media_player entity is remembered so "plus fort" works without re-specifying the room.
+- **Trade-off**: Hardcoded station URLs need manual updates when Radio France changes stream endpoints. Using HA's `volume_up`/`volume_down` means the step size is whatever HA/integration is configured for (typically 10%), which is acceptable but not tunable from the voice side. A French fallback parser entry catches "plus fort"/"moins fort"/"monte le son"/"baisse le son" for local LLMs that emit text instead of structured tool calls.
