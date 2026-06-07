@@ -67,9 +67,19 @@ Mic active on app open, background mode, possible local wake word detection, Sir
 ## Identity
 
 ### Voice identification (speaker recognition)
-Identify who is speaking based on voice characteristics. Phase 1: adapt responses to the speaker's age (simpler language for children, detailed answers for adults). Phase 2: use the identified speaker's personal accounts for services like Spotify (play their playlists, recommendations, etc.).
+Identify who is speaking based on voice characteristics.
 
-- **Per-speaker permissions**: restrict which tools/actions are available depending on who is speaking. Example: children cannot create calendar events or modify home automation settings.
+Two distinct problems, often conflated under "native audio":
+- **Coarse classification / diarization** (child vs adult, speaker A vs B): inferable from prosody. An audio-native LLM does this well, possibly near zero-shot.
+- **Nominative identification** (map a voice → "Ivan"): a biometric verification problem. Requires per-person enrollment (reference samples) + embedding comparison. An audio LLM does NOT know household voices without references — this stays a dedicated component regardless of the LLM.
+
+**Phase 1 — age adaptation**: simpler language for children, detailed answers for adults. Falls under coarse classification, so it becomes near-free with an audio-native model (see "STT replacement via unified audio model" below).
+
+**Phase 2 — personal accounts**: use the identified speaker's accounts for services like Spotify (their playlists, recommendations). Needs nominative identification → enrollment + verification component.
+
+- **Per-speaker permissions**: restrict which tools/actions are available depending on who is speaking. Example: children cannot create calendar events or modify home automation settings. This is a **security boundary** — must NOT rely on the LLM's probabilistic "sounds like a child"; requires a reliable speaker-verification model.
+
+**Architectural dependency**: with the current Parakeet → text pipeline, all voice information is discarded at the STT stage, so voice ID would require a fully separate parallel audio pipeline. Moving to an audio-native LLM (Gemma 4 12B, see Infrastructure section) preserves the voice signal end-to-end, unlocking Phase 1 nearly for free. Phase 2 + permissions still need a dedicated enrollment/verification component, but it becomes an add-on rather than a full second pipeline. Target architecture: run a small speaker-verification model in parallel on the raw audio, inject the result ("Ivan / child / unknown") as structured context alongside the audio.
 
 ## Media
 
@@ -86,3 +96,15 @@ Currently e2e tests (`test_e2e.py`) run against the live server via `/api/dry-ru
 
 ### Dedicated hardware migration (Zotac)
 Move from M1 Mac + cloud LLM to a Zotac Magnus EN275060TC (RTX 5060 Ti 16GB VRAM). Primary candidate: Gemma 4 26B A4B (MoE, 3.8B active params, ~50-80 tok/s, native function calling). Fallback: Qwen 3 14B Q6_K (~30 tok/s). Would enable removing Python workarounds (room groups, text tool call parser, generic names) as both models handle tool calling natively. See `HARDWARE.md` for detailed specs and benchmarks. Quality vs GPT-5.4 Nano is uncertain — needs benchmarking once hardware is available.
+
+### STT replacement via unified audio model
+Gemma 4 12B (released 2026-06-03, Apache 2.0) is an encoder-free multimodal model with **native audio input** that runs on 16GB. If chosen as the LLM, it can absorb the STT stage: instead of `audio → Parakeet → transcript → LLM`, do `audio → Gemma 4 12B → tool calls` directly. This removes `stt.py` + the Parakeet model and eliminates the transcription bottleneck (the LLM hears full acoustic context instead of reasoning on a possibly-misheard transcript). Also unlocks voice ID Phase 1 (see Identity section).
+
+Audio specs: 16kHz mono, float32 normalized [-1,1] (current pipeline sends 16-bit PCM → trivial conversion), 25 tokens/sec, 30s max segment. Prompt: `Transcribe the following speech segment in French into French text.`
+
+Unknowns to de-risk before committing (a short POC on real French command WAVs settles all three):
+1. **French ASR quality** — docs say "multilingual" but don't list French explicitly; no published WER vs Parakeet/Whisper.
+2. **Audio + tool calling in the same call** — verify the chat template handles both simultaneously.
+3. **Runtime on target hardware** — MLX audio path is undocumented; llama.cpp is the cited edge option. Depends on what hardware is bought.
+
+Trade-off: choosing 12B-unified over 26B A4B means one fewer model to load and a simpler architecture, but loses the explicit transcript used by the web UI debug log (mitigation: prompt the model to emit the transcript in its output).
