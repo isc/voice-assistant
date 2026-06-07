@@ -70,9 +70,14 @@ def _format_family_for_prompt(family: list) -> str:
     parts = []
     role_fr = {"parent": "parent", "child": "enfant"}
     for m in family:
-        bday = datetime.date.fromisoformat(m["birth_date"])
-        age = today.year - bday.year - ((today.month, today.day) < (bday.month, bday.day))
-        parts.append(f"{m['name']} ({role_fr.get(m['role'], m['role'])}, {age} ans)")
+        role = role_fr.get(m["role"], m["role"])
+        birth_date = m.get("birth_date")
+        if birth_date:
+            bday = datetime.date.fromisoformat(birth_date)
+            age = today.year - bday.year - ((today.month, today.day) < (bday.month, bday.day))
+            parts.append(f"{m['name']} ({role}, {age} ans)")
+        else:
+            parts.append(f"{m['name']} ({role})")
     return "Membres de la famille: " + ", ".join(parts)
 
 

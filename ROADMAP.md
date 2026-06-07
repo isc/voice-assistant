@@ -42,8 +42,8 @@ Connected to Google Calendar via OAuth2 (`calendar.events` scope). LLM tools: `q
 
 ## Memory and context
 
-### Family profile (static knowledge)
-The assistant should know the household members: first names, dates of birth, relationships. This is static data that rarely changes. Storage: `config.local.json` (already gitignored, already used for `room_groups`) — add a `family` key loaded into the system prompt. The example file `config.local.example.json` already documents the structure.
+### ~~Family profile (static knowledge)~~ DONE
+Household members (first names, roles, optional birth dates) stored under a `family` key in `config.local.json` (gitignored, documented in `config.local.example.json`). Loaded via `LOCAL_CONFIG` and injected into the system prompt by `_format_family_for_prompt()` in `voice_server.py`, which computes each member's age from `birth_date`. `birth_date` is optional — members without one are listed by name and role only.
 
 ### Conversation memory (long-term)
 Beyond the current 5-exchange sliding window (2 min expiry), the assistant should retain interesting facts from past conversations. Architecture options to explore:
