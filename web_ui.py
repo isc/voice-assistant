@@ -69,6 +69,21 @@ def setup_routes(app, server):
     async def handle_web_ui(request):
         return web.Response(text=(STATIC_DIR / "index.html").read_text(), content_type="text/html")
 
+    async def handle_manifest(request):
+        return web.Response(
+            text=(STATIC_DIR / "manifest.webmanifest").read_text(),
+            content_type="application/manifest+json",
+        )
+
+    async def handle_service_worker(request):
+        # Served from root so its scope covers "/" (a /static/sw.js could only
+        # control /static/*). Sent no-cache so SW updates propagate promptly.
+        return web.Response(
+            text=(STATIC_DIR / "sw.js").read_text(),
+            content_type="application/javascript",
+            headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+        )
+
     async def handle_get_exchanges(request):
         return web.json_response(server.exchange_log.entries)
 
@@ -229,6 +244,8 @@ def setup_routes(app, server):
         return web.json_response(body, status=200 if required_ok else 503)
 
     app.router.add_get("/", handle_web_ui)
+    app.router.add_get("/manifest.webmanifest", handle_manifest)
+    app.router.add_get("/sw.js", handle_service_worker)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/api/exchanges", handle_get_exchanges)
     app.router.add_post("/api/send", handle_web_send)

@@ -61,6 +61,8 @@ Safe area insets for notch/home indicator, 44px touch targets, 16px input font (
 ### Step 2: PWA with voice input
 Progressive Web App installable on home screen. Use Web Speech API or stream audio to server-side Parakeet for STT. Tap-to-talk button that activates the mic immediately. No App Store needed, reuses existing backend. Limitation: Safari restricts mic access in background.
 
+- **~~Installable PWA shell~~ DONE**: `manifest.webmanifest` (standalone, icons, theme color), a minimal root-scope service worker (`/sw.js`) caching the app shell for offline load, and generated mic icons (192/512/apple-touch). Served via root routes in `web_ui.py` (`/manifest.webmanifest`, `/sw.js`) so the SW scope covers `/`. The SW deliberately never intercepts POST or `/api/*` so the live UI keeps hitting the network. **Remaining**: the tap-to-talk voice input (Web Speech API or audio streaming to the server) — needs on-device mic testing.
+
 ### Step 3: Native iOS app (optional)
 Mic active on app open, background mode, possible local wake word detection, Siri Shortcut integration. Best UX but significant development effort — only worth it if PWA limitations become a real pain point.
 
