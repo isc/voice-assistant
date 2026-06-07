@@ -88,8 +88,8 @@ Control Spotify playback on connected speakers (e.g., "mets du jazz dans le salo
 
 ## Infrastructure
 
-### Health check endpoint
-`/health` endpoint returning status of STT, TTS, LLM, and HA connectivity. Useful for monitoring and alerting when a service goes down.
+### ~~Health check endpoint~~ DONE
+`GET /health` (in `web_ui.py`) returns the status of STT, TTS, LLM, HA, ESP, and calendar. HTTP 200 when all required components (STT, TTS, LLM, HA) are ready, 503 otherwise. ESP and calendar are reported but optional (don't affect the verdict). LLM is checked by configuration only (mode/model/url) — not pinged, to avoid token cost; ops can curl the LLM URL directly. Also reports active timer count.
 
 ### Isolated test server instance
 Currently e2e tests (`test_e2e.py`) run against the live server via `/api/dry-run` — tool calls are not executed but conversation state is shared. If someone uses the assistant during tests, the reset clears their conversation. Refactor to launch a lightweight test instance (LLM + entity list only, no STT/TTS/ESP) on a separate port for full isolation.

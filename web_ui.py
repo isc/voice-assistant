@@ -182,7 +182,54 @@ def setup_routes(app, server):
         server.conversation_id = None
         return web.json_response({"status": "ok"})
 
+    async def handle_health(request):
+        """Health check: status of STT, TTS, LLM, HA, and ESP.
+
+        Returns 200 when all required components are ready, 503 otherwise.
+        ESP and calendar are reported but optional (don't affect the verdict).
+        LLM is checked by configuration only — not pinged, to avoid token cost.
+        """
+        from voice_server import LLM_API_KEY, LLM_MODEL, LLM_URL
+
+        stt_ready = server.stt is not None and server.stt.model is not None
+        tts_ready = server.tts is not None and server.tts.engine is not None
+        ha_ready = server.ha_client is not None
+
+        is_cloud = bool(LLM_API_KEY)
+        llm_ready = bool(LLM_MODEL) if is_cloud else bool(LLM_URL)
+
+        components = {
+            "stt": {"ready": stt_ready, "model": "parakeet-tdt-0.6b-v3"},
+            "tts": {"ready": tts_ready, "engine": "kokoro-82m"},
+            "llm": {
+                "ready": llm_ready,
+                "mode": "cloud" if is_cloud else "local",
+                "model": LLM_MODEL or None,
+                "url": LLM_URL,
+            },
+            "ha": {
+                "ready": ha_ready,
+                "entities": len(server.ha_client.entities) if ha_ready else 0,
+            },
+            "esp": {
+                "connected": server.current_device is not None,
+                "device": server.current_device,
+                "count": len(server.devices),
+            },
+            "calendar": {"ready": server.calendar_client is not None},
+        }
+
+        required_ok = stt_ready and tts_ready and llm_ready and ha_ready
+        status = "ok" if required_ok else "degraded"
+        body = {
+            "status": status,
+            "components": components,
+            "timers": len(server.timer_manager.get_timers()),
+        }
+        return web.json_response(body, status=200 if required_ok else 503)
+
     app.router.add_get("/", handle_web_ui)
+    app.router.add_get("/health", handle_health)
     app.router.add_get("/api/exchanges", handle_get_exchanges)
     app.router.add_post("/api/send", handle_web_send)
     app.router.add_post("/api/dry-run", handle_dry_run)
