@@ -15,8 +15,8 @@ The LLM tends to repeat context unnecessarily (e.g., "à Paris, avec un risque d
 
 ## Robustness
 
-### LLM retry on finish_reason=length
-When the LLM runs out of completion tokens (all budget consumed by internal reasoning), automatically retry with a higher token limit instead of failing silently. Currently we bumped max_tokens to 500, but edge cases may still hit the limit.
+### ~~LLM retry on finish_reason=length~~ DONE
+`chat_completion()` in `llm.py` detects `finish_reason == "length"` and retries with double the token limit (up to 2 retries, ceiling 2000) before returning. Handles reasoning models that spend the whole budget on internal thinking. If still truncated at the ceiling, returns the partial response rather than failing.
 
 ### Fallback TTS
 If Kokoro crashes or fails, fall back to raw espeak for audio output. The response quality degrades but the assistant remains functional instead of going silent.

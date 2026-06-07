@@ -355,22 +355,46 @@ async def chat_completion(
     if tool_names:
         logger.info(f"Tools: {tool_names}")
 
+    # Retry on finish_reason=length: the completion was truncated (often a
+    # reasoning model spending the whole budget on internal thinking). Bump the
+    # token limit and retry rather than returning a truncated/empty message.
+    MAX_TOKEN_CEILING = 2000
+    MAX_LENGTH_RETRIES = 2
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as response:
-                if response.status == 200:
+            for attempt in range(MAX_LENGTH_RETRIES + 1):
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"LLM error {response.status}: {error_text}")
+                        return None
+
                     result = await response.json()
                     logger.info(f"LLM raw response: {json.dumps(result, ensure_ascii=False, indent=2)}")
-                    return result["choices"][0]["message"]
-                else:
-                    error_text = await response.text()
-                    logger.error(f"LLM error {response.status}: {error_text}")
-                    return None
+                    choice = result["choices"][0]
+                    finish_reason = choice.get("finish_reason")
+
+                    if finish_reason == "length" and payload[max_tokens_key] < MAX_TOKEN_CEILING:
+                        if attempt < MAX_LENGTH_RETRIES:
+                            new_limit = min(payload[max_tokens_key] * 2, MAX_TOKEN_CEILING)
+                            logger.warning(
+                                f"LLM truncated (finish_reason=length) at {payload[max_tokens_key]} tokens, "
+                                f"retrying with {new_limit}"
+                            )
+                            payload[max_tokens_key] = new_limit
+                            continue
+                        logger.warning(
+                            f"LLM still truncated after {MAX_LENGTH_RETRIES} retries "
+                            f"(max {payload[max_tokens_key]} tokens), returning partial response"
+                        )
+
+                    return choice["message"]
     except Exception as e:
         logger.error(f"LLM error: {e}")
         import traceback
