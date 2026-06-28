@@ -43,8 +43,15 @@ class ParakeetSTT:
             self.model = parakeet_mlx.from_pretrained(self.MODEL_MLX)
         elif self.backend == "onnx":
             import onnx_asr
+            import onnxruntime
 
-            self.model = onnx_asr.load_model(self.MODEL_ONNX)
+            # Use the GPU (CUDA EP) when onnxruntime-gpu is installed, else CPU.
+            # Generic: same code on a CPU-only box and a CUDA server.
+            providers = ["CPUExecutionProvider"]
+            if "CUDAExecutionProvider" in onnxruntime.get_available_providers():
+                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            logger.info(f"ONNX STT execution providers: {providers}")
+            self.model = onnx_asr.load_model(self.MODEL_ONNX, providers=providers)
         else:
             raise ValueError(f"Unknown STT_BACKEND '{self.backend}' (expected mlx|onnx|auto)")
         logger.info("Parakeet STT model loaded")
