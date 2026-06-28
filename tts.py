@@ -65,8 +65,10 @@ class KokoroTTS:
 
         logger.info(f"Synthesizing: '{clean_text[:80]}...'")
 
-        # French phonemization via espeak
+        # French phonemization via espeak (misaki EspeakG2P returns (phonemes, tokens))
         phonemes = self.g2p(clean_text)
+        if isinstance(phonemes, tuple):
+            phonemes = phonemes[0]
         logger.info(f"Phonemes: {phonemes}")
 
         # Generate audio with Kokoro (runs sync, use executor)

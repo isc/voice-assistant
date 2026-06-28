@@ -1,0 +1,4 @@
+# Mac / Apple Silicon (dev): base deps + the MLX STT backend.
+# pip install -r requirements-mac.txt
+-r requirements.txt
+parakeet-mlx
