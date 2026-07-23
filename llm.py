@@ -109,7 +109,12 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         calendar_tools = [
             {
                 "name": "query_calendar",
-                "description": "Consulter l'agenda. Chercher des événements par date ou mot-clé.",
+                "description": (
+                    "Consulter l'agenda. Chercher des événements par date ou mot-clé. "
+                    "Dès que la demande couvre une période (« cette semaine », « ce week-end », "
+                    "« en août », « dans les prochains jours »), renseigne OBLIGATOIREMENT end_date : "
+                    "sans elle la recherche ne couvre que la seule journée start_date."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -119,7 +124,11 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
                         },
                         "end_date": {
                             "type": "string",
-                            "description": "Date de fin au format AAAA-MM-JJ. Par défaut: même jour que start_date",
+                            "description": (
+                                "Date de fin au format AAAA-MM-JJ, incluse. Obligatoire pour toute "
+                                "période. Ex. « cette semaine » = aujourd'hui → dimanche qui suit ; "
+                                "« ce week-end » = samedi → dimanche. Par défaut : start_date seule."
+                            ),
                         },
                         "search": {
                             "type": "string",
