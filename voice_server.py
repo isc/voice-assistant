@@ -133,6 +133,9 @@ class VoiceAssistantServer:
 
         self.exchange_log = ExchangeLog(Path(__file__).parent / "exchanges.json")
         self._last_tool_calls = []
+        # Cap on concurrent tool calls: fast enough for a whole-house command while
+        # staying gentle on the single HomeKit bridge relaying every Velux.
+        self._tool_semaphore = asyncio.Semaphore(4)
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -836,17 +839,21 @@ class VoiceAssistantServer:
             if "tool_calls" not in message or not message["tool_calls"]:
                 break
 
-            tool_messages = []
-            for tool_call in message["tool_calls"]:
+            # Run this round's calls concurrently. An HA service call blocks until
+            # the device acknowledges — ~0.5-1.8s for a Velux over HomeKit, vs 14ms
+            # for a state read — so "ferme tous les volets" spent 11 of its 19
+            # seconds waiting on eight of them one after another. The LLM emits the
+            # batch in one go, so the calls are independent by construction.
+            async def run_tool(tool_call):
                 function_name = tool_call["function"]["name"]
                 function_args = json.loads(tool_call["function"]["arguments"])
                 logger.info(f"Function call: {function_name}({function_args})")
                 tc_entry = {"function": function_name, "args": function_args}
                 if dry_run:
-                    result = "OK"
-                    tc_entry["result"] = result
                     logger.info(f"Dry run: {function_name}({function_args})")
-                else:
+                    tc_entry["result"] = "OK"
+                    return tc_entry, "OK"
+                async with self._tool_semaphore:
                     try:
                         result = await self.execute_function(function_name, function_args)
                         logger.info(f"Function result: {result}")
@@ -855,6 +862,12 @@ class VoiceAssistantServer:
                         logger.error(f"Function execution error: {e}")
                         result = f"Erreur: {e}"
                         tc_entry["error"] = str(e)
+                return tc_entry, result
+
+            outcomes = await asyncio.gather(*(run_tool(tc) for tc in message["tool_calls"]))
+
+            tool_messages = []
+            for (tc_entry, result), tool_call in zip(outcomes, message["tool_calls"]):
                 self._last_tool_calls.append(tc_entry)
                 tool_messages.append(
                     {
