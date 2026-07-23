@@ -118,7 +118,11 @@ class VoiceAssistantServer:
         self.conversation_history = []
         self.conversation_id = None  # Groups exchanges in the same conversation
         self.last_interaction_time = 0
-        self.CONVERSATION_TIMEOUT = 120  # seconds — forget context after 2 min of silence
+        # Forget context after this much silence. Long enough that a typed
+        # follow-up ("et dans la salle de jeux ?") still resolves, short enough
+        # that a wake word much later starts clean. Voice conversations usually
+        # end sooner anyway, via the end_conversation tool.
+        self.CONVERSATION_TIMEOUT = 600  # seconds
 
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word

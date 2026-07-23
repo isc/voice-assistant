@@ -51,7 +51,7 @@ ESP (wake word) → audio stream → voice_server.py
 - **Room groups**: `ROOM_GROUPS` in `ha_client.py` maps group names ("enfants", "partout") to lists of HA areas. When a group is detected, all entities of the matching domain are returned.
 - **Entity resolution**: fuzzy matching on normalized friendly_name (accents stripped, stopwords removed), scoped by room/area.
 - **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls. A system reminder lists already-called functions to encourage completeness.
-- **Conversation history**: last 5 exchanges (10 messages), expires after 2 min inactivity.
+- **Conversation history**: last 5 exchanges (10 messages), expires after 10 min inactivity (`CONVERSATION_TIMEOUT`).
 - **DateTime injection**: current date/time injected into system prompt so the LLM can answer time/date questions.
 - **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
 - **Text fallback parser**: catches when local LLM outputs tool calls as plain text instead of structured JSON (4 patterns: JSON args, quoted string, Python kwargs, French verbs).
