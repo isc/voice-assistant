@@ -300,6 +300,34 @@ class TestCoverKinds(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Tests: a named room must never leak into another room
+# ---------------------------------------------------------------------------
+
+
+class TestNoCrossRoomFallback(unittest.TestCase):
+    def setUp(self):
+        self.client = make_client()
+        # Mirror Charras: Zoé's room has no cover at all, Charlie's next door does.
+        del self.client.entities["cover.volet_zoe"]
+
+    def test_existing_room_without_the_device_resolves_to_nothing(self):
+        eid = self.client.resolve_entity(
+            "Volet Chambre de Zoé", room="Chambre Zoé", domain_hints=["cover"]
+        )
+        self.assertIsNone(eid)
+
+    def test_does_not_actuate_a_neighbouring_room(self):
+        eids = self.client.resolve_all_entities("volet", room="Chambre Zoé", domain_hints=["cover"])
+        self.assertEqual(eids, [])
+        self.assertNotIn("cover.volet_charlie", eids)
+
+    def test_unknown_room_still_falls_back(self):
+        """The rescue path stays: HA has no 'Garage' area, so the filter is dropped."""
+        eid = self.client.resolve_entity("Appliques salon", room="Garage")
+        self.assertEqual(eid, "light.appliques_salon")
+
+
+# ---------------------------------------------------------------------------
 # Tests: sensor search (read-only, kept out of the system prompt)
 # ---------------------------------------------------------------------------
 

@@ -258,6 +258,14 @@ class HAClient:
         "lumieres": ("light", None),
     }
 
+    def _area_exists(self, norm_room: str) -> bool:
+        """Whether HA knows this area, using the same loose matching as the filter."""
+        return any(
+            norm_room in normalize(area) or normalize(area) in norm_room
+            for area in self.areas.values()
+            if area
+        )
+
     def _filter_by_cover_kind(self, entity_ids: list[str], kind: Optional[str]) -> list[str]:
         """Keep only covers of the requested kind (volet / fenetre)."""
         if not kind:
@@ -365,10 +373,18 @@ class HAClient:
             candidates = {eid: candidates[eid] for eid in kept}
 
         if not candidates:
-            # Retry without room filter if no match
-            if norm_room:
-                logger.info(f"No match in room '{room}', retrying without room filter")
+            # Dropping the room filter rescues a room name HA doesn't know ("salon"
+            # for an area called "Living Room"). But when the area *does* exist and
+            # simply holds no such device, searching the rest of the house is how
+            # "ouvre tous les volets sauf celui de Charlie" ended up opening
+            # Charlie's: the LLM invented a shutter in Zoé's room, nothing matched
+            # there, and the unscoped retry landed on the one room to avoid.
+            # Admitting there is no such device beats actuating another room's.
+            if norm_room and not self._area_exists(norm_room):
+                logger.info(f"Room '{room}' unknown to HA, retrying without room filter")
                 return self.resolve_entity(name, room=None, domain_hints=domain_hints)
+            if norm_room:
+                logger.info(f"No match for '{name}' in room '{room}' (room exists, no such device)")
             return None
 
         # If room narrows to a single entity of the matching domain, use it directly
