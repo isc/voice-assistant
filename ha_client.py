@@ -40,6 +40,37 @@ def normalize(text: str) -> str:
     return " ".join(words)
 
 
+# Sub-kinds inside the `cover` domain. A house can have roller shutters and roof
+# windows side by side — both are HA covers, but they are not interchangeable
+# (opening a skylight when asked for a shutter lets the rain in).
+# HA's device_class is authoritative; the name is only consulted for integrations
+# that leave it unset (HomeKit Controller exposes Velux shutters with no class).
+COVER_KIND_BY_DEVICE_CLASS = {
+    "window": "fenetre",
+    "shutter": "volet",
+    "blind": "volet",
+    "shade": "volet",
+    "curtain": "volet",
+    "awning": "volet",
+}
+COVER_KIND_KEYWORDS = {
+    "volet": ("volet", "volets", "store", "stores"),
+    "fenetre": ("fenetre", "fenetres", "velux"),
+}
+
+
+def cover_kind(info: dict) -> Optional[str]:
+    """Classify a cover as 'volet' or 'fenetre', None if undetermined."""
+    device_class = info.get("attributes", {}).get("device_class")
+    if device_class in COVER_KIND_BY_DEVICE_CLASS:
+        return COVER_KIND_BY_DEVICE_CLASS[device_class]
+    words = set(normalize(info.get("friendly_name", "")).split())
+    for kind, keywords in COVER_KIND_KEYWORDS.items():
+        if words.intersection(keywords):
+            return kind
+    return None
+
+
 class HAClient:
     """Home Assistant REST API client with area-based entity discovery."""
 
@@ -191,6 +222,10 @@ class HAClient:
                 "climate": "thermostats",
                 "media_player": "médias",
             }.get(info["domain"], info["domain"])
+            # Roof windows are covers too — list them apart so the LLM never
+            # offers a skylight when the user asked for a roller shutter.
+            if info["domain"] == "cover" and cover_kind(info) == "fenetre":
+                domain_label = "fenêtres"
             by_area.setdefault(area, {}).setdefault(domain_label, []).append(info["friendly_name"])
 
         parts = []
@@ -205,17 +240,34 @@ class HAClient:
             parts.append(f"Groupes: {', '.join(group_parts)}")
         return ". ".join(parts)
 
-    # Generic names that mean "all entities of this domain in the room"
+    # Generic names that mean "all entities of this domain in the room".
+    # Keys are normalize()d; the second element narrows covers to a sub-kind.
     _GENERIC_NAMES = {
-        "volet": "cover",
-        "volets": "cover",
-        "les volets": "cover",
-        "lumière": "light",
-        "lumières": "light",
-        "les lumières": "light",
-        "lumiere": "light",
-        "lumieres": "light",
+        "volet": ("cover", "volet"),
+        "volets": ("cover", "volet"),
+        "store": ("cover", "volet"),
+        "stores": ("cover", "volet"),
+        "fenetre": ("cover", "fenetre"),
+        "fenetres": ("cover", "fenetre"),
+        "velux": ("cover", "fenetre"),
+        "lumiere": ("light", None),
+        "lumieres": ("light", None),
     }
+
+    def _filter_by_cover_kind(self, entity_ids: list[str], kind: Optional[str]) -> list[str]:
+        """Keep only covers of the requested kind (volet / fenetre)."""
+        if not kind:
+            return entity_ids
+        covers = [e for e in entity_ids if self.entities[e]["domain"] == "cover"]
+        # If no cover here is named for its kind, this house doesn't make the
+        # distinction — keep everything rather than resolving to nothing.
+        if not any(cover_kind(self.entities[e]) for e in covers):
+            return entity_ids
+        return [
+            e
+            for e in entity_ids
+            if self.entities[e]["domain"] != "cover" or cover_kind(self.entities[e]) == kind
+        ]
 
     def resolve_all_entities(
         self, name: str, room: str | None = None, domain_hints: list[str] | None = None
@@ -223,6 +275,8 @@ class HAClient:
         """Resolve entity name, expanding room groups and generic names into multiple entity_ids."""
         is_group = False
         rooms_to_search = [room]
+        # Generic name (e.g. "volet" -> all shutters in the room), with its cover sub-kind
+        target_domain, generic_kind = self._GENERIC_NAMES.get(normalize(name), (None, None))
 
         # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"])
         if room:
@@ -249,12 +303,10 @@ class HAClient:
                         continue
                     if eid not in entity_ids:
                         entity_ids.append(eid)
+            entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
             if entity_ids:
                 logger.info(f"Group resolve: '{name}' (group={room}) -> {entity_ids}")
                 return entity_ids
-
-        # Check if name is generic (e.g. "volet" -> all covers in room)
-        target_domain = self._GENERIC_NAMES.get(normalize(name))
 
         if target_domain and any(r is not None for r in rooms_to_search):
             entity_ids = []
@@ -271,6 +323,7 @@ class HAClient:
                             continue
                     if eid not in entity_ids:
                         entity_ids.append(eid)
+            entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
             if entity_ids:
                 logger.info(f"Generic resolve: '{name}' (room={room}) -> {entity_ids}")
                 return entity_ids
@@ -301,6 +354,12 @@ class HAClient:
                     continue
             candidates[eid] = normalize(info["friendly_name"])
 
+        # "les volets" must never fall back onto a roof window (both are covers)
+        kind = self._GENERIC_NAMES.get(norm_input, (None, None))[1]
+        if kind:
+            kept = self._filter_by_cover_kind(list(candidates), kind)
+            candidates = {eid: candidates[eid] for eid in kept}
+
         if not candidates:
             # Retry without room filter if no match
             if norm_room:
@@ -322,13 +381,7 @@ class HAClient:
 
         # If we have a room and multiple candidates, pick the first one
         # (common case: user says "la lumière" and there's only one light in that room)
-        if norm_room and norm_input in (
-            "lumiere",
-            "lumières",
-            "lumiere",
-            "volet",
-            "volets",
-        ):
+        if norm_room and norm_input in self._GENERIC_NAMES:
             eid = next(iter(candidates))
             logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (generic name, first in room)")
             return eid

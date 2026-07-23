@@ -13,7 +13,7 @@ Usage:
 import asyncio
 import unittest
 
-from ha_client import HAClient, normalize
+from ha_client import HAClient, cover_kind, normalize
 from llm import parse_text_tool_call
 
 # ---------------------------------------------------------------------------
@@ -229,6 +229,73 @@ class TestResolveAllEntities(unittest.TestCase):
         }
         eids = self.client.resolve_all_entities("lumière", room="Living Room")
         self.assertNotIn("light.orphan", eids)
+
+
+# ---------------------------------------------------------------------------
+# Tests: cover sub-kinds (roller shutters vs roof windows, both `cover`)
+# ---------------------------------------------------------------------------
+
+
+class TestCoverKinds(unittest.TestCase):
+    def setUp(self):
+        self.client = make_client()
+        # A room with both a roof window and its shutter, as Velux exposes them:
+        # device_class set on the window, absent on the shutter.
+        self.client.entities["cover.velux_window_cuisine"] = {
+            "friendly_name": "Fenêtre Cuisine",
+            "domain": "cover",
+            "state": "closed",
+            "attributes": {"device_class": "window"},
+            "area_id": "cuisine",
+            "area_name": "Cuisine",
+        }
+        self.client.entities["cover.velux_shutter_cuisine"] = {
+            "friendly_name": "Volet Cuisine",
+            "domain": "cover",
+            "state": "closed",
+            "attributes": {},
+            "area_id": "cuisine",
+            "area_name": "Cuisine",
+        }
+        self.client.areas["cuisine"] = "Cuisine"
+
+    def test_device_class_wins_over_name(self):
+        """An unhelpfully named cover is still classified by its device_class."""
+        self.assertEqual(
+            cover_kind({"friendly_name": "Toiture 3", "attributes": {"device_class": "window"}}),
+            "fenetre",
+        )
+        self.assertEqual(
+            cover_kind({"friendly_name": "Toiture 3", "attributes": {"device_class": "shutter"}}),
+            "volet",
+        )
+
+    def test_name_fallback_when_no_device_class(self):
+        self.assertEqual(cover_kind({"friendly_name": "Volet Cuisine", "attributes": {}}), "volet")
+        self.assertEqual(cover_kind({"friendly_name": "Fenêtre Cuisine", "attributes": {}}), "fenetre")
+        self.assertIsNone(cover_kind({"friendly_name": "Portail", "attributes": {}}))
+
+    def test_volet_does_not_match_window(self):
+        eids = self.client.resolve_all_entities("volets", room="Cuisine")
+        self.assertEqual(eids, ["cover.velux_shutter_cuisine"])
+
+    def test_fenetre_does_not_match_shutter(self):
+        eids = self.client.resolve_all_entities("fenêtres", room="Cuisine")
+        self.assertEqual(eids, ["cover.velux_window_cuisine"])
+
+    def test_resolve_entity_scoped_by_kind(self):
+        eid = self.client.resolve_entity("volet", room="Cuisine", domain_hints=["cover"])
+        self.assertEqual(eid, "cover.velux_shutter_cuisine")
+
+    def test_undistinguished_house_keeps_all_covers(self):
+        """A house whose covers carry no kind at all must behave as before."""
+        eids = self.client.resolve_all_entities("volet", room="Chambre invités")
+        self.assertEqual(eids, ["cover.volet_invites"])
+
+    def test_prompt_lists_windows_apart(self):
+        prompt = self.client.get_entity_list_for_prompt()
+        self.assertIn("fenêtres: Fenêtre Cuisine", prompt)
+        self.assertIn("volets: Volet Cuisine", prompt)
 
 
 # ---------------------------------------------------------------------------

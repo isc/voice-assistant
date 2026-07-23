@@ -186,11 +186,11 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         },
         {
             "name": "open_cover",
-            "description": "Ouvrir un volet ou un store",
+            "description": "Ouvrir un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements distincts : n'agir que sur celui qui est demandé.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom du volet"},
+                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
                     "room": room_param,
                 },
                 "required": ["entity"],
@@ -198,11 +198,11 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         },
         {
             "name": "close_cover",
-            "description": "Fermer un volet ou un store entièrement",
+            "description": "Fermer entièrement un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements distincts : n'agir que sur celui qui est demandé.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom du volet"},
+                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
                     "room": room_param,
                 },
                 "required": ["entity"],
@@ -214,7 +214,7 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom du volet"},
+                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
                     "room": room_param,
                     "position": {
                         "type": "integer",
