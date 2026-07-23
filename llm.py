@@ -23,6 +23,7 @@ _TOOL_NAMES = {
     "set_cover_position",
     "set_temperature",
     "get_state",
+    "get_sensor",
     "set_timer",
     "set_alarm",
     "cancel_timer",
@@ -265,6 +266,31 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
                     "room": room_param,
                 },
                 "required": ["entity"],
+            },
+        },
+        {
+            "name": "get_sensor",
+            "description": (
+                "Consulter les capteurs de mesure de la maison par mot-clé : piscine "
+                "(température de l'eau, pH, chlore, sel), chauffage et chaudière, "
+                "températures intérieures/extérieure, CO2, humidité, consommation "
+                "électrique, batteries. Ces capteurs ne figurent PAS dans la liste "
+                "des appareils ci-dessus — utilise cet outil dès qu'on te demande une "
+                "mesure qui n'y est pas."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Mots-clés du capteur cherché (ex: « piscine », « piscine ph », "
+                            "« chaudière », « température extérieure »). Rester large : "
+                            "la recherche renvoie tous les capteurs correspondants."
+                        ),
+                    },
+                },
+                "required": ["query"],
             },
         },
         weather_tool,

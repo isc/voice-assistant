@@ -80,6 +80,9 @@ class HAClient:
         # entity_id -> {friendly_name, domain, state, attributes, area_id, area_name}
         self.entities: dict[str, dict] = {}
         self.areas: dict[str, str] = {}  # area_id -> area_name
+        # entity_id -> area_id, for every domain — sensors aren't in self.entities
+        # but search_sensors still wants to know which room they belong to.
+        self.entity_areas: dict[str, str] = {}
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -160,6 +163,7 @@ class HAClient:
             return
 
         entity_to_area = await self._fetch_entity_areas()
+        self.entity_areas = entity_to_area
 
         self.entities.clear()
         for state in states:
@@ -423,6 +427,62 @@ class HAClient:
         except Exception as e:
             logger.error(f"HA service call failed: {e}")
             return "Impossible de contacter Home Assistant"
+
+    async def search_sensors(self, query: str, limit: int = 15) -> str:
+        """Search read-only sensors by keyword and return their current values.
+
+        Sensors are deliberately kept out of `self.entities` and out of the system
+        prompt: there are hundreds of them (273 at Charras vs 92 actionable
+        entities) and they are only ever read, never controlled. Searching on
+        demand keeps the prompt small while leaving every sensor reachable —
+        including those HA gives no device_class (pool pH, salinity, chlorine).
+        States are read live rather than from the discovery snapshot, since the
+        whole point of a sensor is that its value moves.
+        """
+        if not normalize(query).split():
+            return "Précise ce que tu cherches"
+
+        try:
+            async with self._session.get(f"{self.base_url}/api/states") as resp:
+                if resp.status != 200:
+                    return "Capteurs non disponibles"
+                states = await resp.json()
+        except Exception as e:
+            logger.error(f"Error fetching sensor states: {e}")
+            return "Capteurs non disponibles"
+
+        return self.match_sensors(states, query, limit)
+
+    def match_sensors(self, states: list[dict], query: str, limit: int = 15) -> str:
+        """Rank sensor states against a keyword query. Pure — see search_sensors."""
+        words = normalize(query).split()
+        matches = []
+        for state in states:
+            eid = state["entity_id"]
+            if not eid.startswith("sensor."):
+                continue
+            value = state["state"]
+            if value in ("unknown", "unavailable", ""):
+                continue
+            attrs = state.get("attributes", {})
+            name = attrs.get("friendly_name") or eid
+            area = self.areas.get(self.entity_areas.get(eid, ""), "")
+            score = sum(1 for w in words if w in normalize(f"{name} {area}"))
+            if not score:
+                continue
+            unit = attrs.get("unit_of_measurement") or ""
+            # A measurement beats a raw status code when results get truncated.
+            matches.append((score, bool(unit), f"{name}: {value} {unit}".strip()))
+
+        if not matches:
+            return f"Aucun capteur trouvé pour « {query} »"
+
+        matches.sort(key=lambda m: (-m[0], not m[1], m[2]))
+        lines = [m[2] for m in matches[:limit]]
+        if len(matches) > limit:
+            lines.append(f"({len(matches) - limit} autres capteurs non affichés)")
+        logger.info(f"Sensor search '{query}' -> {len(matches)} matches")
+        return "\n".join(lines)
 
     async def get_entity_state(self, entity_id: str) -> Optional[dict]:
         """Get the current state of an entity."""

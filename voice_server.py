@@ -623,6 +623,10 @@ class VoiceAssistantServer:
         if not self.ha_client:
             return "Home Assistant non disponible"
 
+        # Sensors are searched by keyword, not resolved like actionable entities
+        if function_name == "get_sensor":
+            return await self.ha_client.search_sensors(arguments.get("query", ""))
+
         entity_name = arguments.get("entity", "")
         room = arguments.get("room")
 

@@ -110,6 +110,7 @@ def make_client() -> HAClient:
     client.base_url = "http://fake"
     client.token = "fake"
     client.entities = dict(FAKE_ENTITIES)
+    client.entity_areas = {}
     client.areas = {
         "living_room": "Living Room",
         "chambre_charlie": "Chambre Charlie",
@@ -296,6 +297,70 @@ class TestCoverKinds(unittest.TestCase):
         prompt = self.client.get_entity_list_for_prompt()
         self.assertIn("fenêtres: Fenêtre Cuisine", prompt)
         self.assertIn("volets: Volet Cuisine", prompt)
+
+
+# ---------------------------------------------------------------------------
+# Tests: sensor search (read-only, kept out of the system prompt)
+# ---------------------------------------------------------------------------
+
+
+def sensor_state(entity_id, name, state, unit=None):
+    attrs = {"friendly_name": name}
+    if unit:
+        attrs["unit_of_measurement"] = unit
+    return {"entity_id": entity_id, "state": state, "attributes": attrs}
+
+
+FAKE_SENSOR_STATES = [
+    sensor_state("sensor.piscine_water_temperature", "Piscine Water Temperature", "29.8", "°C"),
+    sensor_state("sensor.piscine_air_temperature", "Piscine Air Temperature", "23", "°C"),
+    sensor_state("sensor.piscine_ph_level", "Piscine pH Level", "7.2"),
+    sensor_state("sensor.piscine_pump_state", "Piscine Pump State", "unknown"),
+    sensor_state("sensor.piscine_cover_state", "Piscine Pool Cover State", "unavailable"),
+    sensor_state("sensor.chaudiere_temperature", "Chaudière température", "51.4", "°C"),
+    # Not a sensor: must never surface, whatever it is called.
+    {
+        "entity_id": "light.piscine",
+        "state": "on",
+        "attributes": {"friendly_name": "Lumière piscine"},
+    },
+]
+
+
+class TestSensorSearch(unittest.TestCase):
+    def setUp(self):
+        self.client = make_client()
+
+    def search(self, query, limit=15):
+        return self.client.match_sensors(FAKE_SENSOR_STATES, query, limit)
+
+    def test_finds_by_keyword(self):
+        out = self.search("piscine")
+        self.assertIn("Piscine Water Temperature: 29.8 °C", out)
+        self.assertIn("Piscine pH Level: 7.2", out)
+
+    def test_skips_unknown_and_unavailable(self):
+        out = self.search("piscine")
+        self.assertNotIn("Pump State", out)
+        self.assertNotIn("Pool Cover State", out)
+
+    def test_ignores_non_sensor_domains(self):
+        self.assertNotIn("Lumière piscine", self.search("piscine"))
+
+    def test_more_specific_query_ranks_first(self):
+        """Both words matching beats one — 'piscine ph' must not lead with a temperature."""
+        self.assertTrue(self.search("piscine ph").startswith("Piscine pH Level"))
+
+    def test_accent_and_case_insensitive(self):
+        self.assertIn("Chaudière température: 51.4 °C", self.search("CHAUDIERE"))
+
+    def test_no_match(self):
+        self.assertIn("Aucun capteur trouvé", self.search("tracteur"))
+
+    def test_truncates_and_says_so(self):
+        out = self.search("piscine", limit=2)
+        self.assertEqual(len(out.split("\n")), 3)
+        self.assertIn("1 autres capteurs non affichés", out)
 
 
 # ---------------------------------------------------------------------------
