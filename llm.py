@@ -2,12 +2,18 @@
 
 import json
 import logging
+import os
 import re
 from typing import Optional
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+# Reasoning budget for thinking-capable models. Empty = leave the field out.
+# Local models default to "none" (see chat_completion); cloud APIs validate this
+# field strictly, so there it is only sent when explicitly configured.
+REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "")
 
 _TOOL_NAMES = {
     "turn_on",
@@ -341,6 +347,16 @@ async def chat_completion(
         max_tokens_key: max_tokens,
         "temperature": temperature,
     }
+    # Thinking models burn the whole token budget on internal deliberation before
+    # emitting anything: gemma4:12b spent 441 tokens reasoning about "et dans la
+    # salle de jeux ?" and 9.8s, vs 13 tokens and 0.7s with reasoning off. Worse,
+    # it usually hits the cap first, leaving `content` empty and triggering the
+    # length-retry below — which regenerates from scratch with a *bigger* budget
+    # to ruminate in. Nothing here needs a scratchpad: the pipeline is a tool call
+    # or a one-sentence answer. Beware "low" — it thinks anyway, then truncates.
+    effort = REASONING_EFFORT or ("" if api_key else "none")
+    if effort:
+        payload["reasoning_effort"] = effort
     if model:
         payload["model"] = model
     if tools:

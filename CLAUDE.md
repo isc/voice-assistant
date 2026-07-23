@@ -68,6 +68,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `LLM_URL` | `http://localhost:8080/v1/chat/completions` | LLM endpoint |
 | `LLM_API_KEY` | (empty) | If set, enables cloud mode |
 | `LLM_MODEL` | (empty) | Model name for cloud API (e.g. `gpt-5.4-nano`) |
+| `LLM_REASONING_EFFORT` | `none` local, unset cloud | Reasoning budget for thinking models. Keep `none` locally — thinking costs ~10s/round and empties `content` |
 | `STT_BACKEND` | `auto` | Parakeet backend: `mlx` (Apple), `onnx` (Linux/CUDA via onnx-asr), or `auto` |
 | `HA_URL` | (required) | Home Assistant URL |
 | `HA_TOKEN` | (empty) | HA long-lived access token |
