@@ -753,7 +753,12 @@ class VoiceAssistantServer:
 
     async def process_with_llm(self, api: Optional[APIClient], text: str, dry_run: bool = False) -> Optional[str]:
         """LLM via OpenAI-compatible API (local llama.cpp or cloud provider)"""
-        from llm import chat_completion, get_tool_definitions, parse_text_tool_call
+        from llm import (
+            chat_completion,
+            claims_completed_action,
+            get_tool_definitions,
+            parse_text_tool_call,
+        )
 
         logger.info(f'LLM input: "{text}"')
 
@@ -835,8 +840,33 @@ class VoiceAssistantServer:
 
         self._last_tool_calls = []
         max_rounds = 3
+        challenged_empty_claim = False
         for round_num in range(max_rounds):
             if "tool_calls" not in message or not message["tool_calls"]:
+                # The model sometimes answers "c'est fait, j'ai ouvert les volets"
+                # having called nothing at all. With no tool call behind it, that
+                # claim is false by construction. Give it one chance to actually
+                # act before the answer reaches the user.
+                claim = (message.get("content") or "").strip()
+                if not self._last_tool_calls and not challenged_empty_claim and claims_completed_action(claim):
+                    challenged_empty_claim = True
+                    logger.warning(f"Action claimed with no function call: {claim!r} — challenging")
+                    messages.append(message)
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Tu viens d'affirmer avoir effectué une action alors que tu n'as "
+                                "appelé AUCUNE fonction : rien n'a été fait. Appelle maintenant les "
+                                "fonctions nécessaires. Si la demande n'exige aucune action, réponds "
+                                "sans prétendre avoir agi."
+                            ),
+                        }
+                    )
+                    message = await chat_completion(LLM_URL, LLM_API_KEY, LLM_MODEL, messages, tools=tools)
+                    if not message:
+                        break
+                    continue
                 break
 
             # Run this round's calls concurrently. An HA service call blocks until
@@ -929,6 +959,14 @@ class VoiceAssistantServer:
                 return result
             except Exception as e:
                 logger.warning(f"Failed to execute text tool call: {e}")
+
+        # Last resort: never hand back a claim of an action that never ran. Safe
+        # because we only get here with zero tool calls executed this turn.
+        if not self._last_tool_calls and claims_completed_action(content):
+            logger.error(f"Unbacked action claim survived the challenge: {content!r}")
+            response = "Désolé, je n'ai pas réussi à faire ça."
+            save_to_history(response)
+            return response
 
         logger.info(f'LLM response: "{content}"')
         if content:

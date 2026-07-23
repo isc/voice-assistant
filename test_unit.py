@@ -14,7 +14,7 @@ import asyncio
 import unittest
 
 from ha_client import HAClient, cover_kind, normalize
-from llm import parse_text_tool_call
+from llm import claims_completed_action, parse_text_tool_call
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -297,6 +297,39 @@ class TestCoverKinds(unittest.TestCase):
         prompt = self.client.get_entity_list_for_prompt()
         self.assertIn("fenêtres: Fenêtre Cuisine", prompt)
         self.assertIn("volets: Volet Cuisine", prompt)
+
+
+# ---------------------------------------------------------------------------
+# Tests: detecting an action claimed without any function call
+# ---------------------------------------------------------------------------
+
+
+class TestActionClaimDetection(unittest.TestCase):
+    def test_claims(self):
+        for text in [
+            "C'est fait, j'ai ouvert toutes les fenêtres à l'exception de celle de Charlie.",
+            "C'est entendu, je ferme tous les volets sauf celui de la chambre de Charlie.",
+            "Voilà, la lumière du salon est allumée.",
+            "J'ai bien réglé le thermostat à 20 degrés.",
+            "J'ai éteint les lumières.",
+        ]:
+            self.assertTrue(claims_completed_action(text), text)
+
+    def test_does_not_flag_state_reports(self):
+        """Reading a state out loud is not claiming to have changed it."""
+        for text in [
+            "Oui, le volet de la salle de jeux est fermé.",
+            "Non, les volets de la cuisine sont actuellement fermés.",
+            "L'eau de la piscine est à 29,8 degrés.",
+            "Il est actuellement 20h32.",
+            "Lundi 27 juillet, tu as la livraison du piano.",
+            "Je n'ai pas accès à cette information.",
+        ]:
+            self.assertFalse(claims_completed_action(text), text)
+
+    def test_empty(self):
+        self.assertFalse(claims_completed_action(""))
+        self.assertFalse(claims_completed_action(None))
 
 
 # ---------------------------------------------------------------------------

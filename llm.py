@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from typing import Optional
 
 import aiohttp
@@ -30,6 +31,28 @@ _TOOL_NAMES = {
     "query_calendar",
     "create_event",
 }
+
+
+# Claims of having carried something out, matched on accent-stripped lowercase.
+# Deliberately about *actions performed*: a state report ("le volet est fermé")
+# must not match.
+_ACTION_CLAIM = re.compile(
+    r"c'est fait|c'est entendu|voila|"
+    r"j'ai (?:bien )?(?:ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont)|"
+    r"\bje (?:ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte)\b"
+)
+
+
+def claims_completed_action(text: str) -> bool:
+    """Whether a reply asserts an action was carried out.
+
+    Only meaningful when the model called no function at all — in that case the
+    claim is false by construction, since nothing was executed.
+    """
+    flat = "".join(
+        c for c in unicodedata.normalize("NFD", (text or "").lower()) if unicodedata.category(c) != "Mn"
+    )
+    return bool(_ACTION_CLAIM.search(flat))
 
 
 def get_tool_definitions(ha_client, calendar_client=None) -> list:
