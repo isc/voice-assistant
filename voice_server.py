@@ -136,6 +136,9 @@ class VoiceAssistantServer:
         # Cap on concurrent tool calls: fast enough for a whole-house command while
         # staying gentle on the single HomeKit bridge relaying every Velux.
         self._tool_semaphore = asyncio.Semaphore(4)
+        # Actuation service calls are fired here and drain in the background — held
+        # so the tasks aren't garbage-collected mid-flight, discarded on completion.
+        self._pending_service_calls: set = set()
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -671,9 +674,18 @@ class VoiceAssistantServer:
         if function_name == "set_cover_position" and "position" in arguments:
             extra["position"] = arguments["position"]
 
+        # Fire and forget. An HA service call blocks until the HomeKit bridge
+        # acknowledges (~0.5-1.8s/Velux, serialised by the bridge → ~10s for eight),
+        # but a 200 only means HA dispatched the command, not that the shutter
+        # finished moving — the spoken reply ("en cours d'ouverture") is optimistic
+        # either way. So don't make the user wait for acks: schedule the calls and
+        # let them drain while the pipeline moves on to the reply. call_service
+        # swallows and logs its own errors, so a failed background call never raises.
         for entity_id in entity_ids:
             domain = entity_id.split(".")[0]
-            await self.ha_client.call_service(domain, service, entity_id, **extra)
+            task = asyncio.ensure_future(self.ha_client.call_service(domain, service, entity_id, **extra))
+            self._pending_service_calls.add(task)
+            task.add_done_callback(self._pending_service_calls.discard)
 
         if len(entity_ids) > 1:
             whole_house = room and room.lower().strip() in (
@@ -1140,6 +1152,11 @@ async def main():
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
     finally:
+        # Let any fire-and-forget service calls reach HA before we tear down the
+        # session — otherwise a restart right after "ferme tout" drops commands.
+        if server._pending_service_calls:
+            logger.info(f"Draining {len(server._pending_service_calls)} pending service calls...")
+            await asyncio.gather(*server._pending_service_calls, return_exceptions=True)
         if server._reconnect_logic:
             await server._reconnect_logic.stop()
         if server.calendar_client:
