@@ -79,7 +79,7 @@ Needs Spotify Premium, `ffmpeg`, and two pieces:
    ```yaml
    device_name: Assistant vocal
    audio_backend: pipe
-   audio_output_pipe: /run/go-librespot/pcm   # create it with mkfifo before starting
+   audio_output_pipe: /run/go-librespot/pcm   # create it with mkfifo before starting (see below)
    audio_output_pipe_format: s16le
    external_volume: true                       # the speakers own the volume
    credentials:
@@ -89,6 +89,10 @@ Needs Spotify Premium, `ffmpeg`, and two pieces:
      address: 127.0.0.1
      port: 3678
    ```
+
+   Start it with the FIFO's read end held open, e.g. `sh -c 'exec 3<>/run/go-librespot/pcm; exec go-librespot …'`:
+   otherwise a restart of the voice server breaks the pipe, and go-librespot closes its output
+   for good (it then reports playing while writing nothing).
 
 2. **A Spotify developer app** (developer.spotify.com/dashboard, Web API) for search: set
    `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. The session token go-librespot hands out
