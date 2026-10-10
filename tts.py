@@ -16,6 +16,23 @@ MODELS_DIR = Path("/tmp/kokoro_models")
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
 VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
+# Clock times as the LLM writes them: "17h34", "7h", "17:34". espeak reads the "h" as the letter.
+_CLOCK_TIME = re.compile(r"\b([01]?\d|2[0-3])(?:h([0-5]\d)?|:([0-5]\d))(?![\w:])")
+# Hours and minutes are feminine: "une heure", "vingt et une heures", "dix heures trente et une"
+_FEMININE = {1: "une", 21: "vingt et une", 31: "trente et une", 41: "quarante et une", 51: "cinquante et une"}
+
+
+def spell_times(text: str) -> str:
+    """Spell clock times out for speech: "17h34" -> "17 heures 34", "1h" -> "une heure"."""
+
+    def spell(match: re.Match) -> str:
+        hour = int(match.group(1))
+        minute = int(match.group(2) or match.group(3) or 0)
+        words = f"{_FEMININE.get(hour, hour)} heure{'s' if hour > 1 else ''}"
+        return f"{words} {_FEMININE.get(minute, minute)}" if minute else words
+
+    return _CLOCK_TIME.sub(spell, text)
+
 
 class KokoroTTS:
     """Kokoro-82M TTS engine with French phonemization."""
@@ -62,6 +79,7 @@ class KokoroTTS:
         clean_text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean_text)
         clean_text = re.sub(r"`([^`]+)`", r"\1", clean_text)
         clean_text = re.sub(r"\s+", " ", clean_text).strip()
+        clean_text = spell_times(clean_text)
 
         logger.info(f"Synthesizing: '{clean_text[:80]}...'")
 
