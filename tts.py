@@ -12,7 +12,10 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-MODELS_DIR = Path("/tmp/kokoro_models")
+# Next to the code, not in /tmp: /tmp is emptied at boot, and the server could not start without GitHub
+MODELS_DIR = Path(__file__).parent / "models"
+# Replies are fetched once by the speaker, right after being written
+_REPLY_MAX_AGE = 600  # seconds
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
 VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
@@ -64,14 +67,30 @@ class KokoroTTS:
         else:
             logger.info("Kokoro models already cached")
 
-        self.engine = kokoro_onnx.Kokoro(str(model_path), str(voices_path))
+        self.engine = self._engine(kokoro_onnx, model_path, voices_path)
         self.g2p = EspeakG2P(language="fr-fr")
         logger.info("Kokoro TTS ready (voice: ff_siwis, French G2P via espeak)")
+
+    @staticmethod
+    def _engine(kokoro_onnx, model_path: Path, voices_path: Path):
+        """Kokoro on CUDA when onnxruntime has it: kokoro-onnx 0.5 looks for the GPU package under a
+        name find_spec never finds, and ran on the CPU (0.18 x real time)."""
+        import onnxruntime
+
+        wanted = ("CUDAExecutionProvider", "CPUExecutionProvider")
+        providers = [p for p in wanted if p in onnxruntime.get_available_providers()]
+        session = onnxruntime.InferenceSession(str(model_path), providers=providers)
+        logger.info(f"Kokoro providers: {session.get_providers()}")
+        return kokoro_onnx.Kokoro.from_session(session, str(voices_path))
 
     async def synthesize_to_file(self, text: str, output_dir: Path, base_url: str) -> str:
         """Generate a 16kHz WAV file and return its URL."""
         filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.wav"
         output_path = output_dir / filename
+        # Older replies: the speaker fetched them long ago, and they kept every answer since boot
+        for old in output_dir.glob("tts_*.wav"):
+            if time.time() - old.stat().st_mtime > _REPLY_MAX_AGE:
+                old.unlink(missing_ok=True)
 
         # Strip markdown artifacts before TTS
         clean_text = re.sub(r"\*+", "", text)
@@ -90,7 +109,7 @@ class KokoroTTS:
         logger.info(f"Phonemes: {phonemes}")
 
         # Generate audio with Kokoro (runs sync, use executor)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         audio_24k, sr = await loop.run_in_executor(
             None,
             lambda: self.engine.create(phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True),
@@ -100,9 +119,11 @@ class KokoroTTS:
 
         # Resample 24kHz -> 16kHz (ESP expects 16kHz)
         target_sr = 16000
+        # Band-limited (FFT): linear interpolation folded Kokoro's 8-12 kHz back into the audible
+        # band (a 10 kHz tone came out at 6 kHz, -5 dB)
         num_samples_16k = int(len(audio_24k) * target_sr / sr)
-        indices = np.linspace(0, len(audio_24k) - 1, num_samples_16k)
-        audio_16k = np.interp(indices, np.arange(len(audio_24k)), audio_24k).astype(np.float32)
+        spectrum = np.fft.rfft(audio_24k)[: num_samples_16k // 2 + 1]
+        audio_16k = (np.fft.irfft(spectrum, num_samples_16k) * num_samples_16k / len(audio_24k)).astype(np.float32)
 
         # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
         audio_int16 = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16)

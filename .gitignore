@@ -32,6 +32,7 @@ venv.bak/
 *.log
 exchanges.json
 recordings/
+models/
 
 # Claude Code
 .claude/settings.local.json

@@ -14,6 +14,7 @@ import socket
 import sys
 import tempfile
 import time
+import wave
 from contextvars import ContextVar
 from functools import partial
 from pathlib import Path
@@ -22,10 +23,14 @@ from urllib.parse import urljoin
 
 from aioesphomeapi import (
     APIClient,
+    APIConnectionError,
     MediaPlayerCommand,
+    MediaPlayerEntityState,
     MediaPlayerInfo,
+    MediaPlayerState,
     VoiceAssistantEventType,
 )
+from aioesphomeapi.core import TimeoutAPIError
 from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
@@ -207,12 +212,15 @@ class VoiceAssistantServer:
 
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word
-        self._end_conversation = False  # Set by end_conversation tool
+        self._end_conversation = False  # Set by end_conversation tool: no follow-up, history cleared
+        self._no_followup = False  # Set by media commands: no follow-up, history kept (AD-035)
 
         # Media playback state. Media targets are ("esp", site name) or ("ha", entity_id),
         # the last one per site for follow-ups (_last_media_target).
         # Site name -> its satellite's media_player entity key (discovered at connect time)
         self.device_media_keys: Dict[str, int] = {}
+        # Site name -> what its satellite's own player does (announcements left out)
+        self.device_media_states: Dict[str, MediaPlayerState] = {}
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
@@ -409,7 +417,8 @@ class VoiceAssistantServer:
 
         app = web.Application()
         setup_routes(app, self)
-        app.router.add_static("/tts/", self.tts_dir, show_index=True)
+        # No listing: the LAN may fetch a reply by its URL, not browse every one
+        app.router.add_static("/tts/", self.tts_dir)
         if self.spotify:
             app.router.add_get("/spotify/stream.mp3", self.spotify.stream.handle)
 
@@ -470,18 +479,32 @@ class VoiceAssistantServer:
 
             self.devices[site.name] = api
             await self._discover_device_entities(api, site)
+            api.subscribe_states(partial(self._on_satellite_state, site))
             await self.setup_voice_assistant(api, site)
 
         async def on_disconnect(expected_disconnect: bool) -> None:
             reason = "expected" if expected_disconnect else "unexpected"
             logger.warning(f"Site {site.label}: ESP {host} disconnected ({reason}), will reconnect automatically")
             self.devices.pop(site.name, None)
+            # A recording cut short would hold the voice state, refusing the other site for 30 s
+            if site is self._voice_site and self.is_recording:
+                self.is_recording = False
 
         # No name: ReconnectLogic derives it from the host, and matches mDNS announcements with it
         # (an x.local satellite reconnects as soon as it appears; an IP gets no listener)
         reconnect_logic = ReconnectLogic(client=api, on_connect=on_connect, on_disconnect=on_disconnect)
         self._reconnect_logics.append(reconnect_logic)
         await reconnect_logic.start()
+
+    def _on_satellite_state(self, site: Site, state) -> None:
+        if isinstance(state, MediaPlayerEntityState) and state.key == self.device_media_keys.get(site.name):
+            # An announcement plays over the media, which resumes after it
+            if state.state != MediaPlayerState.ANNOUNCING:
+                self.device_media_states[site.name] = state.state
+
+    def _satellite_plays(self) -> bool:
+        """Whether this site's satellite plays music or a radio itself."""
+        return self.device_media_states.get(self.site.name) == MediaPlayerState.PLAYING
 
     async def _discover_device_entities(self, api: APIClient, site: Site):
         """List the satellite's entities and remember its media_player key (for direct radio playback)."""
@@ -564,19 +587,18 @@ class VoiceAssistantServer:
     async def monitor_recording_timeout(self, api: APIClient):
         """Safety timeout. In follow-up mode, wait 5s for speech to start,
         then extend to 30s once speech is detected."""
-        if self.is_followup:
-            # Short timeout: end if nobody speaks
-            await asyncio.sleep(5.0)
-            if self.is_recording and not self.vad_has_speech:
-                logger.info("No speech in follow-up - stopping")
-                await self.stop_recording(api, "no speech")
-                return
-            # Speech detected: switch to normal timeout for the rest
-            remaining = 25.0  # 30s total max
-            logger.info("Speech detected in follow-up, extending timeout to 30s")
-            await asyncio.sleep(remaining)
-        else:
-            await asyncio.sleep(30.0)
+        # End early if nobody speaks: 5 s in a follow-up, 8 s after a wake word (a false one kept
+        # the mic open 30 s, recording the room)
+        wait = 5.0 if self.is_followup else 8.0
+        await asyncio.sleep(wait)
+        if not self.is_recording:
+            return
+        if not self.vad_has_speech:
+            logger.info("No speech - stopping")
+            await self.stop_recording(api, "no speech")
+            return
+        # Speech detected: the normal limit for the rest, 30 s in all
+        await asyncio.sleep(30.0 - wait)
 
         if self.is_recording:
             logger.warning("SAFETY TIMEOUT reached (30s)")
@@ -597,11 +619,14 @@ class VoiceAssistantServer:
                 api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
                 logger.info("STT_VAD_END sent - LEDs orange (thinking)")
 
-            if len(audio_data) > 0:
+            if audio_data:
                 await self.process_voice_pipeline(api, audio_data)
+            else:
+                # Nothing to process: without RUN_END the ESP would stay listening
+                api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
 
-        except Exception as e:
-            logger.error(f"Error stopping recording: {e}")
+        except Exception:
+            logger.exception("Error stopping recording")
 
     async def handle_voice_assistant_stop(self, site: Site, abort: bool):
         """Called when a site's voice assistant stops"""
@@ -609,6 +634,15 @@ class VoiceAssistantServer:
         if site is not self._voice_site:
             return
         self.site = site
+
+        # The device stopped the run itself (start=False): the user closed the mic, so no reply
+        if abort:
+            if self.is_recording:
+                self.is_recording = False
+                if self.recording_task and self.recording_task is not asyncio.current_task():
+                    self.recording_task.cancel()
+                logger.info("Run stopped by the device - request dropped")
+            return
 
         if self.is_recording and len(self.audio_buffer) > 0:
             logger.info(f"Complete audio received: {len(self.audio_buffer)} bytes")
@@ -619,30 +653,29 @@ class VoiceAssistantServer:
         else:
             logger.info("No audio to process")
 
-    async def _play_tts_and_continue(self, api: APIClient, audio_url: str):
-        """Play TTS audio via announcement API and start follow-up listening.
-        Uses send_voice_assistant_announcement_await_response which both plays
-        the audio and tells the ESP to start a new pipeline when done.
+    async def _announce(self, api: APIClient, audio_url: str, follow_up: bool) -> None:
+        """Play a reply on the satellite; with follow_up, it then listens again without wake word.
 
-        Note: with start_conversation=True, ESPHome firmware (v2025.6.2) only sends
-        VoiceAssistantAnnounceFinished after the full conversation cycle completes, not
-        after the audio ends. We use a short timeout to cancel the pending Future before
-        the ESP sends its late response (~25-37s), which would otherwise crash the API
-        connection and trigger an ESP soft-reset (red LEDs).
+        AnnounceFinished comes at the end of playback, the follow-up START 30-50 ms later
+        (journal, 2026-10-10), so the wait is the audio's length plus a margin.
         """
+        timeout = self._wav_seconds(audio_url) + 5
         try:
-            logger.info(f"Playing TTS and requesting follow-up: {audio_url}")
-            result = await api.send_voice_assistant_announcement_await_response(
-                media_id=audio_url,
-                timeout=8.0,
-                text="",
-                start_conversation=True,
+            logger.info(f"Playing TTS (follow-up: {follow_up}): {audio_url}")
+            await api.send_voice_assistant_announcement_await_response(
+                media_id=audio_url, timeout=timeout, text="", start_conversation=follow_up
             )
-            logger.info(f"TTS playback done, follow-up started (success={result.success})")
-        except TimeoutError:
-            logger.info("TTS playing (follow-up starting, no announce confirmation)")
-        except Exception as e:
-            logger.warning(f"TTS announcement error: {e}")
+        except TimeoutAPIError:  # aioesphomeapi's own: not a TimeoutError
+            logger.warning(f"Announcement not confirmed within {timeout:.0f} s: {audio_url}")
+        except APIConnectionError as e:
+            logger.warning(f"Announcement failed: {e}")
+
+    def _wav_seconds(self, audio_url: str) -> float:
+        try:
+            with wave.open(str(self.tts_dir / audio_url.rsplit("/", 1)[-1])) as wav:
+                return wav.getnframes() / wav.getframerate()
+        except (OSError, wave.Error):
+            return 30.0
 
     async def handle_voice_assistant_audio(self, site: Site, audio_bytes: bytes, _data2: bytes | None = None):
         """Handle audio received from a site's ESP with VAD detection.
@@ -660,7 +693,7 @@ class VoiceAssistantServer:
             await self.analyze_audio_vad(audio_bytes)
 
             if len(self.audio_buffer) % 10240 == 0 or len(self.audio_buffer) < 10240:
-                logger.info(f"Audio: {len(self.audio_buffer)} bytes")
+                logger.debug(f"Audio: {len(self.audio_buffer)} bytes")
         else:
             logger.debug("Audio received after recording stopped (normal)")
 
@@ -714,7 +747,7 @@ class VoiceAssistantServer:
     async def process_voice_pipeline(self, api: APIClient, audio_bytes: bytes):
         """Main pipeline: Audio -> STT -> LLM -> TTS"""
         logger.info(f"Starting full voice pipeline ({self.site.label})")
-        self._end_conversation = False
+        self._end_conversation = self._no_followup = False
         self._pipeline_running = True
         timings = {}
         # What became of the request, for the exchange log and beside its recording
@@ -1008,10 +1041,10 @@ class VoiceAssistantServer:
         return None
 
     def _after_media_change(self, target: Optional[tuple[str, str]]) -> None:
-        """Remember the speaker for volume follow-ups and end the conversation (an open mic would transcribe the radio)."""
+        """Remember the speaker for volume follow-ups; no follow-up listening (an open mic would transcribe the radio)."""
         if target:
             self._last_media_target = target
-        self._end_conversation = True
+        self._no_followup = True
 
     async def _execute_media_function(self, function_name: str, arguments: dict) -> str:
         """Handle play_radio / stop_media / set_volume / change_volume tool calls.
@@ -1239,7 +1272,9 @@ class VoiceAssistantServer:
 
     async def _announce_timer_finished(self, api, timer, site: Site):
         """Generate TTS and play announcement when a timer finishes."""
-        if timer.name:
+        if timer.is_alarm:
+            text = f"Il est {timer.target_time}, c'est l'heure{f' : {timer.name}' if timer.name else ''} !"
+        elif timer.name:
             text = f"Le timer {timer.name} est terminé !"
         else:
             text = f"Le timer de {_format_duration(timer.total_seconds)} est terminé !"
@@ -1247,14 +1282,10 @@ class VoiceAssistantServer:
         try:
             audio_url = await self.text_to_speech_file(text, site)
             logger.info(f"Timer finished announcement: {text}")
-            await api.send_voice_assistant_announcement_await_response(
-                media_id=audio_url,
-                timeout=8.0,
-                text="",
-                start_conversation=True,
-            )
-        except Exception as e:
-            logger.error(f"Timer announcement error: {e}")
+            # The timer's task serves its site (the context it was created in)
+            await self._announce(api, audio_url, follow_up=not self._satellite_plays())
+        except Exception:
+            logger.exception("Timer announcement error")
 
     # === LLM ===
 
@@ -1523,12 +1554,12 @@ class VoiceAssistantServer:
         play_time = 0.0
 
         try:
-            # Don't split sentences for end_conversation — multiple announcements
-            # with start_conversation=False cause the ESP to miss AnnounceFinished.
-            if self._end_conversation:
-                sentences = [text]
-            else:
-                sentences = self._split_sentences(text)
+            # No follow-up after a goodbye or a media command, nor while the satellite plays music
+            # itself: a reply with follow-up over its own player went unconfirmed and the Voice PE
+            # rebooted (2026-10-10, 23:13). Without follow-up, one announcement: several with
+            # start_conversation=False made the ESP miss AnnounceFinished.
+            follow_up = not (self._end_conversation or self._no_followup or self._satellite_plays())
+            sentences = self._split_sentences(text) if follow_up else [text]
             logger.info(f"TTS: {len(sentences)} sentence(s) to generate")
 
             # Generate first sentence
@@ -1552,29 +1583,11 @@ class VoiceAssistantServer:
                 logger.info(f"TTS: playing sentence {i + 1}/{len(sentences)}")
                 t_play = time.time()
 
-                if is_last and not self._end_conversation:
-                    await self._play_tts_and_continue(api, current_url)
-                elif is_last and self._end_conversation:
-                    logger.info("End of conversation - no follow-up")
-                    try:
-                        await api.send_voice_assistant_announcement_await_response(
-                            media_id=current_url,
-                            timeout=30.0,
-                            text="",
-                            start_conversation=False,
-                        )
-                    except TimeoutError:
-                        logger.warning("End-of-conversation announcement timed out")
+                await self._announce(api, current_url, follow_up=is_last and follow_up)
+                if is_last and self._end_conversation:
                     self.conversation_history = []
                     self.conversation_id = None
                     logger.info("Conversation ended, history cleared")
-                else:
-                    await api.send_voice_assistant_announcement_await_response(
-                        media_id=current_url,
-                        timeout=30.0,
-                        text="",
-                        start_conversation=False,
-                    )
 
                 play_time += time.time() - t_play
 

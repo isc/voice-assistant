@@ -1229,6 +1229,41 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         self.server.site = self.charras
         self.assertIs(self.server.device, satellite)
 
+    def media_state(self, state):
+        from aioesphomeapi import MediaPlayerEntityState
+
+        self.server.device_media_keys = {"paris": 7}
+        self.server._on_satellite_state(self.paris, MediaPlayerEntityState(key=7, state=state))
+
+    def test_satellite_playing_ignores_announcements(self):
+        from aioesphomeapi import MediaPlayerState
+
+        self.server.device_media_states = {}
+        self.media_state(MediaPlayerState.PLAYING)
+        self.media_state(MediaPlayerState.ANNOUNCING)  # a reply over the music, which resumes after
+        self.assertTrue(self.server._satellite_plays())
+        self.media_state(MediaPlayerState.IDLE)
+        self.assertFalse(self.server._satellite_plays())
+
+    async def test_no_follow_up_while_the_satellite_plays(self):
+        """2026-10-10, 23:13: a reply with follow-up over the satellite's own music, then a reboot."""
+        server = self.server
+        server.device_media_states = {"paris": 2}  # MediaPlayerState.PLAYING
+        server._end_conversation = server._no_followup = False
+        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.wav")
+        server._announce = AsyncMock()
+        await server.text_to_speech(MagicMock(), "Première phrase. Deuxième phrase.")
+        server._announce.assert_awaited_once()  # one announcement, not split
+        self.assertFalse(server._announce.await_args.kwargs["follow_up"])
+
+    async def test_announcement_timeout_is_caught(self):
+        from aioesphomeapi.core import TimeoutAPIError
+
+        api = MagicMock()
+        api.send_voice_assistant_announcement_await_response = AsyncMock(side_effect=TimeoutAPIError("late"))
+        self.server.tts_dir = Path("/nonexistent")
+        await self.server._announce(api, "http://x/tts/a.wav", follow_up=True)  # logged, not raised
+
     async def test_timer_event_goes_to_its_sites_satellite(self):
         from aioesphomeapi import VoiceAssistantTimerEventType
 
