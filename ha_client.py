@@ -58,6 +58,11 @@ for _name in [name for name in ROOM_GROUPS if is_whole_house(name)]:
     del ROOM_GROUPS[_name]
 
 
+# difflib ratio for a misheard name: at 0.4, « télé » found the light « Entrée » (0.5) and « lumière »
+# Charlie's « Plafonnier » (0.47); a typo or a plural stays above 0.8
+_FUZZY_CUTOFF = 0.75
+
+
 def _area_matches(norm_area: str, norm_room: str) -> bool:
     """Loose room match, either name inside the other. No area means in no room, not in every one ("" is in any name)."""
     return bool(norm_area) and (norm_room in norm_area or norm_area in norm_room)
@@ -83,15 +88,16 @@ COVER_KIND_KEYWORDS = {
 
 
 def cover_kind(info: dict) -> Optional[str]:
-    """Classify a cover as 'volet' or 'fenetre', None if undetermined."""
-    device_class = info.get("attributes", {}).get("device_class")
-    if device_class in COVER_KIND_BY_DEVICE_CLASS:
-        return COVER_KIND_BY_DEVICE_CLASS[device_class]
+    """Classify a cover as 'volet' or 'fenetre', None if undetermined.
+
+    The name's word first: Z-Wave JS reports the Paris living-room shutters as device_class
+    "window", and « Volet salon » says what it is. device_class for names that say nothing.
+    """
     words = set(normalize(info.get("friendly_name", "")).split())
     for kind, keywords in COVER_KIND_KEYWORDS.items():
         if words.intersection(keywords):
             return kind
-    return None
+    return COVER_KIND_BY_DEVICE_CLASS.get(info.get("attributes", {}).get("device_class"))
 
 
 class HAClient:
@@ -136,7 +142,6 @@ class HAClient:
             logger.error(f"Cannot reach Home Assistant at {self.base_url}: {e}")
             return False
 
-        await self._fetch_areas()
         await self.refresh_entities()
         return True
 
@@ -163,21 +168,30 @@ class HAClient:
         if text is None:
             logger.warning("Could not fetch areas")
             return
-        self.areas.clear()
+        areas = {}
         for line in text.strip().split("\n"):
             if "|" in line:
                 area_id, area_name = line.split("|", 1)
-                self.areas[area_id.strip()] = area_name.strip()
-        logger.info(f"Areas: {', '.join(self.areas.values())}")
+                areas[area_id.strip()] = area_name.strip()
+        if areas != self.areas:
+            self.areas = areas
+            logger.info(f"Areas: {', '.join(areas.values())}")
 
-    async def _fetch_entity_areas(self) -> dict[str, str]:
-        """Fetch entity -> area_id mapping via HA template API."""
-        entity_to_area = {}
-        for area_id in self.areas:
-            text = await self._render_template(f"{{% for e in area_entities('{area_id}') %}}{{{{ e }}}}\n{{% endfor %}}")
-            for eid in (text or "").split():
-                entity_to_area[eid] = area_id
-        return entity_to_area
+    async def _fetch_entity_areas(self) -> Optional[dict[str, str]]:
+        """Fetch entity -> area_id mapping via HA template API, all areas in one call. None on failure."""
+        text = await self._render_template(
+            "{% for a in areas() %}{% for e in area_entities(a) %}{{ e }}|{{ a }}\n{% endfor %}{% endfor %}"
+        )
+        if text is None:
+            return None
+        return dict(line.split("|", 1) for line in text.split() if "|" in line)
+
+    async def _fetch_hidden(self) -> set[str]:
+        """Entities hidden in HA: replaced by another (Paris hides two Fibaro lights for their endpoints)."""
+        text = await self._render_template(
+            "{% for s in states if is_hidden_entity(s.entity_id) %}{{ s.entity_id }}\n{% endfor %}"
+        )
+        return set((text or "").split())
 
     async def _fetch_screens(self) -> list[str]:
         """media_player entities with a screen — Google's Nest Hubs, told apart by device model.
@@ -204,8 +218,14 @@ class HAClient:
             logger.error(f"Error fetching HA states: {e}")
             return
 
+        await self._fetch_areas()
+        # A failed call keeps the rooms already known, rather than placing every device nowhere
         entity_to_area = await self._fetch_entity_areas()
+        if entity_to_area is None:
+            entity_to_area = self.entity_areas
         self.entity_areas = entity_to_area
+        hidden = await self._fetch_hidden()
+        known = set(self.entities)
 
         self.entities.clear()
         for state in states:
@@ -232,7 +252,7 @@ class HAClient:
                 "",
             ):
                 continue
-            if state["state"] == "unavailable":
+            if state["state"] == "unavailable" or entity_id in hidden:
                 continue
 
             area_id = entity_to_area.get(entity_id)
@@ -247,14 +267,15 @@ class HAClient:
                 "area_name": area_name,
             }
 
-        # Log grouped by area
-        by_area: dict[str, list[str]] = {}
-        for eid, info in self.entities.items():
-            area = info["area_name"] or "Sans pièce"
-            by_area.setdefault(area, []).append(f"{info['friendly_name']} ({info['domain']})")
-        for area, items in sorted(by_area.items()):
-            logger.info(f"  {area}: {', '.join(items)}")
-        logger.info(f"Total: {len(self.entities)} entities in {len(by_area)} areas")
+        # Logged grouped by area when it changed: refreshed every few minutes
+        if set(self.entities) != known:
+            by_area: dict[str, list[str]] = {}
+            for eid, info in self.entities.items():
+                area = info["area_name"] or "Sans pièce"
+                by_area.setdefault(area, []).append(f"{info['friendly_name']} ({info['domain']})")
+            for area, items in sorted(by_area.items()):
+                logger.info(f"  {area}: {', '.join(items)}")
+            logger.info(f"Total: {len(self.entities)} entities in {len(by_area)} areas")
 
         self.screens = await self._fetch_screens()
         if self.screens:
@@ -264,6 +285,10 @@ class HAClient:
         """Return entity names grouped by room for the system prompt."""
         by_area: dict[str, dict[str, list[str]]] = {}
         for info in self.entities.values():
+            # A switch HA puts in no room is a setting more than a plug (Charras's 56 alarm-zone
+            # switches, ~600 tokens; the Paris Sonos's loudness): still reachable by its name
+            if info["domain"] == "switch" and not info["area_name"]:
+                continue
             area = info["area_name"] or "Autre"
             domain_label = {
                 "light": "lumières",
@@ -303,6 +328,10 @@ class HAClient:
         "velux": ("cover", "fenetre"),
         "lumiere": ("light", None),
         "lumieres": ("light", None),
+        "lampe": ("light", None),
+        "lampes": ("light", None),
+        "prise": ("switch", None),
+        "prises": ("switch", None),
         "porte": ("lock", None),
         "portes": ("lock", None),
         "serrure": ("lock", None),
@@ -329,6 +358,10 @@ class HAClient:
         self, name: str, room: str | None = None, domain_hints: list[str] | None = None
     ) -> list[str]:
         """Resolve entity name, expanding room groups and generic names into multiple entity_ids."""
+        # « lumière du salon » with no room: a generic word, then where
+        words = normalize(name).split()
+        if not room and len(words) > 1 and words[0] in self._GENERIC_NAMES:
+            name, room = words[0], " ".join(words[1:])
         whole_house = is_whole_house(room)
         is_group = False
         rooms_to_search = [room]
@@ -340,36 +373,55 @@ class HAClient:
             if domain_hints and target_domain not in domain_hints:
                 logger.info(f"'{name}' is a {target_domain}, not one of {domain_hints}")
                 return []
-            # A state read has no domain of its own: « la porte » is the lock, not a switch named Porte
-            domain_hints = domain_hints or [target_domain]
+            # It keeps to its own domain, fallbacks included: « la lumière » of a room without
+            # one is not its speaker or a plug; « la porte » is the lock, not a switch named Porte
+            domain_hints = [target_domain]
 
-        # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"])
-        if room:
-            norm_room = normalize(room)
+        # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"]), also when
+        # said with more words (« les chambres des enfants »)
+        if room and not whole_house:
+            room_words = set(normalize(room).split())
             for group_name, group_rooms in ROOM_GROUPS.items():
-                if norm_room == normalize(group_name):
+                if set(normalize(group_name).split()) <= room_words:
                     rooms_to_search = group_rooms
                     is_group = True
                     break
 
+        sweep = is_group or whole_house
+        # A specific name in a group: that device in each room of the group (« le grand volet des
+        # enfants » is one shutter, not the three); the sweep below only when no room has it
+        if is_group and not target_domain:
+            named = [eid for r in rooms_to_search if (eid := self.resolve_entity(name, r, domain_hints, strict=True))]
+            if named:
+                logger.info(f"Resolve all: '{name}' by name in {room} -> {named}")
+                return list(dict.fromkeys(named))
+
         # ALL entities in scope, for a room group, the whole house, or a generic name in a room
-        # ("les volets des enfants" -> all covers in all children's rooms). A generic name keeps
-        # to its own domain: "les lumières" are not the switches too.
-        domains = [target_domain] if target_domain else (domain_hints if is_group or whole_house else None)
+        # ("les volets des enfants" -> all covers in all children's rooms)
+        if target_domain:
+            domains = [target_domain]
+        elif sweep and domain_hints:
+            # A sweep that names no kind (« éteins tout ») takes no switch: at Charras one cuts
+            # the Freebox Wi-Fi, others are speaker settings
+            domains = [d for d in domain_hints if d != "switch"]
+        else:
+            domains = None
         if domains and room:
             areas = [normalize(r) for r in rooms_to_search]
 
             def in_scope(info: dict) -> bool:
                 norm_area = normalize(info.get("area_name", ""))
                 if whole_house:
-                    # Every light, placed in a room or not; but a sweep over several domains
-                    # ("éteins tout") keeps to devices in a room, which leaves out the settings
-                    # switches of a speaker HA has in no room (Sonos loudness, cross-fade)
+                    # Every light, placed in a room or not; a sweep over several domains keeps to
+                    # devices in a room, leaving out what HA has nowhere (the Paris Sonos)
                     return bool(target_domain or norm_area)
                 return any(_area_matches(norm_area, a) for a in areas)
 
             entity_ids = [eid for eid, info in self.entities.items() if info["domain"] in domains and in_scope(info)]
-            entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
+            # The kind the name says (« Fenêtre… », « Volet… »); a sweep naming none leaves the
+            # roof windows shut, only the shutters move
+            kind = generic_kind or cover_kind({"friendly_name": name}) or ("volet" if sweep else None)
+            entity_ids = self._filter_by_cover_kind(entity_ids, kind)
             if entity_ids:
                 logger.info(f"Resolve all: '{name}' (room={room}) -> {entity_ids}")
                 return entity_ids
@@ -382,66 +434,98 @@ class HAClient:
                 entity_ids.append(eid)
         return entity_ids
 
-    def resolve_entity(
-        self, name: str, room: str | None = None, domain_hints: list[str] | None = None
-    ) -> Optional[str]:
-        """Fuzzy-match a natural language name to an entity_id, optionally scoped to a room."""
-        norm_input = normalize(name)
-        norm_room = normalize(room) if room else None
-
-        # Build candidate list filtered by domain and optionally room
-        candidates = {}
+    def _candidates(self, norm_name: str, norm_room: Optional[str], domain_hints: Optional[list[str]]) -> dict:
+        """entity_id -> normalized name, for the domains and room given."""
+        found = {}
         for eid, info in self.entities.items():
             if domain_hints and info["domain"] not in domain_hints:
                 continue
             if norm_room and not _area_matches(normalize(info.get("area_name", "")), norm_room):
                 continue
-            candidates[eid] = normalize(info["friendly_name"])
-
+            found[eid] = normalize(info["friendly_name"])
         # "les volets" must never fall back onto a roof window (both are covers)
-        kind = self._GENERIC_NAMES.get(norm_input, (None, None))[1]
+        kind = self._GENERIC_NAMES.get(norm_name, (None, None))[1]
         if kind:
-            kept = self._filter_by_cover_kind(list(candidates), kind)
-            candidates = {eid: candidates[eid] for eid in kept}
+            found = {eid: found[eid] for eid in self._filter_by_cover_kind(list(found), kind)}
+        return found
 
-        if not candidates:
-            # Dropping the room filter rescues a room name HA doesn't know ("salon"
-            # for an area called "Living Room"). But when the area *does* exist and
-            # simply holds no such device, searching the rest of the house is how
-            # "ouvre tous les volets sauf celui de Charlie" ended up opening
-            # Charlie's: the LLM invented a shutter in Zoé's room, nothing matched
-            # there, and the unscoped retry landed on the one room to avoid.
-            # Admitting there is no such device beats actuating another room's.
-            if norm_room and not self._area_exists(norm_room):
+    def resolve_entity(
+        self,
+        name: str,
+        room: str | None = None,
+        domain_hints: list[str] | None = None,
+        strict: bool = False,
+    ) -> Optional[str]:
+        """Match a spoken name to an entity_id, optionally scoped to a room.
+
+        strict: only a device whose name matches the request — no lone candidate, no fuzzy
+        matching, no retry elsewhere — for a group probing each of its rooms.
+        """
+        norm_input = normalize(name)
+        norm_room = normalize(room) if room else None
+        generic = norm_input in self._GENERIC_NAMES
+
+        candidates = self._candidates(norm_input, norm_room, domain_hints)
+        in_known_room = bool(candidates) and bool(norm_room)
+        if not candidates and norm_room and not strict:
+            # When the area exists and simply holds no such device, searching the rest of the house
+            # is how "ouvre tous les volets sauf celui de Charlie" ended up opening Charlie's: the LLM
+            # invented a shutter in Zoé's room, nothing matched there, and the unscoped retry landed
+            # on the one room to avoid. Admitting there is no such device beats actuating another room's.
+            if self._area_exists(norm_room):
+                logger.info(f"No match for '{name}' in room '{room}' (room exists, no such device)")
+                return None
+            # A room HA doesn't know: Paris names some lights after their room instead of placing
+            # them in one (« Couloir », « Bibliothèque »), so the room's words in a name locate it
+            room_words = set(norm_room.split())
+            candidates = {
+                eid: n for eid, n in self._candidates(norm_input, None, domain_hints).items() if room_words <= set(n.split())
+            }
+            if not candidates:
+                # "salon" for an area called "Living Room": the name alone may still say which
                 logger.info(f"Room '{room}' unknown to HA, retrying without room filter")
                 return self.resolve_entity(name, room=None, domain_hints=domain_hints)
-            if norm_room:
-                logger.info(f"No match for '{name}' in room '{room}' (room exists, no such device)")
+        if not candidates:
             return None
 
-        # If room narrows to a single entity of the matching domain, use it directly
-        if len(candidates) == 1:
+        if norm_input:
+            # The device named exactly; else the closest name containing the request; else the
+            # longest name the request contains (« lumière du salon » holds « salon »)
+            exact = [eid for eid, n in candidates.items() if n == norm_input]
+            containing = sorted((eid for eid, n in candidates.items() if norm_input in n), key=lambda e: len(candidates[e]))
+            contained = sorted(
+                (eid for eid, n in candidates.items() if n and n in norm_input), key=lambda e: -len(candidates[e])
+            )
+            # Strict, a name the request merely contains is no match: « grand volet » is not « volet »
+            for how, found in (("exact", exact), ("substring", containing), ("substring", [] if strict else contained)):
+                if found:
+                    logger.info(f"Entity match: '{name}' (room='{room}') -> {found[0]} ({how})")
+                    return found[0]
+        if strict:
+            return None
+
+        # The one device left is meant when the request names no particular device (« la lumière »,
+        # or the room itself for a speaker), when a one-domain action is scoped to a room HA knows
+        # (the only cover of the bedroom), or for a lock, whose names are said many ways. Not
+        # otherwise: "télé" is not the light Entrée, nor a Sonos left out the Google Home.
+        unnamed = not norm_input or generic or norm_input == norm_room
+        one_domain = bool(domain_hints) and len(domain_hints) == 1
+        any_name = domain_hints == ["lock"] or (in_known_room and one_domain)
+        if len(candidates) == 1 and (unnamed or any_name):
             eid = next(iter(candidates))
             logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (only match in room)")
             return eid
 
-        # Exact substring match
-        for eid, norm_name in candidates.items():
-            if norm_input and (norm_input in norm_name or norm_name in norm_input):
-                logger.info(f"Entity match: '{name}' -> {eid} (substring)")
-                return eid
-
-        # If we have a room and multiple candidates, pick the first one
-        # (common case: user says "la lumière" and there's only one light in that room)
-        if norm_room and norm_input in self._GENERIC_NAMES:
+        # « la lumière » of a room with several: the first one
+        if norm_room and generic:
             eid = next(iter(candidates))
             logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (generic name, first in room)")
             return eid
 
-        # Fuzzy match with difflib
-        if norm_input:
+        # A misheard or slightly different name; never for a generic one, which is no name at all
+        if norm_input and not generic:
             norm_to_eid = {v: k for k, v in candidates.items()}
-            matches = difflib.get_close_matches(norm_input, norm_to_eid.keys(), n=1, cutoff=0.4)
+            matches = difflib.get_close_matches(norm_input, norm_to_eid.keys(), n=1, cutoff=_FUZZY_CUTOFF)
             if matches:
                 eid = norm_to_eid[matches[0]]
                 logger.info(f"Entity match: '{name}' -> {eid} (fuzzy: {matches[0]})")
@@ -589,6 +673,12 @@ class HAClient:
         friendly = state_data.get("attributes", {}).get("friendly_name", entity_id)
         state = state_data.get("state", "inconnu")
         domain = entity_id.split(".")[0]
+
+        # Not "éteint" for a switch nobody can reach
+        if state == "unavailable":
+            return f"{friendly} ne répond pas (hors ligne)"
+        if state == "unknown":
+            return f"L'état de {friendly} est inconnu"
 
         if domain == "light":
             if state == "on":

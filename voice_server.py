@@ -48,6 +48,8 @@ LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")  # empty = llama-server's only model
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
+# Devices re-read from Home Assistant this often (and a Home Assistant that was down, retried)
+_HA_REFRESH_SECONDS = 300
 
 
 # French web radio streams. All MP3: the Voice PE does not decode AAC.
@@ -282,6 +284,7 @@ class VoiceAssistantServer:
         await self.tts.init()
 
         await self.init_ha_clients()
+        self._ha_refresh_task = asyncio.create_task(self._keep_ha_fresh())
         await self.init_calendar_client()
         await self.init_spotify()
         await self.start_http_server()
@@ -312,14 +315,33 @@ class VoiceAssistantServer:
         client = HAClient(site.ha_url, site.ha_token)
         if not await client.connect():
             await client.close()
-            logger.warning(f"Site {site.label}: Home Assistant not reachable, device control disabled")
-            client = None
-        else:
-            logger.info(f"Site {site.label}: Home Assistant, {len(client.entities)} entities discovered")
+            # A reload during an HA blip keeps the client that worked
+            state = "keeping the previous connection" if site.ha_client else "device control disabled"
+            logger.warning(f"Site {site.label}: Home Assistant not reachable, {state}")
+            return
+        logger.info(f"Site {site.label}: Home Assistant, {len(client.entities)} entities discovered")
         # Swapped in once ready, so that a reload (SIGHUP) leaves no gap
         previous, site.ha_client = site.ha_client, client
         if previous:
             await previous.close()
+
+    async def _keep_ha_fresh(self):
+        """Every few minutes, re-read each site's devices, or connect a Home Assistant that was down.
+
+        Entities are read at connection only, and an unavailable one is left out: Charras's Velux,
+        offline while the house is closed, would stay unknown after the family arrives, and a Home
+        Assistant down at startup (booting slower after a power cut) would never be used.
+        """
+        while True:
+            await asyncio.sleep(_HA_REFRESH_SECONDS)
+            for site in self.sites:
+                try:
+                    if site.ha_client:
+                        await site.ha_client.refresh_entities()
+                    elif site.ha_token:
+                        await self._connect_ha(site)
+                except Exception:
+                    logger.exception(f"Site {site.label}: Home Assistant refresh failed")
 
     async def init_calendar_client(self):
         """Connect to Google Calendar API."""

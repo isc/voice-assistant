@@ -233,6 +233,62 @@ class TestResolveAllEntities(unittest.TestCase):
         self.assertIn("cover.volet_zoe", eids)
         self.assertNotIn("cover.volet_invites", eids)
 
+    def add(self, entity_id, name, area_id="", attributes=None):
+        self.client.entities[entity_id] = {
+            "friendly_name": name,
+            "domain": entity_id.split(".")[0],
+            "state": "off",
+            "attributes": attributes or {},
+            "area_id": area_id or None,
+            "area_name": self.client.areas.get(area_id, ""),
+        }
+
+    TURN_OFF = ["light", "switch", "media_player"]
+
+    def test_unknown_room_found_in_a_device_name(self):
+        """Paris names some lights after their room instead of placing them in one."""
+        self.add("light.couloir", "Couloir")
+        self.assertEqual(self.client.resolve_all_entities("lumière", room="couloir", domain_hints=self.TURN_OFF), ["light.couloir"])
+
+    def test_generic_name_then_room_in_one(self):
+        eids = self.client.resolve_all_entities("lumière du salon", domain_hints=self.TURN_OFF)
+        self.assertEqual(eids, ["light.appliques_salon"])
+
+    def test_no_lookalike_for_an_unrelated_name(self):
+        """At 0.4, « télé » found the light Entrée and « lumière » Charlie's Plafonnier."""
+        self.add("light.entree", "Entrée")
+        self.assertEqual(self.client.resolve_all_entities("télé", domain_hints=self.TURN_OFF), [])
+        self.assertEqual(self.client.resolve_all_entities("lumière", room="salle de bain", domain_hints=self.TURN_OFF), [])
+
+    def test_lone_speaker_is_not_another_one(self):
+        """The Sonos asleep, « mets la radio sur la Sonos » must not land on the Google Home."""
+        self.add("media_player.google_home", "Google Home", "living_room")
+        for name, room in (("Sonos Paris", "Sonos Paris"), ("Sonos Paris", None)):
+            self.assertEqual(self.client.resolve_all_entities(name, room=room, domain_hints=["media_player"]), [])
+
+    def test_generic_name_keeps_its_domain_when_nothing_matches(self):
+        self.client.areas["garage"] = "Garage"
+        self.add("switch.freebox_wifi", "Freebox Wi-Fi", "garage")
+        self.assertEqual(self.client.resolve_all_entities("lumière", room="Garage", domain_hints=self.TURN_OFF), [])
+
+    def test_whole_house_sweep_takes_no_switch(self):
+        """« éteins tout » at Charras swept the Freebox's Wi-Fi switch."""
+        self.client.areas["garage"] = "Garage"
+        self.add("switch.freebox_wifi", "Freebox Wi-Fi", "garage")
+        eids = self.client.resolve_all_entities("tout", room="tout", domain_hints=self.TURN_OFF)
+        self.assertNotIn("switch.freebox_wifi", eids)
+        self.assertIn("light.plafonnier_charlie", eids)
+
+    def test_specific_name_in_a_group_is_that_device(self):
+        """« le grand volet des enfants » is one shutter, not every shutter of both rooms."""
+        self.add("cover.grand_volet_zoe", "Grand volet", "chambre_zoe")
+        eids = self.client.resolve_all_entities("Grand volet", room="enfants", domain_hints=["cover"])
+        self.assertEqual(eids, ["cover.grand_volet_zoe"])
+
+    def test_group_said_with_more_words(self):
+        eids = self.client.resolve_all_entities("volets", room="les chambres des enfants", domain_hints=["cover"])
+        self.assertEqual(sorted(eids), ["cover.volet_charlie", "cover.volet_zoe"])
+
     def test_whole_house_without_config(self):
         for room in ("partout", "tout", "toute la maison"):
             eids = self.client.resolve_all_entities("volet", room=room, domain_hints=["cover"])
@@ -271,8 +327,9 @@ class TestResolveAllEntities(unittest.TestCase):
         hints = ["light", "switch", "media_player"]
         eids = self.client.resolve_all_entities("lumières", room="enfants", domain_hints=hints)
         self.assertEqual(sorted(eids), ["light.plafonnier_charlie", "light.plafonnier_zoe"])
+        # A sweep naming no kind takes no switch (at Charras, one cuts the Wi-Fi)
         eids = self.client.resolve_all_entities("tout", room="enfants", domain_hints=hints)
-        self.assertIn("switch.veilleuse_charlie", eids)
+        self.assertEqual(sorted(eids), ["light.plafonnier_charlie", "light.plafonnier_zoe"])
 
     def test_generic_name_volet_in_room(self):
         eids = self.client.resolve_all_entities("volet", room="Chambre invités")
@@ -354,6 +411,17 @@ class TestCoverKinds(unittest.TestCase):
             cover_kind({"friendly_name": "Toiture 3", "attributes": {"device_class": "shutter"}}),
             "volet",
         )
+
+    def test_name_says_more_than_device_class(self):
+        """Z-Wave JS reports the Paris living-room shutters as device_class window."""
+        self.assertEqual(
+            cover_kind({"friendly_name": "Volet salon", "attributes": {"device_class": "window"}}), "volet"
+        )
+
+    def test_sweep_leaves_roof_windows_shut(self):
+        eids = self.client.resolve_all_entities("tout", room="partout", domain_hints=["cover"])
+        self.assertIn("cover.velux_shutter_cuisine", eids)
+        self.assertNotIn("cover.velux_window_cuisine", eids)
 
     def test_name_fallback_when_no_device_class(self):
         self.assertEqual(cover_kind({"friendly_name": "Volet Cuisine", "attributes": {}}), "volet")
