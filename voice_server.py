@@ -16,7 +16,9 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urljoin
 
+import aiohttp
 from aioesphomeapi import (
     APIClient,
     MediaPlayerCommand,
@@ -27,6 +29,7 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 from ha_client import LOCAL_CONFIG, normalize
+from spotify import Spotify, SpotifyError, SpotifyNotConnected
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -192,6 +195,12 @@ class VoiceAssistantServer:
         self.device_media_keys: Dict[str, int] = {}
         # Last media target for follow-ups: ("esp", host) or ("ha", entity_id)
         self._last_media_target: Optional[tuple[str, str]] = None
+        # Spotify through go-librespot (None when it is not running here)
+        self.spotify: Optional[Spotify] = None
+        self.spotify_stream_url = ""
+        self._spotify_task: Optional[asyncio.Task] = None
+        # The speaker playing the Spotify stream: one stream, one speaker at a time
+        self._spotify_target: Optional[tuple[str, str]] = None
 
         # Exchange log for web UI (persisted to disk)
         from web_ui import ExchangeLog
@@ -229,6 +238,7 @@ class VoiceAssistantServer:
 
         await self.init_ha_client()
         await self.init_calendar_client()
+        await self.init_spotify()
         await self.start_http_server()
         await self.connect_to_device(ESP_HOST)
 
@@ -266,6 +276,16 @@ class VoiceAssistantServer:
             logger.warning("Google Calendar not available, calendar disabled")
             self.calendar_client = None
 
+    async def init_spotify(self):
+        """Enable music when a go-librespot player answers on this host."""
+        spotify = Spotify()
+        if not await spotify.reachable():
+            logger.info("No go-librespot player reachable, Spotify disabled")
+            return
+        self.spotify = spotify
+        self._spotify_task = asyncio.create_task(spotify.stream.run())
+        logger.info("Spotify enabled (go-librespot)")
+
     async def start_http_server(self):
         """Start HTTP server to host TTS audio files and web UI"""
         from web_ui import setup_routes
@@ -273,6 +293,8 @@ class VoiceAssistantServer:
         app = web.Application()
         setup_routes(app, self)
         app.router.add_static("/tts/", self.tts_dir, show_index=True)
+        if self.spotify:
+            app.router.add_get("/spotify/stream.mp3", self.spotify.stream.handle)
 
         runner = web.AppRunner(app)
         await runner.setup()
@@ -293,6 +315,8 @@ class VoiceAssistantServer:
         )
         self.http_base_url = TTS_BASE_URL or f"http://{local_ip}:{HTTP_PORT}/tts/"
         logger.info(f"TTS URL announced to the ESP: {self.http_base_url}")
+        # Beside /tts/, so that a relay serving TTS_BASE_URL can serve it too
+        self.spotify_stream_url = urljoin(self.http_base_url, "../spotify/stream.mp3")
 
     # === ESP CONNECTION ===
 
@@ -718,7 +742,7 @@ class VoiceAssistantServer:
 
         # Media player tools (radio + volume) — default to the current ESP speaker,
         # fall back to HA media_player entities when a room is named.
-        if function_name in ("play_radio", "stop_media", "set_volume", "change_volume"):
+        if function_name in ("play_radio", "stop_media", "set_volume", "change_volume", "play_music", "music_control"):
             return await self._execute_media_function(function_name, arguments)
 
         if not self.ha_client:
@@ -865,17 +889,30 @@ class VoiceAssistantServer:
                 return f"Aucune enceinte trouvée pour {room}"
             return "Aucune enceinte disponible"
 
+        if function_name in ("play_music", "music_control"):
+            if not self.spotify:
+                return "Spotify non disponible"
+            try:
+                return await self._execute_music_function(function_name, arguments, target)
+            except SpotifyNotConnected:
+                return "Spotify n'est pas connecté au compte"
+            except (aiohttp.ClientError, TimeoutError, SpotifyError) as e:
+                logger.error(f"Spotify error: {type(e).__name__}: {e}")
+                return "Spotify ne répond pas"
+
         if function_name == "play_radio":
             station_name = arguments.get("station", "")
             station = _resolve_station(station_name)
             if not station:
                 return f"Station {station_name} inconnue"
             display_name, url = station
+            await self._release_spotify(target)
             await self._media_play_url(target, url)
             self._after_media_change(target)
             return f"{display_name} en cours de lecture"
 
         if function_name == "stop_media":
+            await self._release_spotify(target)
             await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop")
             return "Lecture arrêtée"
 
@@ -900,6 +937,70 @@ class VoiceAssistantServer:
             return label
 
         return "C'est fait"
+
+    async def _execute_music_function(self, function_name: str, arguments: dict, target: tuple[str, str]) -> str:
+        """Handle play_music / music_control: Spotify through go-librespot."""
+        if function_name == "play_music":
+            query = arguments.get("query", "")
+            found = await self.spotify.find(query, arguments.get("kind", "track"))
+            if not found:
+                return f"Rien trouvé sur Spotify pour {query}"
+            uri, description = found
+            await self._point_at_spotify(target)
+            await self.spotify.play(uri, shuffle=bool(arguments.get("shuffle")))
+            self._after_media_change(target)
+            return f"Lecture sur Spotify : {description}"
+
+        action = arguments.get("action")
+        if action == "current":
+            status = await self.spotify.status()
+            track = status.get("track")
+            if not track or status.get("stopped"):
+                return "Rien en cours sur Spotify"
+            artists = ", ".join(track["artist_names"][:2])
+            paused = " (en pause)" if status.get("paused") else ""
+            self._after_media_change(target)
+            return f"En cours sur Spotify : « {track['name']} » de {artists}{paused}"
+        if action == "resume":
+            await self._point_at_spotify(target)
+            await self.spotify.resume()
+            label = "Lecture reprise"
+        elif action == "pause":
+            await self.spotify.pause()
+            label = "Musique en pause"
+        elif action == "next":
+            await self.spotify.next()
+            label = "Titre suivant"
+        elif action == "previous":
+            await self.spotify.previous()
+            label = "Titre précédent"
+        else:
+            return f"Action {action} inconnue"
+        self._after_media_change(target)
+        return label
+
+    async def _point_at_spotify(self, target: tuple[str, str]) -> None:
+        """Make the target speaker play the Spotify stream, moving it off the previous one."""
+        previous = self._spotify_target
+        if previous and previous != target:
+            await self._media_command(previous, MediaPlayerCommand.STOP, ha_service="media_stop")
+        if previous != target or not self.spotify.stream.listeners:
+            joins = self.spotify.stream.joins
+            await self._media_play_url(target, self.spotify_stream_url)
+            # Start the music once the speaker listens, so that the first seconds play
+            if not await self.spotify.stream.wait_for_join(joins, timeout=8):
+                logger.warning(f"Spotify: {target} did not connect to {self.spotify_stream_url}")
+        self._spotify_target = target
+
+    async def _release_spotify(self, target: tuple[str, str]) -> None:
+        """The target leaves the Spotify stream (radio, stop): pause the music it was playing."""
+        if not self.spotify or target != self._spotify_target:
+            return
+        self._spotify_target = None
+        try:
+            await self.spotify.pause()
+        except (aiohttp.ClientError, TimeoutError, SpotifyNotConnected) as e:
+            logger.warning(f"Spotify pause failed: {type(e).__name__}: {e}")
 
     async def _media_play_url(self, target: tuple[str, str], url: str) -> None:
         """Start playback of an arbitrary media URL on the target speaker."""
@@ -1040,7 +1141,7 @@ class VoiceAssistantServer:
         if timers_info:
             system_prompt += f"\n{timers_info}"
 
-        tools = get_tool_definitions(self.ha_client, self.calendar_client)
+        tools = get_tool_definitions(self.ha_client, self.calendar_client, music=self.spotify is not None)
 
         # Expire old conversation history
         now = time.time()
