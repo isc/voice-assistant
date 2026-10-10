@@ -21,6 +21,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 - French web radios (France Inter, FIP, RTL, TSF Jazz…) with volume control ("plus fort", "mets le son à 40")
 - Spotify: artists, tracks, albums, the user's playlists, Liked Songs ("mets du Daft Punk", "mets ma playlist du matin"), with pause, skip, "c'est quoi cette chanson ?"
 - On the voice device's own speaker or any Home Assistant speaker (Google Cast, Sonos…); "mets la musique sur la Sonos" moves what is playing
+- Pictures from the web on a Google Nest Hub ("montre-moi la tour Eiffel", "une autre"): Wikipedia, else Openverse photos (free, no API key)
 
 ### Timers, calendar, weather
 - Timers and alarms with ESP native timer events (LED ring, sound) and a spoken announcement
@@ -49,7 +50,8 @@ ESP (wake word) → audio stream → voice_server.py
                                    │    ├─ timer.py → in-memory timers with ESP events
                                    │    ├─ weather.py → Open-Meteo API
                                    │    ├─ calendar_client.py → Google Calendar API
-                                   │    └─ spotify.py → go-librespot + Spotify Web API
+                                   │    ├─ spotify.py → go-librespot + Spotify Web API
+                                   │    └─ images.py → Wikipedia / Openverse, cast to a Nest Hub
                                    ├─ tts.py (Kokoro-82M) → WAV audio
                                    └─ web_ui.py → debug UI on :8888
 Speakers fetch /tts/*.wav, radio streams and /spotify/stream.mp3 over HTTP.
