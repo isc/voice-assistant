@@ -79,7 +79,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `ESP_NOISE_PSK` | (empty) | Noise encryption key (preferred) |
 | `LLM_URL` | `http://localhost:8080/v1/chat/completions` (llama-server) | OpenAI-compatible endpoint. Server: Ollama, `http://localhost:11434/v1/chat/completions` |
 | `LLM_API_KEY` | (empty) | If set, enables cloud mode (bearer auth, provider's default reasoning). Empty on the server |
-| `LLM_MODEL` | (empty) | Model name: `gemma4:12b` on the server's Ollama, e.g. `gpt-5.4-nano` in the cloud; empty lets llama-server use its only model |
+| `LLM_MODEL` | (empty) | Model name: `gemma4:12b-8k` on the server's Ollama (gemma4:12b with an 8192-token context, see INSTALL.md), e.g. `gpt-5.4-nano` in the cloud; empty lets llama-server use its only model |
 | `LLM_REASONING_EFFORT` | `none` local, unset cloud | Reasoning budget for thinking models. Keep `none` locally — thinking costs ~10s/round and empties `content` |
 | `STT_BACKEND` | `auto` | Parakeet backend: `onnx` (Linux/CUDA via onnx-asr, set on the server), `mlx` (Apple), or `auto` (MLX if installed, else ONNX) |
 | `HA_URL` | (required) | Home Assistant URL |

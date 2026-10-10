@@ -50,6 +50,9 @@ The LLM, Ollama in Docker:
 docker run -d --name ollama --gpus all --restart unless-stopped \
   -p 11434:11434 -v /opt/ollama:/root/.ollama ollama/ollama
 docker exec ollama ollama pull gemma4:12b
+# Ollama gives it a 4096-token context on a 16 GB card; the prompt of a house with ~70 devices
+# outgrows it. A derived model with 8192 shares the weights (+0.3 GB of VRAM):
+docker exec ollama sh -c 'printf "FROM gemma4:12b\nPARAMETER num_ctx 8192\n" > /tmp/Modelfile-8k && ollama create gemma4:12b-8k -f /tmp/Modelfile-8k'
 ```
 
 ### Configure
