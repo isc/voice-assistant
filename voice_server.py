@@ -1552,6 +1552,12 @@ class VoiceAssistantServer:
             messages.extend(tool_messages)
             turn.append(message)
             turn.extend({**m, "content": m["content"][:_HISTORY_RESULT_CHARS]} for m in tool_messages)
+            # A goodbye needs no second round: with nothing left to do, gemma answered it in English
+            # (« No problem, have a good night! ») or spent 500 tokens thinking, content empty
+            if all(tc["function"]["name"] == "end_conversation" for tc in message["tool_calls"]):
+                response = (message.get("content") or "").strip() or "Avec plaisir, à bientôt !"
+                save_to_history(response)
+                return response
             # No « Fonctions déjà appelées… » reminder any more: written for GPT-5.4 Nano, it made no
             # extra call in ~45 gemma4 dry runs, and gemma answered it in English (« No other actions
             # needed. ») instead of speaking to the user
