@@ -195,11 +195,8 @@ class TestResolveEntity(unittest.TestCase):
 
 class TestResolveAllEntities(unittest.TestCase):
     # Room groups come from the gitignored config.local.json: the tests bring their own,
-    # over the fake areas, so that they pass on any machine
-    ROOM_GROUPS = {
-        "enfants": ["Chambre Charlie", "Chambre Zoé"],
-        "partout": ["Chambre Charlie", "Chambre Zoé", "Chambre parents", "Chambre invités", "Living Room"],
-    }
+    # over the fake areas, so that they pass on any machine. The whole house needs none.
+    ROOM_GROUPS = {"enfants": ["Chambre Charlie", "Chambre Zoé"]}
 
     def setUp(self):
         self.client = make_client()
@@ -213,9 +210,39 @@ class TestResolveAllEntities(unittest.TestCase):
         self.assertIn("cover.volet_zoe", eids)
         self.assertNotIn("cover.volet_invites", eids)
 
-    def test_room_group_partout(self):
-        eids = self.client.resolve_all_entities("volet", room="partout", domain_hints=["cover"])
-        self.assertEqual(len(eids), 4)  # all covers
+    def test_whole_house_without_config(self):
+        for room in ("partout", "tout", "toute la maison"):
+            eids = self.client.resolve_all_entities("volet", room=room, domain_hints=["cover"])
+            self.assertEqual(len(eids), 4, room)  # all covers
+
+    def test_whole_house_includes_devices_without_a_room(self):
+        self.client.entities["light.guirlande"] = {
+            "friendly_name": "Guirlande",
+            "domain": "light",
+            "state": "off",
+            "attributes": {},
+            "area_id": None,
+            "area_name": "",
+        }
+        eids = self.client.resolve_all_entities("lumières", room="partout", domain_hints=["light"])
+        self.assertIn("light.guirlande", eids)
+        self.assertIn("light.spots_cuisine", eids)
+
+    def test_generic_name_keeps_to_its_domain(self):
+        """turn_off hints light, switch and media_player; "les lumières" means the lights only."""
+        self.client.entities["switch.veilleuse_charlie"] = {
+            "friendly_name": "Veilleuse",
+            "domain": "switch",
+            "state": "on",
+            "attributes": {},
+            "area_id": "chambre_charlie",
+            "area_name": "Chambre Charlie",
+        }
+        hints = ["light", "switch", "media_player"]
+        eids = self.client.resolve_all_entities("lumières", room="enfants", domain_hints=hints)
+        self.assertEqual(sorted(eids), ["light.plafonnier_charlie", "light.plafonnier_zoe"])
+        eids = self.client.resolve_all_entities("tout", room="enfants", domain_hints=hints)
+        self.assertIn("switch.veilleuse_charlie", eids)
 
     def test_generic_name_volet_in_room(self):
         eids = self.client.resolve_all_entities("volet", room="Chambre invités")

@@ -1,11 +1,9 @@
 {
   "_comment": "Copy this file to config.local.json and fill in your personal data. This file is versioned; config.local.json is gitignored.",
 
+  "_room_groups": "Sets of HA areas, said as one room. « tout », « toute la maison » and « partout » are built in (every room).",
   "room_groups": {
-    "enfants": ["Chambre Enfant 1", "Chambre Enfant 2"],
-    "tout": ["Chambre Enfant 1", "Chambre Enfant 2", "Chambre parents", "Chambre invités", "Living Room"],
-    "toute la maison": ["Chambre Enfant 1", "Chambre Enfant 2", "Chambre parents", "Chambre invités", "Living Room"],
-    "partout": ["Chambre Enfant 1", "Chambre Enfant 2", "Chambre parents", "Chambre invités", "Living Room"]
+    "enfants": ["Chambre Enfant 1", "Chambre Enfant 2"]
   },
 
   "family": [

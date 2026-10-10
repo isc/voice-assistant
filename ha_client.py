@@ -45,6 +45,24 @@ def compact(text: str) -> str:
     return "".join(c for c in normalize(text) if c.isalnum())
 
 
+# Rooms that mean the whole house: every room, so no list of rooms to keep in config
+_WHOLE_HOUSE = {normalize(room) for room in ("tout", "toute la maison", "partout")}
+
+
+def is_whole_house(room: Optional[str]) -> bool:
+    return bool(room) and normalize(room) in _WHOLE_HOUSE
+
+
+# Built in, whatever an older config.local.json still lists for them
+for _name in [name for name in ROOM_GROUPS if is_whole_house(name)]:
+    del ROOM_GROUPS[_name]
+
+
+def _area_matches(norm_area: str, norm_room: str) -> bool:
+    """Loose room match, either name inside the other. No area means in no room, not in every one ("" is in any name)."""
+    return bool(norm_area) and (norm_room in norm_area or norm_area in norm_room)
+
+
 # Sub-kinds inside the `cover` domain. A house can have roller shutters and roof
 # windows side by side — both are HA covers, but they are not interchangeable
 # (opening a skylight when asked for a shutter lets the rain in).
@@ -288,7 +306,7 @@ class HAClient:
 
     def _area_exists(self, norm_room: str) -> bool:
         """Whether HA knows this area, using the same loose matching as the filter."""
-        return any(norm_room in normalize(area) or normalize(area) in norm_room for area in self.areas.values() if area)
+        return any(_area_matches(normalize(area), norm_room) for area in self.areas.values())
 
     def _filter_by_cover_kind(self, entity_ids: list[str], kind: Optional[str]) -> list[str]:
         """Keep only covers of the requested kind (volet / fenetre)."""
@@ -305,6 +323,7 @@ class HAClient:
         self, name: str, room: str | None = None, domain_hints: list[str] | None = None
     ) -> list[str]:
         """Resolve entity name, expanding room groups and generic names into multiple entity_ids."""
+        whole_house = is_whole_house(room)
         is_group = False
         rooms_to_search = [room]
         # Generic name (e.g. "volet" -> all shutters in the room), with its cover sub-kind
@@ -319,45 +338,21 @@ class HAClient:
                     is_group = True
                     break
 
-        # For room groups: return ALL entities of the matching domain(s)
-        # (user says "les volets des enfants" -> all covers in all children's rooms)
-        if is_group and domain_hints:
-            entity_ids = []
-            for r in rooms_to_search:
-                norm_r = normalize(r)
-                for eid, info in self.entities.items():
-                    if info["domain"] not in domain_hints:
-                        continue
-                    norm_area = normalize(info.get("area_name", ""))
-                    if not norm_area:
-                        continue
-                    if norm_r not in norm_area and norm_area not in norm_r:
-                        continue
-                    if eid not in entity_ids:
-                        entity_ids.append(eid)
+        # ALL entities in scope, for a room group, the whole house, or a generic name in a room
+        # ("les volets des enfants" -> all covers in all children's rooms). A generic name keeps
+        # to its own domain: "les lumières" are not the switches too.
+        domains = [target_domain] if target_domain else (domain_hints if is_group or whole_house else None)
+        if domains and room:
+            areas = [normalize(r) for r in rooms_to_search]
+            entity_ids = [
+                eid
+                for eid, info in self.entities.items()
+                if info["domain"] in domains
+                and (whole_house or any(_area_matches(normalize(info.get("area_name", "")), a) for a in areas))
+            ]
             entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
             if entity_ids:
-                logger.info(f"Group resolve: '{name}' (group={room}) -> {entity_ids}")
-                return entity_ids
-
-        if target_domain and any(r is not None for r in rooms_to_search):
-            entity_ids = []
-            for r in rooms_to_search:
-                norm_r = normalize(r) if r else None
-                for eid, info in self.entities.items():
-                    if info["domain"] != target_domain:
-                        continue
-                    if norm_r:
-                        norm_area = normalize(info.get("area_name", ""))
-                        if not norm_area:
-                            continue
-                        if norm_r not in norm_area and norm_area not in norm_r:
-                            continue
-                    if eid not in entity_ids:
-                        entity_ids.append(eid)
-            entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
-            if entity_ids:
-                logger.info(f"Generic resolve: '{name}' (room={room}) -> {entity_ids}")
+                logger.info(f"Resolve all: '{name}' (room={room}) -> {entity_ids}")
                 return entity_ids
 
         # Specific name: resolve individually per room
@@ -380,11 +375,8 @@ class HAClient:
         for eid, info in self.entities.items():
             if domain_hints and info["domain"] not in domain_hints:
                 continue
-            if norm_room:
-                norm_area = normalize(info.get("area_name", ""))
-                # No area means in no room, not in every one ("" is in any name)
-                if not norm_area or (norm_room not in norm_area and norm_area not in norm_room):
-                    continue
+            if norm_room and not _area_matches(normalize(info.get("area_name", "")), norm_room):
+                continue
             candidates[eid] = normalize(info["friendly_name"])
 
         # "les volets" must never fall back onto a roof window (both are covers)

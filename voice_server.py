@@ -27,7 +27,7 @@ from aioesphomeapi import (
 from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
-from ha_client import LOCAL_CONFIG, compact
+from ha_client import LOCAL_CONFIG, compact, is_whole_house
 from images import find_image
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
 
@@ -854,12 +854,7 @@ class VoiceAssistantServer:
             task.add_done_callback(self._pending_service_calls.discard)
 
         if len(entity_ids) > 1:
-            whole_house = room and room.lower().strip() in (
-                "tout",
-                "toute la maison",
-                "partout",
-            )
-            if whole_house:
+            if is_whole_house(room):
                 action_map = {
                     "close_cover": "Tous les volets en cours de fermeture",
                     "open_cover": "Tous les volets en cours d'ouverture",

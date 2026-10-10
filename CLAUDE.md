@@ -54,7 +54,7 @@ ESP (wake word) → audio stream → voice_server.py
 
 ## Key design patterns
 
-- **Room groups**: `ROOM_GROUPS` in `ha_client.py` maps group names ("enfants", "partout") to lists of HA areas. When a group is detected, all entities of the matching domain are returned.
+- **Room groups**: `room_groups` in `config.local.json` maps group names ("enfants") to lists of HA areas; "tout", "toute la maison" and "partout" are built in and mean every room. For a group, all entities of the matching domain are returned (only the named one for a generic name like "lumières").
 - **Entity resolution**: fuzzy matching on normalized friendly_name (accents stripped, stopwords removed), scoped by room/area.
 - **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls. A system reminder lists already-called functions to encourage completeness.
 - **Conversation history**: last 5 exchanges (10 messages), expires after 10 min inactivity (`CONVERSATION_TIMEOUT`).
