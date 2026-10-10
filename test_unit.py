@@ -680,6 +680,28 @@ class TestFormatDuration(unittest.TestCase):
         self.assertEqual(_format_duration(5400), "1h30")
 
 
+class TestSpellTimes(unittest.TestCase):
+    def test_clock_times(self):
+        from tts import spell_times
+
+        self.assertEqual(spell_times("Il est actuellement 17h34."), "Il est actuellement 17 heures 34.")
+        self.assertEqual(spell_times("Réveil à 7h, pas 07:05"), "Réveil à 7 heures, pas 7 heures 5")
+        self.assertEqual(spell_times("Rendez-vous à 12h00"), "Rendez-vous à 12 heures")
+
+    def test_feminine_and_singular(self):
+        from tts import spell_times
+
+        self.assertEqual(spell_times("1h21"), "une heure vingt et une")
+        self.assertEqual(spell_times("21h"), "vingt et une heures")
+        self.assertEqual(spell_times("0h30"), "0 heure 30")
+
+    def test_leaves_other_text_alone(self):
+        from tts import spell_times
+
+        for text in ("Score 3 : 2", "4h2o", "25h", "17:34:12", "2026"):
+            self.assertEqual(spell_times(text), text)
+
+
 # ---------------------------------------------------------------------------
 # Tests: calendar_client helpers
 # ---------------------------------------------------------------------------
