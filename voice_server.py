@@ -43,6 +43,8 @@ LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")  # e.g. "gpt-5.4-nano" — empty = local llama.cpp
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
+# URL the ESP fetches TTS files from, when it cannot reach this host's own LAN address
+TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "")
 HA_URL = os.environ.get("HA_URL", "")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
@@ -226,7 +228,8 @@ class VoiceAssistantServer:
         logger.info(
             f'Test endpoint: curl -X POST http://{local_ip}:{HTTP_PORT}/test -d \'{{"text": "allume la lumière"}}\''
         )
-        self.http_base_url = f"http://{local_ip}:{HTTP_PORT}/tts/"
+        self.http_base_url = TTS_BASE_URL or f"http://{local_ip}:{HTTP_PORT}/tts/"
+        logger.info(f"TTS URL announced to the ESP: {self.http_base_url}")
 
     # === ESP CONNECTION ===
 
