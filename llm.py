@@ -64,13 +64,13 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
-        "description": "Obtenir la météo actuelle et les prévisions. Par défaut Paris.",
+        "description": "Obtenir la météo actuelle et les prévisions. Par défaut: à la maison.",
         "parameters": {
             "type": "object",
             "properties": {
                 "location": {
                     "type": "string",
-                    "description": "Ville (ex: Paris, Angoulême, Lyon). Par défaut: Paris",
+                    "description": "Ville (ex: Paris, Angoulême, Lyon). À omettre pour la maison",
                 },
             },
             "required": [],

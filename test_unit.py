@@ -833,16 +833,22 @@ class TestCalendarFormatEvent(unittest.TestCase):
 class TestCalendarFormatDate(unittest.TestCase):
     def test_format_date_fr(self):
         from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-        from calendar_client import TZ, _format_date_fr
+        from calendar_client import _format_date_fr
+
+        TZ = ZoneInfo("Europe/Paris")
 
         dt = datetime(2026, 3, 25, tzinfo=TZ)  # Wednesday
         self.assertEqual(_format_date_fr(dt), "mercredi 25 mars 2026")
 
     def test_format_datetime_fr(self):
         from datetime import datetime
+        from zoneinfo import ZoneInfo
 
-        from calendar_client import TZ, _format_datetime_fr
+        from calendar_client import _format_datetime_fr
+
+        TZ = ZoneInfo("Europe/Paris")
 
         dt = datetime(2026, 3, 25, 14, 30, tzinfo=TZ)
         self.assertEqual(_format_datetime_fr(dt), "mercredi 25 mars 2026 à 14:30")

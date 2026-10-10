@@ -88,6 +88,8 @@ class HAClient:
         # entity_id -> area_id, for every domain — sensors aren't in self.entities
         # but search_sensors still wants to know which room they belong to.
         self.entity_areas: dict[str, str] = {}
+        # The home as configured in HA: latitude, longitude, time_zone
+        self.home: dict = {}
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -103,6 +105,13 @@ class HAClient:
                     return False
                 data = await resp.json()
                 logger.info(f"Home Assistant connected: {data.get('message', 'OK')}")
+            async with self._session.get(f"{self.base_url}/api/config") as resp:
+                config = await resp.json()
+                self.home = {
+                    "latitude": config.get("latitude"),
+                    "longitude": config.get("longitude"),
+                    "time_zone": config.get("time_zone"),
+                }
         except Exception as e:
             logger.error(f"Cannot reach Home Assistant at {self.base_url}: {e}")
             return False

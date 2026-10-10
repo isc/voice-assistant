@@ -248,6 +248,12 @@ class VoiceAssistantServer:
         self.ha_client = HAClient(HA_URL, HA_TOKEN)
         if await self.ha_client.connect():
             logger.info(f"Home Assistant: {len(self.ha_client.entities)} entities discovered")
+            # Local time is the home's: the server may run elsewhere, or in UTC (charras)
+            time_zone = self.ha_client.home.get("time_zone")
+            if time_zone and not os.environ.get("TZ"):
+                os.environ["TZ"] = time_zone
+                time.tzset()
+                logger.info(f"Time zone: {time_zone} (from Home Assistant)")
         else:
             logger.warning("Home Assistant not reachable, device control disabled")
             self.ha_client = None
@@ -713,7 +719,8 @@ class VoiceAssistantServer:
         if function_name == "get_weather":
             from weather import get_weather
 
-            return await get_weather(arguments.get("location", ""))
+            home = self.ha_client.home if self.ha_client else {}
+            return await get_weather(arguments.get("location", ""), home)
 
         # Calendar — standalone, no HA dependency
         if function_name == "query_calendar":

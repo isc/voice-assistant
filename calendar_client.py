@@ -9,6 +9,7 @@ import asyncio
 import json
 import locale
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -20,8 +21,12 @@ except locale.Error:
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
-TIMEZONE = "Europe/Paris"
-TZ = ZoneInfo(TIMEZONE)
+
+
+def _time_zone() -> str:
+    """The home's time zone, which the server takes from Home Assistant into TZ."""
+    return os.environ.get("TZ", "UTC")
+
 
 LIST_FIELDS = "items(id,summary,start,end,status)"
 
@@ -111,13 +116,13 @@ class CalendarClient:
             return json.dumps({"error": "Agenda non disponible"})
 
         try:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=TZ)
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
             return json.dumps({"error": f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)"})
 
         if end_date:
             try:
-                end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=TZ)
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(_time_zone()))
                 # Include the full end day
                 end_dt = end_dt + timedelta(days=1)
             except ValueError:
@@ -161,7 +166,7 @@ class CalendarClient:
             "singleEvents": True,
             "orderBy": "startTime",
             "fields": LIST_FIELDS,
-            "timeZone": TIMEZONE,
+            "timeZone": _time_zone(),
         }
         if search:
             kwargs["q"] = search
@@ -188,7 +193,7 @@ class CalendarClient:
             return json.dumps({"error": "Agenda non disponible"})
 
         try:
-            start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+            start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
             return json.dumps({"error": f"Date/heure invalide: {start_datetime} (format attendu: AAAA-MM-JJ HH:MM)"})
 
@@ -196,8 +201,8 @@ class CalendarClient:
 
         event_body = {
             "summary": title,
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": TIMEZONE},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": TIMEZONE},
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": _time_zone()},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": _time_zone()},
         }
 
         try:

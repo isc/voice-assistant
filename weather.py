@@ -8,11 +8,6 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-# Paris 15e as default
-DEFAULT_LAT = 48.8416
-DEFAULT_LON = 2.3001
-DEFAULT_CITY = "Paris"
-
 # WMO weather codes → French descriptions
 _WMO_CODES = {
     0: "ciel dégagé",
@@ -62,25 +57,27 @@ async def _geocode(city: str) -> Optional[tuple[float, float, str]]:
         return None
 
 
-async def get_weather(location: str = "") -> str:
-    """Fetch weather and return structured JSON string for the LLM to interpret."""
-    city = location.strip() if location else DEFAULT_CITY
-    lat, lon = DEFAULT_LAT, DEFAULT_LON
-    display_name = DEFAULT_CITY
+async def get_weather(location: str = "", home: Optional[dict] = None) -> str:
+    """Fetch weather and return structured JSON string for the LLM to interpret.
 
-    if city.lower() not in ("paris", ""):
+    No location means the home, as configured in Home Assistant."""
+    city = (location or "").strip()
+    if city:
         geo = await _geocode(city)
-        if geo:
-            lat, lon, display_name = geo
-        else:
+        if not geo:
             return json.dumps({"error": f"Ville {city} introuvable"})
+        lat, lon, display_name = geo
+    elif home and home.get("latitude") is not None:
+        lat, lon, display_name = home["latitude"], home["longitude"], "la maison"
+    else:
+        return json.dumps({"error": "Ville non précisée"})
 
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}"
         f"&current=temperature_2m,apparent_temperature,weather_code"
         f"&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code"
-        f"&timezone=Europe/Paris&forecast_days=5"
+        f"&timezone=auto&forecast_days=5"
     )
 
     try:
