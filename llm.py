@@ -196,7 +196,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         "type": "string",
         "description": (
             "Pièce ou enceinte où jouer le média (ex: « salon », « Google Home »), parmi les "
-            "« médias » de la liste des appareils. Par défaut: l'enceinte de l'appareil vocal."
+            "« médias » de la liste des appareils. À omettre pour l'enceinte de l'appareil vocal "
+            "(« ici », ou aucune pièce dite)."
         ),
     }
     media_tools = [
@@ -313,7 +314,9 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
                 "name": "music_control",
                 "description": (
                     "Piloter la musique Spotify en cours : pause, reprendre, titre suivant ou "
-                    "précédent, ou savoir ce qui joue (« c'est quoi cette chanson ? »)."
+                    "précédent, ou savoir ce qui joue (« c'est quoi cette chanson ? »). "
+                    "Pour déplacer la musique en cours vers une autre enceinte (« mets la musique "
+                    "dans le salon »), action resume avec room : elle continue là où elle en était."
                 ),
                 "parameters": {
                     "type": "object",
