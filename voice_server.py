@@ -1396,6 +1396,10 @@ class VoiceAssistantServer:
         family = LOCAL_CONFIG.get("family", [])
         if family:
             system_prompt += "\n" + _format_family_for_prompt(family)
+        if is_local:
+            # Not only a Qwen 3 habit: without it, gemma4 sometimes spent a round's 500 tokens
+            # thinking, reasoning_effort none notwithstanding (content empty, finish_reason length)
+            system_prompt = "/no_think " + system_prompt
         if self.ha_client:
             entity_list = self.ha_client.get_entity_list_for_prompt()
             if entity_list:
@@ -1548,18 +1552,9 @@ class VoiceAssistantServer:
             messages.extend(tool_messages)
             turn.append(message)
             turn.extend({**m, "content": m["content"][:_HISTORY_RESULT_CHARS]} for m in tool_messages)
-            # Remind the model to handle all parts of the original request
-            called_names = [tc["function"] for tc in self._last_tool_calls]
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        f"Fonctions déjà appelées: {', '.join(called_names)}. "
-                        "Si la demande de l'utilisateur comporte d'autres parties non traitées, "
-                        "appelle les fonctions nécessaires MAINTENANT avant de répondre."
-                    ),
-                }
-            )
+            # No « Fonctions déjà appelées… » reminder any more: written for GPT-5.4 Nano, it made no
+            # extra call in ~45 gemma4 dry runs, and gemma answered it in English (« No other actions
+            # needed. ») instead of speaking to the user
             message = await chat_completion(
                 LLM_URL,
                 LLM_API_KEY,
