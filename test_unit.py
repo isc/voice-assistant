@@ -215,18 +215,25 @@ class TestResolveAllEntities(unittest.TestCase):
             eids = self.client.resolve_all_entities("volet", room=room, domain_hints=["cover"])
             self.assertEqual(len(eids), 4, room)  # all covers
 
-    def test_whole_house_includes_devices_without_a_room(self):
-        self.client.entities["light.guirlande"] = {
-            "friendly_name": "Guirlande",
-            "domain": "light",
-            "state": "off",
-            "attributes": {},
-            "area_id": None,
-            "area_name": "",
-        }
-        eids = self.client.resolve_all_entities("lumières", room="partout", domain_hints=["light"])
-        self.assertIn("light.guirlande", eids)
+    def test_whole_house_and_devices_without_a_room(self):
+        """Every light, placed or not; but "tout" leaves alone a speaker's settings switches (Paris Sonos)."""
+        for eid, domain in (("light.couloir", "light"), ("switch.sonos_loudness", "switch")):
+            self.client.entities[eid] = {
+                "friendly_name": eid,
+                "domain": domain,
+                "state": "on",
+                "attributes": {},
+                "area_id": None,
+                "area_name": "",
+            }
+        hints = ["light", "switch", "media_player"]
+        eids = self.client.resolve_all_entities("lumières", room="partout", domain_hints=hints)
+        self.assertIn("light.couloir", eids)
         self.assertIn("light.spots_cuisine", eids)
+        eids = self.client.resolve_all_entities("tout", room="partout", domain_hints=hints)
+        self.assertIn("light.spots_cuisine", eids)
+        self.assertNotIn("switch.sonos_loudness", eids)
+        self.assertNotIn("light.couloir", eids)
 
     def test_generic_name_keeps_to_its_domain(self):
         """turn_off hints light, switch and media_player; "les lumières" means the lights only."""

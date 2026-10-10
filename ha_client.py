@@ -344,12 +344,17 @@ class HAClient:
         domains = [target_domain] if target_domain else (domain_hints if is_group or whole_house else None)
         if domains and room:
             areas = [normalize(r) for r in rooms_to_search]
-            entity_ids = [
-                eid
-                for eid, info in self.entities.items()
-                if info["domain"] in domains
-                and (whole_house or any(_area_matches(normalize(info.get("area_name", "")), a) for a in areas))
-            ]
+
+            def in_scope(info: dict) -> bool:
+                norm_area = normalize(info.get("area_name", ""))
+                if whole_house:
+                    # Every light, placed in a room or not; but a sweep over several domains
+                    # ("éteins tout") keeps to devices in a room, which leaves out the settings
+                    # switches of a speaker HA has in no room (Sonos loudness, cross-fade)
+                    return bool(target_domain or norm_area)
+                return any(_area_matches(norm_area, a) for a in areas)
+
+            entity_ids = [eid for eid, info in self.entities.items() if info["domain"] in domains and in_scope(info)]
             entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
             if entity_ids:
                 logger.info(f"Resolve all: '{name}' (room={room}) -> {entity_ids}")
