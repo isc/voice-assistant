@@ -64,7 +64,9 @@ class TimerManager:
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
-        total_seconds = int((target - now).total_seconds())
+        # From the target's own timestamp: subtracting naive datetimes counts wall-clock hours, and
+        # « réveille-moi à 7h » said on 24 October at 23:00 rang at 6:00 (the clocks go back)
+        total_seconds = int(target.timestamp() - time.time())
         target_time_str = f"{hour:02d}:{minute:02d}"
         logger.info(f"Alarm for {target_time_str} -> {total_seconds}s from now")
         timer = self.start_timer(total_seconds, name, on_event)
@@ -84,9 +86,9 @@ class TimerManager:
                     timer = t
                     break
         if not timer:
-            # If only one active timer, cancel it regardless of name
+            # The only active timer, whatever name was said or none (« annule le minuteur »)
             active = [t for t in self.timers.values() if t.is_active]
-            if len(active) == 1 and name:
+            if len(active) == 1:
                 timer = active[0]
 
         if timer and timer.is_active:
@@ -114,14 +116,12 @@ class TimerManager:
         self.timers.clear()
 
     async def _run_timer(self, timer: Timer, on_event: TimerCallback):
-        """Run a timer: send STARTED, tick every 1s with UPDATED, then FINISHED."""
+        """Run a timer: send STARTED, then FINISHED when it fires."""
         try:
             await on_event(VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_STARTED, timer)
-
-            while timer.is_active and timer.seconds_left > 0:
-                await asyncio.sleep(1)
-                if timer.is_active:
-                    await on_event(VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_UPDATED, timer)
+            # The satellite counts down from STARTED itself, as with Home Assistant: an UPDATED every
+            # second sent 28,800 events for an 8-hour alarm
+            await asyncio.sleep(max(0.0, timer.fire_at - time.time()))
 
             if timer.is_active:
                 timer.is_active = False

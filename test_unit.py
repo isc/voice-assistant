@@ -720,49 +720,33 @@ class TestScreenTool(unittest.TestCase):
 
 class TestParseTextToolCall(unittest.TestCase):
     def test_json_args(self):
-        fn, args = parse_text_tool_call('turn_on({"entity": "Plafonnier", "room": "Salon"})', False)
+        fn, args = parse_text_tool_call('turn_on({"entity": "Plafonnier", "room": "Salon"})')
         self.assertEqual(fn, "turn_on")
         self.assertEqual(args["entity"], "Plafonnier")
         self.assertEqual(args["room"], "Salon")
 
     def test_quoted_string(self):
-        fn, args = parse_text_tool_call('turn_off("Appliques salon")', False)
+        fn, args = parse_text_tool_call('turn_off("Appliques salon")')
         self.assertEqual(fn, "turn_off")
         self.assertEqual(args["entity"], "Appliques salon")
 
     def test_python_kwargs(self):
-        fn, args = parse_text_tool_call('close_cover(entity="Volet", room="Chambre")', False)
+        fn, args = parse_text_tool_call('close_cover(entity="Volet", room="Chambre")')
         self.assertEqual(fn, "close_cover")
         self.assertEqual(args["entity"], "Volet")
         self.assertEqual(args["room"], "Chambre")
 
-    def test_french_verb_with_history(self):
-        fn, args = parse_text_tool_call("Éteins les appliques salon.", True)
-        self.assertEqual(fn, "turn_off")
-        self.assertEqual(args["entity"], "appliques salon")
-
-    def test_volume_phrase_with_history(self):
-        self.assertEqual(parse_text_tool_call("Plus fort !", True), ("change_volume", {"direction": "up"}))
-        self.assertEqual(parse_text_tool_call("baisse le son", True), ("change_volume", {"direction": "down"}))
-
-    def test_reply_mentioning_volume_is_not_a_command(self):
-        fn, _ = parse_text_tool_call("Je ne peux pas parler plus fort, désolé.", True)
-        self.assertIsNone(fn)
-
-
-    def test_verrouille_with_history(self):
-        self.assertEqual(parse_text_tool_call("Verrouille la porte.", True), ("lock", {"entity": "porte"}))
-
-    def test_french_verb_without_history(self):
-        fn, args = parse_text_tool_call("Éteins les appliques salon.", False)
-        self.assertIsNone(fn)
+    def test_no_french_verb_guess(self):
+        """A reply is never taken for a command: « Fermeture des volets impossible » closed a shutter."""
+        for reply in ("Éteins les appliques salon.", "Fermeture des volets impossible.", "Plus fort !"):
+            self.assertEqual(parse_text_tool_call(reply), (None, None), reply)
 
     def test_plain_text_no_match(self):
-        fn, args = parse_text_tool_call("Il fait beau aujourd'hui.", False)
+        fn, args = parse_text_tool_call("Il fait beau aujourd'hui.")
         self.assertIsNone(fn)
 
     def test_unknown_function(self):
-        fn, args = parse_text_tool_call('reboot({"target": "server"})', False)
+        fn, args = parse_text_tool_call('reboot({"target": "server"})')
         self.assertIsNone(fn)
 
 
@@ -1277,6 +1261,56 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         await self.server._handle_timer_event(self.paris, updated, timer)
         paris_esp.send_voice_assistant_timer_event.assert_called_once()
         charras_esp.send_voice_assistant_timer_event.assert_not_called()
+
+
+class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.server = make_server()
+        self.server.calendar_client = self.server.spotify = None
+        self.server._tool_semaphore = asyncio.Semaphore(4)
+        self.server._keep_llm_loaded = lambda: None
+        self.server.execute_function = AsyncMock(return_value="Il fait 18 degrés")
+        call = {"id": "c1", "function": {"name": "get_weather", "arguments": '{"location": "Paris"}'}}
+        self.replies = [{"role": "assistant", "content": "", "tool_calls": [call]}, {"role": "assistant", "content": "18 degrés."}]
+
+    async def ask(self, dry_run=False):
+        with patch("llm.chat_completion", AsyncMock(side_effect=self.replies)):
+            return await self.server.process_with_llm(None, "quel temps fait-il ?", dry_run=dry_run)
+
+    async def test_history_keeps_the_calls(self):
+        """With only « request → C'est fait », gemma answered repeats from history, calling nothing."""
+        self.assertEqual(await self.ask(), "18 degrés.")
+        roles = [m["role"] for m in self.server.conversation_history]
+        self.assertEqual(roles, ["user", "assistant", "tool", "assistant"])
+        self.assertIn("tool_calls", self.server.conversation_history[1])
+
+    async def test_dry_run_leaves_the_conversation_alone(self):
+        await self.ask(dry_run=True)
+        self.assertEqual(self.server.conversation_history, [])
+        self.server.execute_function.assert_not_awaited()
+
+    async def test_malformed_arguments_do_not_fail_the_request(self):
+        self.replies[0]["tool_calls"][0]["function"]["arguments"] = "{not json"
+        self.assertEqual(await self.ask(), "18 degrés.")
+
+    async def test_concurrent_requests_keep_their_own_calls(self):
+        async def request(name):
+            self.server.new_request()
+            self.server._last_tool_calls.append(name)
+            await asyncio.sleep(0)
+            return list(self.server._last_tool_calls)
+
+        self.assertEqual(await asyncio.gather(request("a"), request("b")), [["a"], ["b"]])
+
+
+class TestTimers(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_the_only_timer_without_its_name(self):
+        from timer import TimerManager
+
+        manager = TimerManager()
+        manager.start_timer(300, None, AsyncMock())
+        self.assertIsNotNone(manager.cancel_timer(name=None))
+        self.assertEqual(manager.get_timers(), [])
 
 
 # ---------------------------------------------------------------------------

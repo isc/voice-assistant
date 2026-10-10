@@ -343,6 +343,14 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         "type": "string",
         "description": "Pièce ou groupe (ex: chambre Charlie, salon, enfants, partout)",
     }
+    # « Nom exact » made gemma list every shutter by name: 9 calls (5.3 s) for « ouvre tous les volets »
+    cover_entity_param = {
+        "type": "string",
+        "description": (
+            "Nom exact d'un volet ou d'une fenêtre ; ou « volets » / « fenêtres » avec room pour tous ceux "
+            "d'une pièce, d'un groupe ou de partout, en un seul appel"
+        ),
+    }
 
     # Pictures are cast to a HA screen (a Nest Hub): no screen, no tool
     screen_tools = []
@@ -434,7 +442,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
+                    "entity": cover_entity_param,
                     "room": room_param,
                 },
                 "required": ["entity"],
@@ -446,7 +454,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
+                    "entity": cover_entity_param,
                     "room": room_param,
                 },
                 "required": ["entity"],
@@ -458,7 +466,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
+                    "entity": cover_entity_param,
                     "room": room_param,
                     "position": {
                         "type": "integer",
@@ -542,10 +550,11 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
     ]
 
 
-def parse_text_tool_call(content: str, has_history: bool) -> tuple[Optional[str], Optional[dict]]:
+def parse_text_tool_call(content: str) -> tuple[Optional[str], Optional[dict]]:
     """Parse tool calls that local LLMs output as plain text instead of structured tool_calls.
-    Handles: fn({"entity":"X","room":"Y"}), fn("X"), fn(entity="X", room="Y"),
-    and French natural language actions as fallback.
+    Handles: fn({"entity":"X","room":"Y"}), fn("X"), fn(entity="X", room="Y").
+    No French-verb guess: « Fermeture des volets impossible » would have closed a shutter, and it
+    never fired in 223 requests with gemma4:12b.
     """
     # Pattern 1: fn({"key": "val", ...})
     m = re.match(r"(\w+)\s*\(\s*(\{.*\})\s*\)", content, re.DOTALL)
@@ -568,44 +577,6 @@ def parse_text_tool_call(content: str, has_history: bool) -> tuple[Optional[str]
             args[kv[0]] = kv[1]
         if args:
             return m.group(1), args
-
-    # Pattern 4: French natural language action (e.g. "Éteins les appliques salon.")
-    # Only triggered when conversation history exists (follow-up command)
-    if has_history:
-        lower = content.lower().rstrip(".!?")
-
-        # Volume follow-up shortcuts ("plus fort", "moins fort", "monte le son"...)
-        volume_phrases = {
-            "up": ("plus fort", "monte le son", "augmente le son", "monte le volume", "augmente le volume"),
-            "down": ("moins fort", "baisse le son", "baisse le volume"),
-        }
-        for direction, phrases in volume_phrases.items():
-            for phrase in phrases:
-                # startswith, like the verbs below: a reply that merely mentions
-                # "plus fort" somewhere is not a volume command
-                if lower.startswith(phrase):
-                    logger.info(f"French action fallback: '{content}' -> change_volume({direction})")
-                    return "change_volume", {"direction": direction}
-
-        action_map = {
-            "allume": "turn_on",
-            "rallume": "turn_on",
-            "éteins": "turn_off",
-            "eteins": "turn_off",
-            "ferme": "close_cover",
-            "ouvre": "open_cover",
-            "verrouille": "lock",
-        }
-        for verb, func in action_map.items():
-            if lower.startswith(verb):
-                entity_part = lower[len(verb) :].strip()
-                for article in ("les ", "le ", "la ", "l'", "l\u2019"):
-                    if entity_part.startswith(article):
-                        entity_part = entity_part[len(article) :]
-                        break
-                if entity_part:
-                    logger.info(f"French action fallback: '{content}' -> {func}('{entity_part}')")
-                    return func, {"entity": entity_part}
 
     return None, None
 
@@ -647,10 +618,7 @@ async def chat_completion(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    tool_names = [t["function"]["name"] for t in payload.get("tools", [])]
-    logger.info(f'LLM prompt: [system] ...voice assistant... [user] "{messages[-1]["content"]}"')
-    if tool_names:
-        logger.info(f"Tools: {tool_names}")
+    logger.debug(f"LLM request: {len(messages)} messages, last {messages[-1]['role']}: {messages[-1]['content']!r}")
 
     # Retry on finish_reason=length: the completion was truncated (often a
     # reasoning model spending the whole budget on internal thinking). Bump the
@@ -673,11 +641,23 @@ async def chat_completion(
                         return None
 
                     result = await response.json()
-                    logger.info(f"LLM raw response: {json.dumps(result, ensure_ascii=False, indent=2)}")
                     choice = result["choices"][0]
                     finish_reason = choice.get("finish_reason")
+                    usage = result.get("usage") or {}
+                    called = [tc["function"]["name"] for tc in choice["message"].get("tool_calls") or []]
+                    # One line per round: the raw response, indented, took ~30 journal lines each
+                    logger.info(
+                        f"LLM: {finish_reason}, prompt {usage.get('prompt_tokens')} + completion "
+                        f"{usage.get('completion_tokens')} tokens, calls {called}, "
+                        f"text {(choice['message'].get('content') or '')[:120]!r}"
+                    )
 
-                    if finish_reason == "length" and payload[max_tokens_key] < MAX_TOKEN_CEILING:
+                    # A completion stopped well short of its budget hit the context, not the budget:
+                    # more tokens cannot help (Ollama's 4096-token context, 2026-10-11: 3 retries, 7 tokens each)
+                    hit_budget = (usage.get("completion_tokens") or 0) >= payload[max_tokens_key] * 0.9
+                    if finish_reason == "length" and not hit_budget:
+                        logger.error(f"LLM context full: prompt {usage.get('prompt_tokens')} tokens")
+                    elif finish_reason == "length" and payload[max_tokens_key] < MAX_TOKEN_CEILING:
                         if attempt < MAX_LENGTH_RETRIES:
                             new_limit = min(payload[max_tokens_key] * 2, MAX_TOKEN_CEILING)
                             logger.warning(
@@ -692,9 +672,6 @@ async def chat_completion(
                         )
 
                     return choice["message"]
-    except Exception as e:
-        logger.error(f"LLM error: {e}")
-        import traceback
-
-        traceback.print_exc()
+    except Exception:
+        logger.exception("LLM error")
         return None

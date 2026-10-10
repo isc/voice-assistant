@@ -16,6 +16,7 @@ import tempfile
 import time
 import wave
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -32,9 +33,10 @@ from aioesphomeapi import (
 )
 from aioesphomeapi.core import TimeoutAPIError
 from aioesphomeapi.reconnect_logic import ReconnectLogic
+import aiohttp
 from aiohttp import web
 
-from ha_client import LOCAL_CONFIG, compact, is_whole_house
+from ha_client import LOCAL_CONFIG, compact, is_whole_house, normalize
 from images import find_image
 from recordings import Recordings
 from sites import Site, load_sites
@@ -55,6 +57,8 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "")  # empty = llama-server's only model
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 # Devices re-read from Home Assistant this often (and a Home Assistant that was down, retried)
 _HA_REFRESH_SECONDS = 300
+# A tool result kept in history this long at most (a weather or calendar answer runs to 1 kB)
+_HISTORY_RESULT_CHARS = 300
 
 
 # French web radio streams. All MP3: the Voice PE does not decode AAC.
@@ -160,6 +164,29 @@ def _format_family_for_prompt(family: list) -> str:
 _current_site: ContextVar[Site] = ContextVar("current_site")
 
 
+@dataclass
+class _Request:
+    """What one request gathers while it runs. Shared by reference with the tasks it starts (tool
+    calls run under asyncio.gather), unlike a ContextVar set in them; a concurrent request has its own."""
+
+    tool_calls: list = field(default_factory=list)
+    end_conversation: bool = False  # the end_conversation tool: no follow-up, history cleared
+    no_followup: bool = False  # a media command: no follow-up, history kept (AD-035)
+
+
+_current_request: ContextVar[_Request] = ContextVar("current_request")
+
+
+def _request_attribute(name: str) -> property:
+    def request() -> _Request:
+        if (current := _current_request.get(None)) is None:
+            current = _Request()
+            _current_request.set(current)
+        return current
+
+    return property(lambda self: getattr(request(), name), lambda self, value: setattr(request(), name, value))
+
+
 def _site_attribute(name: str) -> property:
     """An attribute of the site this task serves."""
     return property(lambda self: getattr(self.site, name), lambda self, value: setattr(self.site, name, value))
@@ -171,6 +198,11 @@ class VoiceAssistantServer:
     Handles the STT -> LLM -> TTS pipeline
     """
 
+    # Conversation history (per site) is forgotten after this much silence. Long enough that a typed
+    # follow-up ("et dans la salle de jeux ?") still resolves, short enough that a wake word much
+    # later starts clean. Voice conversations usually end sooner anyway, via the end_conversation tool.
+    CONVERSATION_TIMEOUT = 600  # seconds
+
     # Per home, read from the active site (sites.py)
     ha_client = _site_attribute("ha_client")
     timer_manager = _site_attribute("timer_manager")
@@ -179,6 +211,10 @@ class VoiceAssistantServer:
     last_interaction_time = _site_attribute("last_interaction_time")
     _last_media_target = _site_attribute("last_media_target")
     _shown_images = _site_attribute("shown_images")
+    # Per request (_Request)
+    _last_tool_calls = _request_attribute("tool_calls")
+    _end_conversation = _request_attribute("end_conversation")
+    _no_followup = _request_attribute("no_followup")
 
     def __init__(self):
         self.sites: list[Site] = load_sites()
@@ -203,17 +239,9 @@ class VoiceAssistantServer:
         # Google Calendar client
         self.calendar_client = None
 
-        # Conversation history (per site) for multi-turn context.
-        # Forget context after this much silence. Long enough that a typed
-        # follow-up ("et dans la salle de jeux ?") still resolves, short enough
-        # that a wake word much later starts clean. Voice conversations usually
-        # end sooner anyway, via the end_conversation tool.
-        self.CONVERSATION_TIMEOUT = 600  # seconds
 
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word
-        self._end_conversation = False  # Set by end_conversation tool: no follow-up, history cleared
-        self._no_followup = False  # Set by media commands: no follow-up, history kept (AD-035)
 
         # Media playback state. Media targets are ("esp", site name) or ("ha", entity_id),
         # the last one per site for follow-ups (_last_media_target).
@@ -232,7 +260,6 @@ class VoiceAssistantServer:
 
         self.exchange_log = ExchangeLog(Path(__file__).parent / "exchanges.json")
         self.recordings = Recordings()
-        self._last_tool_calls = []
         # Cap on concurrent tool calls: fast enough for a whole-house command while
         # staying gentle on the single HomeKit bridge relaying every Velux.
         self._tool_semaphore = asyncio.Semaphore(4)
@@ -267,6 +294,11 @@ class VoiceAssistantServer:
             return False
         self._voice_site = self.site = site
         return True
+
+    @staticmethod
+    def new_request() -> None:
+        """A request starts in this task: its own tool calls and follow-up flags."""
+        _current_request.set(_Request())
 
     def site_named(self, name: str) -> Optional[Site]:
         return next((site for site in self.sites if site.name == name.strip().lower()), None)
@@ -747,7 +779,7 @@ class VoiceAssistantServer:
     async def process_voice_pipeline(self, api: APIClient, audio_bytes: bytes):
         """Main pipeline: Audio -> STT -> LLM -> TTS"""
         logger.info(f"Starting full voice pipeline ({self.site.label})")
-        self._end_conversation = self._no_followup = False
+        self.new_request()
         self._pipeline_running = True
         timings = {}
         # What became of the request, for the exchange log and beside its recording
@@ -820,7 +852,7 @@ class VoiceAssistantServer:
             )
 
         except Exception as e:
-            logger.error(f"Pipeline error: {e}")
+            logger.exception("Pipeline error")
             entry["error"] = str(e)
             await self.send_error_to_device(api, f"Pipeline error: {e}")
         finally:
@@ -851,8 +883,13 @@ class VoiceAssistantServer:
 
         # Timers — standalone, doesn't need HA
         if function_name == "set_timer":
-            duration_minutes = arguments.get("duration_minutes", 0)
-            total_seconds = int(duration_minutes * 60)
+            # A string from the text fallback ("5" * 60 is a 60-digit number), or nothing at all
+            try:
+                total_seconds = int(float(arguments.get("duration_minutes") or 0) * 60)
+            except (TypeError, ValueError):
+                total_seconds = 0
+            if total_seconds <= 0:
+                return "Durée du timer manquante ou invalide"
             label = arguments.get("label")
             timer = self.timer_manager.start_timer(total_seconds, label, partial(self._handle_timer_event, self.site))
             if label:
@@ -880,6 +917,9 @@ class VoiceAssistantServer:
                 else:
                     desc = f"le timer de {_format_duration(timer.total_seconds)}"
                 return f"Annulé: {desc}"
+            if running := self.timer_manager.get_timers():
+                names = ", ".join(t.target_time if t.is_alarm else (t.name or _format_duration(t.total_seconds)) for t in running)
+                return f"Plusieurs timers en cours ({names}) : lequel annuler ?"
             return "Aucun timer actif"
 
         # Weather — standalone, doesn't need HA
@@ -949,10 +989,10 @@ class VoiceAssistantServer:
             return f"Appareil {entity_name} non trouvé"
 
         if function_name == "get_state":
-            state_data = await self.ha_client.get_entity_state(entity_ids[0])
-            if state_data:
-                return self.ha_client.format_state_for_speech(entity_ids[0], state_data)
-            return f"Impossible de lire l'état de {entity_name}"
+            # Every device resolved: « les volets sont fermés ? » names several, and only the first was read
+            states = await asyncio.gather(*(self.ha_client.get_entity_state(eid) for eid in entity_ids))
+            answers = [self.ha_client.format_state_for_speech(eid, st) for eid, st in zip(entity_ids, states) if st]
+            return ". ".join(answers) if answers else f"Impossible de lire l'état de {entity_name}"
 
         extra = {}
         if function_name == "set_temperature" and "temperature" in arguments:
@@ -1025,6 +1065,10 @@ class VoiceAssistantServer:
                 ids = self.ha_client.resolve_all_entities(room, room=None, domain_hints=["media_player"])
             if ids:
                 return ("ha", ids[0])
+            # A room named, no speaker there: not the satellite either, which played anyway while
+            # the reply said where. « ici » (and « là », a stopword) mean the satellite.
+            if normalize(room) not in ("", "ici"):
+                return None
 
         # Follow-up without room: reuse the last target
         if not room and self._last_media_target:
@@ -1299,12 +1343,14 @@ class VoiceAssistantServer:
         )
 
         logger.info(f'LLM input: "{text}"')
+        self._keep_llm_loaded()
 
         is_local = not LLM_API_KEY
 
-        # Build system prompt
-        now_str = time.strftime("%A %d %B %Y, %H:%M")
-
+        # The system prompt stays the same from one request to the next: Ollama reuses the prompt
+        # it has already read, tools included, up to the first change. With the time in it, every
+        # new minute re-read all ~3.6K tokens (~1.9 s, measured). What changes goes just before
+        # the request instead.
         system_prompt = (
             "Tu es un assistant vocal pour la maison connectée. "
             "Réponds en français, en 1-2 phrases courtes maximum. "
@@ -1318,14 +1364,11 @@ class VoiceAssistantServer:
             "Si la demande couvre plusieurs actions ou sujets "
             "(ex: contrôler un appareil ET demander la météo), "
             "appelle TOUTES les fonctions nécessaires "
-            "en parallèle dans ta réponse.\n"
-            f"Date et heure actuelles: {now_str}."
+            "en parallèle dans ta réponse."
         )
         family = LOCAL_CONFIG.get("family", [])
         if family:
             system_prompt += "\n" + _format_family_for_prompt(family)
-        if is_local:
-            system_prompt = "/no_think " + system_prompt
         if self.ha_client:
             entity_list = self.ha_client.get_entity_list_for_prompt()
             if entity_list:
@@ -1333,12 +1376,11 @@ class VoiceAssistantServer:
 
         from timer import format_timers_for_prompt
 
-        timers_info = format_timers_for_prompt(self.timer_manager.get_timers())
-        if timers_info:
-            system_prompt += f"\n{timers_info}"
-        music_info = await self._music_for_prompt()
-        if music_info:
-            system_prompt += f"\n{music_info}"
+        context = [f"Date et heure actuelles: {time.strftime('%A %d %B %Y, %H:%M')}."]
+        if timers_info := format_timers_for_prompt(self.timer_manager.get_timers()):
+            context.append(timers_info)
+        if music_info := await self._music_for_prompt():
+            context.append(music_info)
 
         tools = get_tool_definitions(self.ha_client, self.calendar_client, music=self.spotify is not None)
         # Only these run: a name the model made up (« unlock ») or a tool this house lacks does not
@@ -1361,6 +1403,7 @@ class VoiceAssistantServer:
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(self.conversation_history)
+        messages.append({"role": "system", "content": "\n".join(context)})
         messages.append({"role": "user", "content": text})
 
         message = await chat_completion(
@@ -1373,16 +1416,24 @@ class VoiceAssistantServer:
         if not message:
             return None
 
+        # The turn as history keeps it: the calls and their results too. With only « ferme les volets
+        # → C'est fait », the model answered the same request again from history, calling nothing
+        # (7 repeats out of 10, dry runs).
+        turn = [{"role": "user", "content": text}]
+
         def save_to_history(response_text):
-            self.conversation_history.append({"role": "user", "content": text})
-            self.conversation_history.append({"role": "assistant", "content": response_text})
-            if len(self.conversation_history) > 10:
-                self.conversation_history = self.conversation_history[-10:]
+            if dry_run:  # a test leaves the family's conversation alone
+                return
+            history = self.conversation_history + turn + [{"role": "assistant", "content": response_text}]
+            # The last 5 exchanges, cut at a request
+            starts = [i for i, m in enumerate(history) if m["role"] == "user"]
+            self.conversation_history = history[starts[-5]:] if len(starts) > 5 else history
 
         # Tool call loop: keep calling LLM until it returns text (max 3 rounds)
         import json
 
         self._last_tool_calls = []
+        done: dict[tuple, str] = {}  # (function, arguments) -> result, this turn
         max_rounds = 3
         challenged_empty_claim = False
         for round_num in range(max_rounds):
@@ -1420,9 +1471,20 @@ class VoiceAssistantServer:
             # batch in one go, so the calls are independent by construction.
             async def run_tool(tool_call):
                 function_name = tool_call["function"]["name"]
-                function_args = json.loads(tool_call["function"]["arguments"])
+                try:
+                    function_args = json.loads(tool_call["function"]["arguments"])
+                except (TypeError, ValueError):
+                    # One malformed call must not fail the whole request and the calls beside it
+                    logger.warning(f"Malformed arguments for {function_name}: {tool_call['function']['arguments']!r}")
+                    return {"function": function_name, "args": {}, "error": "arguments"}, "Erreur: arguments illisibles"
                 logger.info(f"Function call: {function_name}({function_args})")
                 tc_entry = {"function": function_name, "args": function_args}
+                # The same call again in a later round (show_image ran 3 times, 2026-10-11): its result
+                key = (function_name, json.dumps(function_args, sort_keys=True))
+                if key in done:
+                    logger.info(f"Already run this turn: {function_name}")
+                    tc_entry["result"] = done[key]
+                    return tc_entry, done[key]
                 if function_name not in offered:
                     logger.warning(f"Function not offered: {function_name}")
                     tc_entry["result"] = f"Fonction {function_name} non disponible"
@@ -1435,7 +1497,7 @@ class VoiceAssistantServer:
                     try:
                         result = await self.execute_function(function_name, function_args)
                         logger.info(f"Function result: {result}")
-                        tc_entry["result"] = result
+                        tc_entry["result"] = done[key] = result
                     except Exception as e:
                         logger.error(f"Function execution error: {e}")
                         result = f"Erreur: {e}"
@@ -1458,6 +1520,8 @@ class VoiceAssistantServer:
             # Follow-up LLM call with tools still available for additional calls
             messages.append(message)  # assistant message with tool_calls
             messages.extend(tool_messages)
+            turn.append(message)
+            turn.extend({**m, "content": m["content"][:_HISTORY_RESULT_CHARS]} for m in tool_messages)
             # Remind the model to handle all parts of the original request
             called_names = [tc["function"] for tc in self._last_tool_calls]
             messages.append(
@@ -1483,6 +1547,10 @@ class VoiceAssistantServer:
                 save_to_history(response)
                 return response
 
+        if message.get("tool_calls"):
+            names = [tc["function"]["name"] for tc in message["tool_calls"]]
+            logger.warning(f"Round limit reached, calls not run: {names}")
+
         if self._last_tool_calls:
             # LLM returned text after tool execution
             response = (message.get("content") or "").strip()
@@ -1497,8 +1565,8 @@ class VoiceAssistantServer:
             content = content.split("</think>")[-1]
         content = content.strip()
 
-        fn_name, fn_args = parse_text_tool_call(content, bool(self.conversation_history))
-        if fn_name in offered and fn_args:
+        fn_name, fn_args = parse_text_tool_call(content)
+        if fn_name in offered and fn_args and not dry_run:
             try:
                 logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
                 result = await self.execute_function(fn_name, fn_args)
@@ -1520,6 +1588,25 @@ class VoiceAssistantServer:
         if content:
             save_to_history(content)
         return content if content else None
+
+    def _keep_llm_loaded(self) -> None:
+        """Ask Ollama to keep the model loaded: it unloads after 5 idle minutes, and the next request
+        then waited ~7 s (median of 10 cold requests, against 2.3 s warm). Sent with each request
+        rather than on a timer, so that a job that unloads it to free the GPU (beast) can."""
+        if LLM_API_KEY or not LLM_URL.endswith("/v1/chat/completions"):
+            return
+        url = LLM_URL.removesuffix("/v1/chat/completions") + "/api/generate"
+
+        async def ping():
+            try:
+                async with aiohttp.ClientSession() as session:
+                    await session.post(url, json={"model": LLM_MODEL, "keep_alive": -1}, timeout=aiohttp.ClientTimeout(total=30))
+            except Exception as e:
+                logger.debug(f"Ollama keep-alive failed: {e}")
+
+        task = asyncio.ensure_future(ping())
+        self._pending_service_calls.add(task)
+        task.add_done_callback(self._pending_service_calls.discard)
 
     # === TTS ===
 
@@ -1604,11 +1691,8 @@ class VoiceAssistantServer:
             logger.info(f"TTS done: gen={timings['gen']}s play={timings['play']}s")
             return timings
 
-        except Exception as e:
-            logger.error(f"TTS error: {e}")
-            import traceback
-
-            traceback.print_exc()
+        except Exception:
+            logger.exception("TTS error")
             raise
 
     async def send_error_to_device(self, api: APIClient, error_message: str):

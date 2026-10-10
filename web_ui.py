@@ -110,6 +110,7 @@ def setup_routes(app, server):
             if not site:
                 raise _json_error(web.HTTPNotFound, f"unknown site {body['site']}")
             server.site = site  # for this request only: a conversation at another site goes on undisturbed
+        server.new_request()
         return text
 
     async def handle_web_ui(request):
@@ -222,7 +223,15 @@ def setup_routes(app, server):
         )
 
     async def handle_reset_conversation(request):
-        """Clear conversation history. Used by tests for isolation."""
+        """Clear a site's conversation history ({"site": …}, else the default). Used by tests for isolation."""
+        try:
+            name = (await request.json()).get("site")
+        except Exception:
+            name = None
+        if name:
+            if not (site := server.site_named(name)):
+                raise _json_error(web.HTTPNotFound, f"unknown site {name}")
+            server.site = site
         server.conversation_history = []
         server.conversation_id = None
         return web.json_response({"status": "ok"})
