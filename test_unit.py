@@ -12,7 +12,7 @@ Usage:
 
 import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from ha_client import HAClient, cover_kind, normalize
 from images import is_about
@@ -374,6 +374,7 @@ class TestActionClaimDetection(unittest.TestCase):
             "J'ai bien réglé le thermostat à 20 degrés.",
             "J'ai éteint les lumières.",
             "J'ai éteint les lumières. Autre chose ?",
+            "J'ai verrouillé la porte d'entrée.",
         ]:
             self.assertTrue(claims_completed_action(text), text)
 
@@ -386,6 +387,7 @@ class TestActionClaimDetection(unittest.TestCase):
             "Il est actuellement 20h32.",
             "Lundi 27 juillet, tu as la livraison du piano.",
             "Je n'ai pas accès à cette information.",
+            "Oui, la porte d'entrée est verrouillée.",
         ]:
             self.assertFalse(claims_completed_action(text), text)
 
@@ -427,6 +429,66 @@ class TestNoCrossRoomFallback(unittest.TestCase):
         """The rescue path stays: HA has no 'Garage' area, so the filter is dropped."""
         eid = self.client.resolve_entity("Appliques salon", room="Garage")
         self.assertEqual(eid, "light.appliques_salon")
+
+
+# ---------------------------------------------------------------------------
+# Tests: door lock, locked by voice but never unlocked
+# ---------------------------------------------------------------------------
+
+
+class TestLock(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.client = make_client()
+        # Mirror Paris and Charras: a lock in no room, and alarm-sensor switches named after doors
+        for eid, name, domain, area in (("lock.smart_lock_pro", "Smart Lock Pro", "lock", ""),
+                                        ("switch.bas_porte_salon_night_mode", "Bas Porte salon night_mode", "switch", "Living Room")):  # fmt: skip
+            self.client.entities[eid] = {
+                "friendly_name": name, "domain": domain, "state": "unlocked",
+                "attributes": {}, "area_id": None, "area_name": area,
+            }  # fmt: skip
+
+    def test_door_state_reads_the_lock(self):
+        self.assertEqual(self.client.resolve_all_entities("porte"), ["lock.smart_lock_pro"])
+        self.assertEqual(self.client.resolve_all_entities("la serrure"), ["lock.smart_lock_pro"])
+
+    def test_door_is_not_a_cover_nor_a_switch(self):
+        self.assertEqual(self.client.resolve_all_entities("porte", domain_hints=["cover"]), [])
+        hints = ["light", "switch", "media_player"]
+        self.assertEqual(self.client.resolve_all_entities("porte", room="Living Room", domain_hints=hints), [])
+
+    def test_any_name_reaches_the_only_lock(self):
+        self.assertEqual(
+            self.client.resolve_all_entities("porte d'entrée", domain_hints=["lock"]), ["lock.smart_lock_pro"]
+        )
+
+    def test_tool_offered_only_with_a_lock(self):
+        self.assertIn("lock", {t["name"] for t in get_tool_definitions(self.client)})
+        del self.client.entities["lock.smart_lock_pro"]
+        self.assertNotIn("lock", {t["name"] for t in get_tool_definitions(self.client)})
+
+    def test_state_and_response(self):
+        state = {"state": "unlocked", "attributes": {"friendly_name": "Smart Lock Pro"}}
+        self.assertEqual(
+            self.client.format_state_for_speech("lock.smart_lock_pro", state), "Smart Lock Pro est déverrouillée"
+        )
+        self.assertIn("verrouillage", self.client._build_response("lock", "lock", "Smart Lock Pro", {}))
+
+    async def test_only_the_lock_service_reaches_a_lock(self):
+        from voice_server import VoiceAssistantServer
+
+        server = VoiceAssistantServer.__new__(VoiceAssistantServer)
+        server.ha_client = self.client
+        self.client.call_service = AsyncMock(return_value="ok")
+        for invented in ("unlock", "open", "lock_door"):
+            result = await server.execute_function(invented, {"entity": "porte"})
+            self.assertIn("inconnue", result)
+        await server.execute_function("lock", {"entity": "porte"})
+        self.client.call_service.assert_awaited_once_with("lock", "lock", "lock.smart_lock_pro")
+
+    async def test_ha_client_never_unlocks(self):
+        for service in ("unlock", "open"):
+            result = await self.client.call_service("lock", service, "lock.smart_lock_pro")  # no session: no HTTP
+            self.assertIn("pas à la voix", result)
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +660,9 @@ class TestParseTextToolCall(unittest.TestCase):
         fn, _ = parse_text_tool_call("Je ne peux pas parler plus fort, désolé.", True)
         self.assertIsNone(fn)
 
+
+    def test_verrouille_with_history(self):
+        self.assertEqual(parse_text_tool_call("Verrouille la porte.", True), ("lock", {"entity": "porte"}))
 
     def test_french_verb_without_history(self):
         fn, args = parse_text_tool_call("Éteins les appliques salon.", False)

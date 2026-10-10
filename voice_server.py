@@ -802,6 +802,7 @@ class VoiceAssistantServer:
         entity_name = arguments.get("entity", "")
         room = arguments.get("room")
 
+        # Every action tool is named after its HA service; this is also the list of them
         domain_map = {
             "turn_on": ["light", "switch", "media_player"],
             "turn_off": ["light", "switch", "media_player"],
@@ -809,9 +810,13 @@ class VoiceAssistantServer:
             "close_cover": ["cover"],
             "set_cover_position": ["cover"],
             "set_temperature": ["climate"],
+            "lock": ["lock"],
             "get_state": None,
         }
-        domains = domain_map.get(function_name)
+        if function_name not in domain_map:
+            logger.warning(f"Unknown function: {function_name}")
+            return f"Fonction {function_name} inconnue"
+        domains = domain_map[function_name]
 
         entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
         if not entity_ids:
@@ -823,15 +828,6 @@ class VoiceAssistantServer:
                 return self.ha_client.format_state_for_speech(entity_ids[0], state_data)
             return f"Impossible de lire l'état de {entity_name}"
 
-        service = {
-            "turn_on": "turn_on",
-            "turn_off": "turn_off",
-            "open_cover": "open_cover",
-            "close_cover": "close_cover",
-            "set_cover_position": "set_cover_position",
-            "set_temperature": "set_temperature",
-        }.get(function_name, function_name)
-
         extra = {}
         if function_name == "set_temperature" and "temperature" in arguments:
             extra["temperature"] = arguments["temperature"]
@@ -840,6 +836,12 @@ class VoiceAssistantServer:
         if function_name == "set_cover_position" and "position" in arguments:
             extra["position"] = arguments["position"]
 
+        calls = [self.ha_client.call_service(eid.split(".")[0], function_name, eid, **extra) for eid in entity_ids]
+        if function_name == "lock":
+            # Awaited, unlike the rest: whoever leaves on « porte verrouillée » must not
+            # be told so when HA could not reach the lock
+            return ". ".join(await asyncio.gather(*calls))
+
         # Fire and forget. An HA service call blocks until the HomeKit bridge
         # acknowledges (~0.5-1.8s/Velux, serialised by the bridge → ~10s for eight),
         # but a 200 only means HA dispatched the command, not that the shutter
@@ -847,9 +849,8 @@ class VoiceAssistantServer:
         # either way. So don't make the user wait for acks: schedule the calls and
         # let them drain while the pipeline moves on to the reply. call_service
         # swallows and logs its own errors, so a failed background call never raises.
-        for entity_id in entity_ids:
-            domain = entity_id.split(".")[0]
-            task = asyncio.ensure_future(self.ha_client.call_service(domain, service, entity_id, **extra))
+        for call in calls:
+            task = asyncio.ensure_future(call)
             self._pending_service_calls.add(task)
             task.add_done_callback(self._pending_service_calls.discard)
 
@@ -875,7 +876,7 @@ class VoiceAssistantServer:
 
         return self.ha_client._build_response(
             entity_ids[0].split(".")[0],
-            service,
+            function_name,
             self.ha_client.entities.get(entity_ids[0], {}).get("friendly_name", entity_ids[0]),
             extra,
         )
@@ -1209,6 +1210,8 @@ class VoiceAssistantServer:
             system_prompt += f"\n{music_info}"
 
         tools = get_tool_definitions(self.ha_client, self.calendar_client, music=self.spotify is not None)
+        # Only these run: a name the model made up (« unlock ») or a tool this house lacks does not
+        offered = {tool["name"] for tool in tools}
 
         # Expire old conversation history
         now = time.time()
@@ -1289,6 +1292,10 @@ class VoiceAssistantServer:
                 function_args = json.loads(tool_call["function"]["arguments"])
                 logger.info(f"Function call: {function_name}({function_args})")
                 tc_entry = {"function": function_name, "args": function_args}
+                if function_name not in offered:
+                    logger.warning(f"Function not offered: {function_name}")
+                    tc_entry["result"] = f"Fonction {function_name} non disponible"
+                    return tc_entry, tc_entry["result"]
                 if dry_run:
                     logger.info(f"Dry run: {function_name}({function_args})")
                     tc_entry["result"] = "OK"
@@ -1360,7 +1367,7 @@ class VoiceAssistantServer:
         content = content.strip()
 
         fn_name, fn_args = parse_text_tool_call(content, bool(self.conversation_history))
-        if fn_name and fn_args:
+        if fn_name in offered and fn_args:
             try:
                 logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
                 result = await self.execute_function(fn_name, fn_args)

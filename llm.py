@@ -37,6 +37,7 @@ _TOOL_NAMES = {
     "play_music",
     "music_control",
     "show_image",
+    "lock",
 }
 
 
@@ -45,8 +46,8 @@ _TOOL_NAMES = {
 # must not match.
 _ACTION_CLAIM = re.compile(
     r"c'est fait|c'est entendu|voila|"
-    r"j'ai (?:bien )?(?:ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont)|"
-    r"\bje (?:ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte)\b"
+    r"j'ai (?:bien )?(?:ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill)|"
+    r"\bje (?:ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille)\b"
 )
 
 
@@ -370,6 +371,30 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             }
         ]
 
+    # Locking only: a voice can't be trusted to open the door, the assistant knows no
+    # voices and hears the radio too. No lock, no tool.
+    lock_tools = []
+    if any(info["domain"] == "lock" for info in ha_client.entities.values()):
+        lock_tools = [
+            {
+                "name": "lock",
+                "description": (
+                    "Verrouiller une porte, la fermer à clé (« ferme la porte à clé », "
+                    "« verrouille la porte »). Le déverrouillage à la voix n'existe pas, "
+                    "volontairement : si on demande d'ouvrir ou de déverrouiller une porte, "
+                    "réponds que ça se fait avec la clé ou l'application, sans appeler de fonction."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {"type": "string", "description": "Nom de la serrure, ou « porte »"},
+                        "room": room_param,
+                    },
+                    "required": ["entity"],
+                },
+            }
+        ]
+
     return [
         {
             "name": "turn_on",
@@ -457,7 +482,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         },
         {
             "name": "get_state",
-            "description": "Obtenir l'état actuel d'un appareil (allumé/éteint, température, ouvert/fermé)",
+            "description": "Obtenir l'état actuel d'un appareil (allumé/éteint, température, ouvert/fermé, verrouillé)",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -497,6 +522,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         *calendar_tools,
         *media_tools,
         *screen_tools,
+        *lock_tools,
         {
             "name": "end_conversation",
             "description": (
@@ -564,6 +590,7 @@ def parse_text_tool_call(content: str, has_history: bool) -> tuple[Optional[str]
             "eteins": "turn_off",
             "ferme": "close_cover",
             "ouvre": "open_cover",
+            "verrouille": "lock",
         }
         for verb, func in action_map.items():
             if lower.startswith(verb):

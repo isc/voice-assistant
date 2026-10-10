@@ -62,6 +62,7 @@ ESP (wake word) → audio stream → voice_server.py
 - **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
 - **Text fallback parser**: catches when local LLM outputs tool calls as plain text instead of structured JSON (4 patterns: JSON args, quoted string, Python kwargs, French verbs).
 - **Spotify as a radio station**: go-librespot (separate service) plays into a FIFO; `spotify.py` paces it at real time, pads gaps with silence, encodes MP3 and serves `/spotify/stream.mp3` next to `/tts/`. Speakers (ESP or HA) play that URL; one stream, so one speaker at a time.
+- **Locks lock, never unlock**: a `lock` tool and state reads, no unlock tool. Only the tools offered this turn run, and `HAClient.call_service` refuses `lock.unlock` and `lock.open` (AD-041).
 - **Secrets**: the server only reads env vars: `/etc/voice-assistant.env` on the server, the Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`) through `run.sh` on a Mac.
 
 ## Configuration (env vars)

@@ -15,7 +15,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # Domains we expose as LLM tools
-SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player"}
+SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock"}
 
 # French stopwords to strip for fuzzy matching
 STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
@@ -271,6 +271,7 @@ class HAClient:
                 "cover": "volets",
                 "climate": "thermostats",
                 "media_player": "médias",
+                "lock": "serrures",
             }.get(info["domain"], info["domain"])
             # Roof windows are covers too — list them apart so the LLM never
             # offers a skylight when the user asked for a roller shutter.
@@ -302,6 +303,11 @@ class HAClient:
         "velux": ("cover", "fenetre"),
         "lumiere": ("light", None),
         "lumieres": ("light", None),
+        "porte": ("lock", None),
+        "portes": ("lock", None),
+        "serrure": ("lock", None),
+        "serrures": ("lock", None),
+        "verrou": ("lock", None),
     }
 
     def _area_exists(self, norm_room: str) -> bool:
@@ -328,6 +334,14 @@ class HAClient:
         rooms_to_search = [room]
         # Generic name (e.g. "volet" -> all shutters in the room), with its cover sub-kind
         target_domain, generic_kind = self._GENERIC_NAMES.get(normalize(name), (None, None))
+        if target_domain:
+            # A generic name of another kind names nothing this action can reach: « ferme la
+            # porte » sent as a shutter must close no shutter, nor send a cover service to the lock
+            if domain_hints and target_domain not in domain_hints:
+                logger.info(f"'{name}' is a {target_domain}, not one of {domain_hints}")
+                return []
+            # A state read has no domain of its own: « la porte » is the lock, not a switch named Porte
+            domain_hints = domain_hints or [target_domain]
 
         # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"])
         if room:
@@ -436,8 +450,14 @@ class HAClient:
         logger.warning(f"No entity match for '{name}' (room={room})")
         return None
 
+    # Never by voice, whatever route a call takes to get here (AD-041)
+    _FORBIDDEN_SERVICES = {("lock", "unlock"), ("lock", "open")}
+
     async def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
         """Call a HA service and return a French result string for TTS."""
+        if (domain, service) in self._FORBIDDEN_SERVICES:
+            logger.warning(f"Refused {domain}.{service} -> {entity_id}")
+            return "Le déverrouillage ne se fait pas à la voix"
         payload = {"entity_id": entity_id}
         payload.update(kwargs)
 
@@ -544,7 +564,6 @@ class HAClient:
             ("cover", "open_cover"): f"{display_name} en cours d'ouverture",
             ("cover", "close_cover"): f"{display_name} en cours de fermeture",
             ("cover", "set_cover_position"): f"{display_name} réglé à {kwargs.get('position', '?')}%",
-            ("cover", "stop_cover"): f"{display_name} arrêté",
             (
                 "climate",
                 "set_temperature",
@@ -561,6 +580,7 @@ class HAClient:
             ): f"Volume à {round(kwargs.get('volume_level', 0) * 100)} pour cent",
             ("media_player", "volume_up"): "Plus fort",
             ("media_player", "volume_down"): "Moins fort",
+            ("lock", "lock"): f"{display_name} en cours de verrouillage",
         }
         return responses.get((domain, service), "C'est fait")
 
@@ -604,5 +624,17 @@ class HAClient:
 
         if domain == "switch":
             return f"{friendly} est {'allumé' if state == 'on' else 'éteint'}"
+
+        if domain == "lock":
+            state_map = {
+                "locked": "verrouillée",
+                "unlocked": "déverrouillée",
+                "locking": "en cours de verrouillage",
+                "unlocking": "en cours de déverrouillage",
+                "jammed": "bloquée",
+                "open": "ouverte",
+                "opening": "en cours d'ouverture",
+            }
+            return f"{friendly} est {state_map.get(state, state)}"
 
         return f"{friendly} est {state}"
