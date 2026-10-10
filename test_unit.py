@@ -14,7 +14,8 @@ import asyncio
 import unittest
 
 from ha_client import HAClient, cover_kind, normalize
-from llm import claims_completed_action, parse_text_tool_call
+from images import is_about
+from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -118,6 +119,7 @@ def make_client() -> HAClient:
         "chambre_zoe": "Chambre Zoé",
         "chambre_parents": "Chambre parents",
     }
+    client.screens = []
     client._session = None
     return client
 
@@ -468,6 +470,41 @@ class TestBuildResponse(unittest.TestCase):
     def test_unknown_service(self):
         r = self.client._build_response("fan", "turn_on", "Ventilo", {})
         self.assertEqual(r, "C'est fait")
+
+
+# ---------------------------------------------------------------------------
+# Tests: pictures for the screen
+# ---------------------------------------------------------------------------
+
+
+class TestIsAbout(unittest.TestCase):
+    """Top Wikipedia hits measured on 2026-10-10 for spoken requests."""
+
+    def test_article_about_the_query(self):
+        self.assertTrue(is_about("tour Eiffel", "Tour Eiffel"))
+        self.assertTrue(is_about("la Tour Eiffel", "Tour Eiffel"))
+        self.assertTrue(is_about("Zinedine Zidane", "Zinédine Zidane"))
+
+    def test_title_may_say_more(self):
+        self.assertTrue(is_about("Arc de Triomphe", "Arc de triomphe de l'Étoile"))
+        self.assertTrue(is_about("chat roux", "Roux (robe de chat)"))
+
+    def test_article_merely_related(self):
+        self.assertFalse(is_about("coucher de soleil sur la mer", "Le Coucher du soleil"))
+        self.assertFalse(is_about("Daft Punk", "Discovery (album)"))
+
+    def test_empty_query(self):
+        self.assertFalse(is_about("", "Tour Eiffel"))
+
+
+class TestScreenTool(unittest.TestCase):
+    def test_offered_only_with_a_screen(self):
+        client = make_client()
+        names = {t["name"] for t in get_tool_definitions(client)}
+        self.assertNotIn("show_image", names)
+        client.screens = ["media_player.google_home"]
+        names = {t["name"] for t in get_tool_definitions(client)}
+        self.assertIn("show_image", names)
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 from ha_client import LOCAL_CONFIG, compact
+from images import find_image
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -196,6 +197,8 @@ class VoiceAssistantServer:
         self._spotify_task: Optional[asyncio.Task] = None
         # The speaker playing the Spotify stream: one stream, one speaker at a time
         self._spotify_target: Optional[tuple[str, str]] = None
+        # Pictures shown in this conversation, so that "une autre" moves on
+        self._shown_images: set[str] = set()
 
         # Exchange log for web UI (persisted to disk)
         from web_ui import ExchangeLog
@@ -751,6 +754,9 @@ class VoiceAssistantServer:
         if not self.ha_client:
             return "Home Assistant non disponible"
 
+        if function_name == "show_image":
+            return await self._show_image(arguments.get("query", ""))
+
         # Sensors are searched by keyword, not resolved like actionable entities
         if function_name == "get_sensor":
             return await self.ha_client.search_sensors(arguments.get("query", ""))
@@ -1014,8 +1020,8 @@ class VoiceAssistantServer:
             await self._media_command(previous, MediaPlayerCommand.STOP, ha_service="media_stop")
         self._spotify_target = target
 
-    async def _media_play_url(self, target: tuple[str, str], url: str) -> None:
-        """Start playback of an arbitrary media URL on the target speaker."""
+    async def _media_play_url(self, target: tuple[str, str], url: str, content_type: str = "music") -> None:
+        """Start playback of an arbitrary media URL on the target speaker (or show it, for a picture)."""
         kind, ident = target
         if kind == "esp":
             api = self.devices.get(ident)
@@ -1029,7 +1035,7 @@ class VoiceAssistantServer:
             "play_media",
             ident,
             media_content_id=url,
-            media_content_type="music",
+            media_content_type=content_type,
         )
 
     async def _media_command(self, target: tuple[str, str], command: MediaPlayerCommand, ha_service: str) -> None:
@@ -1060,6 +1066,20 @@ class VoiceAssistantServer:
             ident,
             volume_level=level / 100.0,
         )
+
+    # === SCREEN ===
+
+    async def _show_image(self, query: str) -> str:
+        """Find a picture on the web and cast it to the screen."""
+        if not self.ha_client.screens:
+            return "Aucun écran disponible"
+        picture = await find_image(query, exclude=self._shown_images)
+        if not picture:
+            return f"Aucune image trouvée pour {query}"
+        self._shown_images.add(picture.url)
+        screen = self.ha_client.screens[0]
+        await self._media_play_url(("ha", screen), picture.url, picture.content_type)
+        return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {picture.caption}"
 
     # === TIMER EVENTS ===
 
@@ -1170,6 +1190,7 @@ class VoiceAssistantServer:
         # Assign conversation ID for first exchange in a conversation
         if not self.conversation_id:
             self.conversation_id = int(now)
+            self._shown_images.clear()
 
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]

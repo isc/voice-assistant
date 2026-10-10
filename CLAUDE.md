@@ -11,7 +11,8 @@ ESP (wake word) → audio stream → voice_server.py
                                    │    ├─ ha_client.py → Home Assistant REST API
                                    │    ├─ weather.py → Open-Meteo API (free, no key)
                                    │    ├─ calendar_client.py → Google Calendar API (OAuth2)
-                                   │    └─ spotify.py → go-librespot (playback) + Spotify Web API (search)
+                                   │    ├─ spotify.py → go-librespot (playback) + Spotify Web API (search)
+                                   │    └─ images.py → Wikipedia / Openverse (free, no key) → cast to a Nest Hub
                                    ├─ tts.py (Kokoro-82M) → WAV file
                                    └─ web_ui.py → debug UI on :8888
 ```
@@ -30,6 +31,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, prompt summary |
 | `setup_calendar.py` | One-time OAuth setup script for Google Calendar (requires browser) |
 | `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
+| `images.py` | Pictures for the screen: Wikipedia article's lead image, else an Openverse photo; the screen loads the URL itself |
 | `web_ui.py` | Web UI (HTML + routes), exchange log with persistence (`exchanges.json`) |
 | `run.sh` | Launcher: reads secrets from macOS Keychain, selects cloud/local LLM mode |
 | `ctl.sh` | Service control: start/stop/restart/reload/status/logs via launchd |

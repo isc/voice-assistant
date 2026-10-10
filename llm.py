@@ -36,6 +36,7 @@ _TOOL_NAMES = {
     "change_volume",
     "play_music",
     "music_control",
+    "show_image",
 }
 
 
@@ -340,6 +341,33 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         "description": "Pièce ou groupe (ex: chambre Charlie, salon, enfants, partout)",
     }
 
+    # Pictures are cast to a HA screen (a Nest Hub): no screen, no tool
+    screen_tools = []
+    if ha_client.screens:
+        screen_tools = [
+            {
+                "name": "show_image",
+                "description": (
+                    "Montrer une image sur l'écran : une photo de quelque chose ou de quelqu'un "
+                    "(ex: « montre-moi la tour Eiffel », « à quoi ressemble un okapi ? », "
+                    "« montre-moi un chat roux »). Pour une autre image du même sujet "
+                    "(« une autre »), rappeler avec la même requête."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "Ce qu'il faut montrer, en quelques mots (ex: « tour Eiffel », « okapi », « chat roux »)"
+                            ),
+                        },
+                    },
+                    "required": ["query"],
+                },
+            }
+        ]
+
     return [
         {
             "name": "turn_on",
@@ -466,6 +494,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         *timer_tools,
         *calendar_tools,
         *media_tools,
+        *screen_tools,
         {
             "name": "end_conversation",
             "description": (

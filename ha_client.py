@@ -90,6 +90,8 @@ class HAClient:
         self.entity_areas: dict[str, str] = {}
         # The home as configured in HA: latitude, longitude, time_zone
         self.home: dict = {}
+        # media_player entities with a screen, to show pictures on
+        self.screens: list[str] = []
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -125,44 +127,52 @@ class HAClient:
         if self._session:
             await self._session.close()
 
+    async def _render_template(self, template: str) -> Optional[str]:
+        """Render a template with HA's template API — the REST way into the registries. None on failure."""
+        try:
+            async with self._session.post(f"{self.base_url}/api/template", json={"template": template}) as r:
+                if r.status != 200:
+                    logger.warning(f"HA template API returned {r.status}")
+                    return None
+                return await r.text()
+        except Exception as e:
+            logger.warning(f"HA template API error: {e}")
+            return None
+
     async def _fetch_areas(self):
         """Fetch area registry via HA template API."""
-        try:
-            r = await self._session.post(
-                f"{self.base_url}/api/template",
-                json={"template": "{% for a in areas() %}{{ a }}|{{ area_name(a) }}\n{% endfor %}"},
-            )
-            if r.status != 200:
-                logger.warning("Could not fetch areas")
-                return
-            text = await r.text()
-            self.areas.clear()
-            for line in text.strip().split("\n"):
-                if "|" in line:
-                    area_id, area_name = line.split("|", 1)
-                    self.areas[area_id.strip()] = area_name.strip()
-            logger.info(f"Areas: {', '.join(self.areas.values())}")
-        except Exception as e:
-            logger.warning(f"Error fetching areas: {e}")
+        text = await self._render_template("{% for a in areas() %}{{ a }}|{{ area_name(a) }}\n{% endfor %}")
+        if text is None:
+            logger.warning("Could not fetch areas")
+            return
+        self.areas.clear()
+        for line in text.strip().split("\n"):
+            if "|" in line:
+                area_id, area_name = line.split("|", 1)
+                self.areas[area_id.strip()] = area_name.strip()
+        logger.info(f"Areas: {', '.join(self.areas.values())}")
 
     async def _fetch_entity_areas(self) -> dict[str, str]:
         """Fetch entity -> area_id mapping via HA template API."""
         entity_to_area = {}
         for area_id in self.areas:
-            try:
-                r = await self._session.post(
-                    f"{self.base_url}/api/template",
-                    json={"template": f"{{% for e in area_entities('{area_id}') %}}{{{{ e }}}}\n{{% endfor %}}"},
-                )
-                if r.status == 200:
-                    text = await r.text()
-                    for line in text.strip().split("\n"):
-                        eid = line.strip()
-                        if eid:
-                            entity_to_area[eid] = area_id
-            except Exception as e:
-                logger.warning(f"Error fetching entities for area {area_id}: {e}")
+            text = await self._render_template(f"{{% for e in area_entities('{area_id}') %}}{{{{ e }}}}\n{{% endfor %}}")
+            for eid in (text or "").split():
+                entity_to_area[eid] = area_id
         return entity_to_area
+
+    async def _fetch_screens(self) -> list[str]:
+        """media_player entities with a screen — Google's Nest Hubs, told apart by device model.
+
+        HA has no "has a display" attribute: a Nest Hub Max reports the same supported
+        features as a Google Home speaker.
+        """
+        text = await self._render_template(
+            "{% for s in states.media_player %}"
+            "{% if 'Hub' in (device_attr(s.entity_id, 'model') or '') %}{{ s.entity_id }}\n{% endif %}"
+            "{% endfor %}"
+        )
+        return [eid for eid in (text or "").split() if eid in self.entities]
 
     async def refresh_entities(self):
         """Fetch all states from HA, filter to supported domains, attach area info."""
@@ -227,6 +237,10 @@ class HAClient:
         for area, items in sorted(by_area.items()):
             logger.info(f"  {area}: {', '.join(items)}")
         logger.info(f"Total: {len(self.entities)} entities in {len(by_area)} areas")
+
+        self.screens = await self._fetch_screens()
+        if self.screens:
+            logger.info(f"Screens: {', '.join(self.screens)}")
 
     def get_entity_list_for_prompt(self) -> str:
         """Return entity names grouped by room for the system prompt."""
