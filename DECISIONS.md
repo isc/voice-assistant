@@ -225,3 +225,11 @@ This document tracks all architecture and technology decisions made for this pro
   - Not downloaded by the server: nothing to store or clean up, no detour through the Paris relay (which only forwards `/tts/` and `/spotify/stream.mp3`), and the screen only needs internet access.
 - **Measured** on the Paris Nest Hub Max, 2026-10-10: `play_media` answered in 1.2 s; 1.7 s after the call the Default Media Receiver had loaded the Wikimedia thumbnail (HA then reports `paused`, content type `video`) and the picture was on screen.
 - **Trade-off**: Cast plays one thing at a time: a picture sent to a Nest that plays the Spotify stream or a radio stops it. Long phrases find nothing on Openverse (« un chien qui court sur la plage »: 0 results), hence the « quelques mots » in the tool description.
+
+## 2026-10-10: Production on a Linux server
+
+### AD-039: charras-server under systemd; Keychain and launchd kept for Mac dev
+- **Context**: AD-019 (Keychain) and AD-020 (launchd) were made on the M1 MacBook, which travels and cannot serve a fixed site. The pipeline has run on charras-server (Ubuntu 24.04, NVIDIA GPU) since July 2026 (journal from 2026-07-23), STT on onnx-asr with CUDA since the backend split of 2026-06-28, while the docs and the startup banner still described the Mac.
+- **Decision**: Production is `/opt/voice-assistant`, a root-owned checkout of `main`, run by `voice-assistant.service` (systemd) with config and secrets in `/etc/voice-assistant.env` (root, 0600) as its `EnvironmentFile`. `ExecReload` sends SIGHUP, so AD-020's signal handling carries over. LLM: `gemma4:12b` on Ollama in Docker; `STT_BACKEND=onnx`. `run.sh`, `ctl.sh` and the Keychain stay, for development on the Mac only.
+- **Also**: the startup banner is gone. It still named MLX and Qwen 3 4B, and as plain `print`s to a pipe it only reached the journal at shutdown. The startup log lines already name the STT backend and the TTS; the LLM line now gives the model next to the URL.
+- **Trade-off**: Two ways to run the server. `systemctl restart` returns before the models are loaded, where `ctl.sh` waited for the "Server running" log line: readiness is read from the journal or `/health`.

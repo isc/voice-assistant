@@ -1,5 +1,5 @@
 #!/bin/bash
-# Voice assistant server launcher
+# Voice assistant server launcher — Mac dev only (the Linux server runs under systemd)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="$SCRIPT_DIR/venv/bin/python3"
@@ -14,7 +14,7 @@ fi
 # Install deps if needed
 if ! $PYTHON -c "import aiohttp" 2>/dev/null; then
     echo "Installing dependencies..."
-    $PYTHON -m pip install -r "$SCRIPT_DIR/requirements.txt"
+    $PYTHON -m pip install -r "$SCRIPT_DIR/requirements-mac.txt"
 fi
 
 # Resolve secrets from keychain if not in env

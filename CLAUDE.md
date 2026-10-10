@@ -2,12 +2,14 @@
 
 Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHome hardware (ESP32-S3 with wake word), fully local STT/TTS, with cloud or local LLM.
 
+Production runs on a Linux server ([Deployment](#deployment-and-service-management)); a Mac remains usable for development.
+
 ## Architecture
 
 ```
 ESP (wake word) → audio stream → voice_server.py
-                                   ├─ stt.py (Parakeet MLX) → transcript
-                                   ├─ llm.py (OpenAI API / llama.cpp) → tool calls or text
+                                   ├─ stt.py (Parakeet: onnx-asr on CUDA, MLX on a Mac) → transcript
+                                   ├─ llm.py (OpenAI-compatible: Ollama, or cloud) → tool calls or text
                                    │    ├─ ha_client.py → Home Assistant REST API
                                    │    ├─ weather.py → Open-Meteo API (free, no key)
                                    │    ├─ calendar_client.py → Google Calendar API (OAuth2)
@@ -26,16 +28,16 @@ ESP (wake word) → audio stream → voice_server.py
 | `llm.py` | LLM integration: chat completion, tool definitions, text-to-tool-call fallback parser |
 | `timer.py` | Timer manager: in-memory timers with asyncio scheduling, ESP native timer events |
 | `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 24kHz→16kHz resampling |
-| `stt.py` | Parakeet TDT 0.6B v3 via MLX (Apple Silicon optimized) |
+| `stt.py` | Parakeet TDT 0.6B v3: onnx-asr on Linux/CUDA (server) or parakeet-mlx on Apple Silicon (Mac dev), picked by `STT_BACKEND` |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
 | `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, prompt summary |
 | `setup_calendar.py` | One-time OAuth setup script for Google Calendar (requires browser) |
 | `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
 | `images.py` | Pictures for the screen: Wikipedia article's lead image, else an Openverse photo; the screen loads the URL itself |
 | `web_ui.py` | Web UI (HTML + routes), exchange log with persistence (`exchanges.json`) |
-| `run.sh` | Launcher: reads secrets from macOS Keychain, selects cloud/local LLM mode |
-| `ctl.sh` | Service control: start/stop/restart/reload/status/logs via launchd |
-| `com.voice-assistant.server.plist` | launchd service definition |
+| `requirements-linux.txt` / `requirements-mac.txt` | Base deps (`requirements.txt`) plus the STT backend: onnx-asr (server) or parakeet-mlx (Mac) |
+| `run.sh` | Mac dev launcher: sources `.env`, reads secrets from the macOS Keychain, starts llama-server unless a cloud key is set |
+| `ctl.sh` | Mac dev service control via launchd; `./ctl.sh install` generates the (gitignored) plist |
 
 ## Pipeline flow (voice)
 
@@ -60,7 +62,7 @@ ESP (wake word) → audio stream → voice_server.py
 - **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
 - **Text fallback parser**: catches when local LLM outputs tool calls as plain text instead of structured JSON (4 patterns: JSON args, quoted string, Python kwargs, French verbs).
 - **Spotify as a radio station**: go-librespot (separate service) plays into a FIFO; `spotify.py` paces it at real time, pads gaps with silence, encodes MP3 and serves `/spotify/stream.mp3` next to `/tts/`. Speakers (ESP or HA) play that URL; one stream, so one speaker at a time.
-- **Secrets**: stored in macOS Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`), read by `run.sh` and exported as env vars.
+- **Secrets**: the server only reads env vars: `/etc/voice-assistant.env` on the server, the Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`) through `run.sh` on a Mac.
 
 ## Configuration (env vars)
 
@@ -70,11 +72,11 @@ ESP (wake word) → audio stream → voice_server.py
 | `ESP_PORT` | `6053` | ESPHome native API port |
 | `ESP_PASSWORD` | (empty) | Legacy password auth |
 | `ESP_NOISE_PSK` | (empty) | Noise encryption key (preferred) |
-| `LLM_URL` | `http://localhost:8080/v1/chat/completions` | LLM endpoint |
-| `LLM_API_KEY` | (empty) | If set, enables cloud mode |
-| `LLM_MODEL` | (empty) | Model name for cloud API (e.g. `gpt-5.4-nano`) |
+| `LLM_URL` | `http://localhost:8080/v1/chat/completions` (llama-server) | OpenAI-compatible endpoint. Server: Ollama, `http://localhost:11434/v1/chat/completions` |
+| `LLM_API_KEY` | (empty) | If set, enables cloud mode (bearer auth, provider's default reasoning). Empty on the server |
+| `LLM_MODEL` | (empty) | Model name: `gemma4:12b` on the server's Ollama, e.g. `gpt-5.4-nano` in the cloud; empty lets llama-server use its only model |
 | `LLM_REASONING_EFFORT` | `none` local, unset cloud | Reasoning budget for thinking models. Keep `none` locally — thinking costs ~10s/round and empties `content` |
-| `STT_BACKEND` | `auto` | Parakeet backend: `mlx` (Apple), `onnx` (Linux/CUDA via onnx-asr), or `auto` |
+| `STT_BACKEND` | `auto` | Parakeet backend: `onnx` (Linux/CUDA via onnx-asr, set on the server), `mlx` (Apple), or `auto` (MLX if installed, else ONNX) |
 | `HA_URL` | (required) | Home Assistant URL |
 | `HA_TOKEN` | (empty) | HA long-lived access token |
 | `HTTP_PORT` | `8888` | HTTP server port (TTS files + web UI) |
@@ -85,15 +87,36 @@ ESP (wake word) → audio stream → voice_server.py
 | `SPOTIFY_LIBRESPOT_URL` | `http://127.0.0.1:3678` | go-librespot API |
 | `SPOTIFY_PCM_FIFO` | `/run/go-librespot/pcm` | FIFO go-librespot writes its PCM into |
 
-## Service management
+## Deployment and service management
+
+The live server is charras-server: `/opt/voice-assistant`, a root-owned checkout of `main` with
+its own `venv`, run by `voice-assistant.service` (systemd, `/etc/systemd/system/`) with config and
+secrets in `/etc/voice-assistant.env`. Beside it: Ollama in Docker (container `ollama`, port
+11434) and `go-librespot.service` for Spotify. Host setup (CUDA libraries, locale, Ollama model):
+home-infra `charras/SETUP.md` §7–8b.
 
 ```bash
-./ctl.sh start      # Start via launchd, waits for ready
-./ctl.sh stop       # Graceful SIGTERM
-./ctl.sh restart    # Full restart (after code changes), waits for ready
+sudo git -C /opt/voice-assistant pull     # deploy main
+sudo systemctl restart voice-assistant    # after code or env changes
+sudo systemctl reload voice-assistant     # SIGHUP → hot-reload HA entities
+sudo systemctl stop voice-assistant       # SIGTERM → graceful shutdown
+systemctl status voice-assistant
+journalctl -u voice-assistant -f          # logs
+```
+
+`systemctl restart` returns before the models are loaded: the server is up once the journal says
+`Server running` (`Fatal error` otherwise), or `curl -s localhost:8888/health` answers 200.
+
+On a Mac (dev), `./run.sh` runs the server in the foreground, and `ctl.sh` wraps launchd:
+
+```bash
+./ctl.sh install    # once: generates the plist and registers it with launchd
+./ctl.sh start      # waits for ready
+./ctl.sh stop       # graceful SIGTERM
+./ctl.sh restart    # after code changes, waits for ready
 ./ctl.sh reload     # SIGHUP → hot-reload HA entities, waits for completion
-./ctl.sh status     # Running/not running + PID
-./ctl.sh logs       # tail -f
+./ctl.sh status     # running/not running + PID
+./ctl.sh logs       # tail -f /tmp/voice-assistant.log
 ```
 
 ## Conventions
@@ -110,6 +133,4 @@ the commit that could have been made directly. Commit to `main` and push (from a
 `git push origin HEAD:main`). The commit message then carries the reasoning — what was tried,
 measured, ruled out — since there is no PR description to hold it.
 
-The live server is `/opt/voice-assistant` on charras-server, a root-owned checkout of `main`
-(`voice-assistant.service`, config in `/etc/voice-assistant.env`): deploy with
-`sudo git -C /opt/voice-assistant pull` then `sudo systemctl restart voice-assistant`.
+Then deploy it to the live server: see [Deployment](#deployment-and-service-management).

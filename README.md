@@ -6,7 +6,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 
 ### Voice pipeline
 - Wake word detection via ESPHome, automatic end-of-speech detection (Silero VAD); no transcription when nobody spoke
-- Local STT: Parakeet TDT 0.6B v3, via MLX on Apple Silicon or onnx-asr on Linux/CUDA
+- Local STT: Parakeet TDT 0.6B v3, via onnx-asr on Linux/CUDA or MLX on Apple Silicon
 - Local TTS: Kokoro-82M with French phonemization (misaki/espeak), sentence by sentence
 - Continuous conversation: follow-ups without the wake word, closed cleanly on "merci", "bonne nuit"; context kept 10 minutes
 
@@ -34,7 +34,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 - Text fallback parser for local models that output tool calls as plain text
 
 ### Infrastructure
-- macOS (launchd service, secrets in Keychain) or Linux server (systemd, CUDA)
+- Linux server in production (systemd, CUDA, Ollama); macOS for development (launchd, secrets in Keychain)
 - One server can serve a voice device at another site: `TTS_BASE_URL` points it at a relay
 - Automatic ESP reconnection; hot reload of Home Assistant entities via SIGHUP
 - Time zone taken from Home Assistant, so the server itself may run in UTC
@@ -44,7 +44,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 
 ```
 ESP (wake word) → audio stream → voice_server.py
-                                   ├─ stt.py (Parakeet, MLX or ONNX) → transcript
+                                   ├─ stt.py (Parakeet, ONNX or MLX) → transcript
                                    ├─ llm.py (OpenAI-compatible API) → tool calls or text
                                    │    ├─ ha_client.py → Home Assistant REST API
                                    │    ├─ timer.py → in-memory timers with ESP events

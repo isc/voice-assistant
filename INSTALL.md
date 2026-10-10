@@ -1,62 +1,116 @@
 # Installation
 
+The production setup is a Linux server with an NVIDIA GPU (Ubuntu 24.04, the LLM served by
+Ollama, the server run by systemd). A Mac with Apple Silicon works for development.
+
 ## Prerequisites
 
 - Python 3.11+
-- macOS (Apple Silicon, MLX STT) or Linux with an NVIDIA GPU (ONNX STT, see below)
-- espeak-ng (`brew install espeak-ng` / `apt install espeak-ng`)
+- Linux with an NVIDIA GPU (STT through onnx-asr on CUDA), or macOS on Apple Silicon (STT through MLX)
+- espeak-ng (`apt install espeak-ng` / `brew install espeak-ng`)
 - Home Assistant instance (optional, for device control; also gives the home's location and time zone)
 - ESPHome device with wake word support (ESP32-S3, e.g. Home Assistant Voice PE)
-- An OpenAI-compatible LLM endpoint: a cloud API, or Ollama / llama.cpp locally
+- An OpenAI-compatible LLM endpoint: Ollama or llama.cpp locally, or a cloud API
 
-## Install
+All configuration goes through environment variables, listed in
+[CLAUDE.md](CLAUDE.md#configuration-env-vars); [.env.example](.env.example) is the sample.
+
+## Linux server
+
+### Install
+
+```bash
+sudo apt install python3-venv espeak-ng
+sudo locale-gen fr_FR.UTF-8                           # dates are spoken in French
+sudo git clone https://github.com/isc/voice-assistant /opt/voice-assistant
+cd /opt/voice-assistant
+sudo python3 -m venv venv
+sudo venv/bin/pip install -r requirements-linux.txt   # adds onnx-asr for the STT
+```
+
+The STT then runs on the CPU, with the `onnxruntime` that kokoro-onnx pulls in. For the GPU, swap
+it for the CUDA build and its CUDA 13 libraries:
+
+```bash
+sudo venv/bin/pip uninstall -y onnxruntime
+sudo venv/bin/pip install onnxruntime-gpu nvidia-cuda-runtime nvidia-cublas nvidia-cufft nvidia-curand nvidia-cudnn-cu13
+NV=/opt/voice-assistant/venv/lib/python3.12/site-packages/nvidia
+printf '%s\n' "$NV/cu13/lib" "$NV/cudnn/lib" | sudo tee /etc/ld.so.conf.d/voice-assistant-cuda.conf
+sudo ldconfig
+```
+
+Both builds install the same `onnxruntime` module, so a later `pip install -r requirements-linux.txt`
+brings the CPU one back and the STT silently drops to the CPU; restore the GPU one with
+`sudo venv/bin/pip install --force-reinstall --no-deps onnxruntime-gpu`. The startup log lists the
+ONNX execution providers.
+
+The LLM, Ollama in Docker:
+
+```bash
+docker run -d --name ollama --gpus all --restart unless-stopped \
+  -p 11434:11434 -v /opt/ollama:/root/.ollama ollama/ollama
+docker exec ollama ollama pull gemma4:12b
+```
+
+### Configure
+
+Config and secrets go in `/etc/voice-assistant.env`, readable by root only: fill in the ESP and
+Home Assistant settings and uncomment the Ollama lines.
+
+```bash
+sudo install -m 600 .env.example /etc/voice-assistant.env
+sudoedit /etc/voice-assistant.env
+```
+
+And the unit, `/etc/systemd/system/voice-assistant.service`:
+
+```ini
+[Unit]
+Description=Voice Assistant orchestrator (STT/LLM/TTS + Home Assistant)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/voice-assistant
+EnvironmentFile=/etc/voice-assistant.env
+ExecStart=/opt/voice-assistant/venv/bin/python voice_server.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now voice-assistant
+```
+
+Deploying, reloading and logs: see [CLAUDE.md](CLAUDE.md#deployment-and-service-management).
+
+## Mac (development)
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-mac.txt   # adds parakeet-mlx for the STT
+cp .env.example .env                  # ESP and Home Assistant addresses
 ```
 
-## Configure
-
-```bash
-cp .env.example .env
-# Edit .env with your ESP and Home Assistant IPs
-```
-
-Store secrets in macOS Keychain:
+Secrets go in the macOS Keychain, where `run.sh` reads them:
 
 ```bash
 security add-generic-password -a "$USER" -s voice-assistant-ha-token -w "YOUR_HA_TOKEN"
 security add-generic-password -a "$USER" -s voice-assistant-openai-key -w "YOUR_OPENAI_KEY"  # optional, for cloud LLM
 ```
 
-All configuration via environment variables. See [CLAUDE.md](CLAUDE.md#configuration-env-vars) for the full list.
-
-## Run
-
-```bash
-# Direct launch (reads secrets from Keychain, sources .env)
-./run.sh
-
-# Or via launchd service
-./ctl.sh install   # one-time setup: generates plist, registers with launchd
-./ctl.sh start
-./ctl.sh status
-./ctl.sh logs
-```
-
-## Linux server
-
-```bash
-pip install -r requirements-linux.txt   # adds onnx-asr for the STT
-```
-
-Set `STT_BACKEND=onnx`, point `LLM_URL` at the local model (e.g. Ollama's
-`http://localhost:11434/v1/chat/completions` with `LLM_MODEL=gemma4:12b`), and run
-`voice_server.py` as a systemd service with the same variables in an `EnvironmentFile`
-(`ExecReload=/bin/kill -HUP $MAINPID` gives the hot reload of Home Assistant entities).
-`run.sh`, `ctl.sh` and the Keychain are macOS only.
+Without a cloud key, `run.sh` also starts a local llama-server. Run the server in the foreground
+with `./run.sh`, or as a launchd service with `./ctl.sh install` (once), then the `ctl.sh`
+commands in [CLAUDE.md](CLAUDE.md#deployment-and-service-management).
 
 ## Google Calendar (optional)
 

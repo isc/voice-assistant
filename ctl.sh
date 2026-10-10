@@ -1,6 +1,6 @@
 #!/bin/bash
-# Voice assistant control script
-# Usage: ./ctl.sh {start|stop|restart|reload|status|logs}
+# Voice assistant control script — Mac dev only, via launchd (the Linux server uses systemctl)
+# Usage: ./ctl.sh {start|stop|restart|reload|status|logs|install|uninstall}
 
 SERVICE="com.voice-assistant.server"
 DOMAIN="gui/$(id -u)"

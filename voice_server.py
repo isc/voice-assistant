@@ -46,7 +46,7 @@ ESP_PASSWORD = os.environ.get("ESP_PASSWORD", "")
 ESP_NOISE_PSK = os.environ.get("ESP_NOISE_PSK", "")
 LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_MODEL = os.environ.get("LLM_MODEL", "")  # e.g. "gpt-5.4-nano" — empty = local llama.cpp
+LLM_MODEL = os.environ.get("LLM_MODEL", "")  # empty = llama-server's only model
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 # URL the ESP fetches TTS files from, when it cannot reach this host's own LAN address
 TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "")
@@ -223,7 +223,7 @@ class VoiceAssistantServer:
     async def start(self):
         """Start the server and connect to devices"""
         logger.info("Voice Assistant Server started")
-        logger.info(f"ESP: {ESP_HOST}:{ESP_PORT} | LLM: {LLM_URL} | HTTP: {HTTP_PORT}")
+        logger.info(f"ESP: {ESP_HOST}:{ESP_PORT} | LLM: {LLM_MODEL or '(server default)'} at {LLM_URL} | HTTP: {HTTP_PORT}")
 
         from stt import ParakeetSTT
         from tts import KokoroTTS
@@ -1475,10 +1475,6 @@ class VoiceAssistantServer:
 
 async def main():
     """Main entry point"""
-    print("Custom Voice Assistant Server for ESPHome (Python)")
-    print("Replaces Home Assistant for voice pipeline")
-    print("STT: Parakeet MLX | LLM: Qwen 3 4B (llama.cpp) | TTS: Kokoro\n")
-
     server = VoiceAssistantServer()
     reload_event = asyncio.Event()
     stop_event = asyncio.Event()
