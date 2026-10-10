@@ -34,6 +34,8 @@ _TOOL_NAMES = {
     "stop_media",
     "set_volume",
     "change_volume",
+    "play_music",
+    "music_control",
 }
 
 
@@ -57,7 +59,7 @@ def claims_completed_action(text: str) -> bool:
     return bool(_ACTION_CLAIM.search(flat))
 
 
-def get_tool_definitions(ha_client, calendar_client=None) -> list:
+def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
     """Return LLM tool definitions."""
     # Weather is always available (no HA dependency)
     weather_tool = {
@@ -194,7 +196,8 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         "type": "string",
         "description": (
             "Pièce ou enceinte où jouer le média (ex: « salon », « Google Home »), parmi les "
-            "« médias » de la liste des appareils. Par défaut: l'enceinte de l'appareil vocal."
+            "« médias » de la liste des appareils. À omettre pour l'enceinte de l'appareil vocal "
+            "(« ici », ou aucune pièce dite)."
         ),
     }
     media_tools = [
@@ -268,6 +271,66 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
             },
         },
     ]
+
+    if music:
+        media_tools += [
+            {
+                "name": "play_music",
+                "description": (
+                    "Mettre de la musique sur Spotify : un artiste, un titre, un album, une "
+                    "playlist, un genre ou une ambiance (ex: « mets du Daft Punk », « joue "
+                    "Get Lucky », « mets ma playlist du matin », « mets du jazz »). "
+                    "Pas pour les radios en direct (play_radio)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "Ce qu'il faut chercher, tel que dit (ex: « Daft Punk », "
+                                "« Get Lucky Daft Punk », « du matin », « jazz »)"
+                            ),
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["artist", "track", "album", "playlist", "liked"],
+                            "description": (
+                                "artist pour un artiste ou groupe, track pour un titre, album, "
+                                "playlist pour une playlist, un genre ou une ambiance, "
+                                "liked pour les titres likés / favoris"
+                            ),
+                        },
+                        "shuffle": {
+                            "type": "boolean",
+                            "description": "Lecture aléatoire, si demandée",
+                        },
+                        "room": media_room_param,
+                    },
+                    "required": ["query", "kind"],
+                },
+            },
+            {
+                "name": "music_control",
+                "description": (
+                    "Piloter la musique Spotify en cours : pause, reprendre, titre suivant ou "
+                    "précédent, ou savoir ce qui joue (« c'est quoi cette chanson ? »). "
+                    "Pour déplacer la musique en cours vers une autre enceinte (« mets la musique "
+                    "dans le salon »), action resume avec room : elle continue là où elle en était."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["pause", "resume", "next", "previous", "current"],
+                        },
+                        "room": media_room_param,
+                    },
+                    "required": ["action"],
+                },
+            },
+        ]
 
     if not ha_client:
         return [weather_tool] + timer_tools + calendar_tools + media_tools

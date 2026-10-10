@@ -231,6 +231,20 @@ class TestResolveAllEntities(unittest.TestCase):
         eids = self.client.resolve_all_entities("lumière", room="Living Room")
         self.assertNotIn("light.orphan", eids)
 
+    def test_no_area_leak_by_name(self):
+        """A speaker with no area must not answer for another speaker's name or room."""
+        for eid, name, area in (("media_player.google_home", "Google Home", "Living Room"),
+                                ("media_player.sonos", "Sonos Paris", "")):  # fmt: skip
+            self.client.entities[eid] = {
+                "friendly_name": name, "domain": "media_player", "state": "idle",
+                "attributes": {}, "area_id": None, "area_name": area,
+            }  # fmt: skip
+        for room in ("Google Home", "Living Room"):
+            eids = self.client.resolve_all_entities(room, room=room, domain_hints=["media_player"])
+            self.assertEqual(eids, ["media_player.google_home"], room)
+        eids = self.client.resolve_all_entities("Sonos", room="Sonos", domain_hints=["media_player"])
+        self.assertEqual(eids, ["media_player.sonos"])
+
 
 # ---------------------------------------------------------------------------
 # Tests: cover sub-kinds (roller shutters vs roof windows, both `cover`)
@@ -526,6 +540,49 @@ class TestResolveStation(unittest.TestCase):
 
         for name in ("", "la radio", "musique classique", "Radio Nova"):
             self.assertIsNone(_resolve_station(name), name)
+
+
+class TestMatchPlaylist(unittest.TestCase):
+    PLAYLISTS = [{"name": n, "uri": n} for n in ("Matin tranquille ☀️", "Soirée", "Endormissement Zoé et Charlie")]
+
+    def test_spoken_names(self):
+        from spotify import match_playlist
+
+        self.assertEqual(match_playlist(self.PLAYLISTS, "ma playlist du matin")["name"], "Matin tranquille ☀️")
+        self.assertEqual(match_playlist(self.PLAYLISTS, "soirée")["name"], "Soirée")
+        self.assertEqual(match_playlist(self.PLAYLISTS, "endormissement")["name"], "Endormissement Zoé et Charlie")
+
+    def test_no_match(self):
+        from spotify import match_playlist
+
+        for query in ("", "ma playlist", "jazz"):
+            self.assertIsNone(match_playlist(self.PLAYLISTS, query), query)
+
+
+class TestSpotifyStreamRead(unittest.TestCase):
+    """The FIFO is read in whole stereo frames: a split frame would garble the rest of the stream."""
+
+    def test_whole_frames_only(self):
+        import os
+        import tempfile
+
+        from spotify import SpotifyStream
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "pcm")
+            os.mkfifo(path)
+            stream = SpotifyStream(path)
+            self.assertEqual(stream._read(), b"")  # no writer yet
+            writer = os.open(path, os.O_WRONLY)
+            try:
+                os.write(writer, bytes(range(10)))
+                self.assertEqual(stream._read(), bytes(range(8)))
+                os.write(writer, bytes(range(10, 12)))
+                self.assertEqual(stream._read(), bytes(range(8, 12)))
+                self.assertEqual(stream._read(), b"")  # writer attached, nothing to read
+            finally:
+                os.close(writer)
+                os.close(stream._fd)
 
 
 class TestFormatState(unittest.TestCase):

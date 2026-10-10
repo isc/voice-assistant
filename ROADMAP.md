@@ -85,8 +85,12 @@ Two distinct problems, often conflated under "native audio":
 
 ## Media
 
-### Spotify voice control
-Control Spotify playback on connected speakers (e.g., "mets du jazz dans le salon", "joue la playlist du matin"). Requires Spotify integration via HA media_player entities or direct Spotify Connect API. LLM tools: play_music (artist/song/playlist/genre query + target speaker), pause/resume, skip, volume.
+### ~~Spotify voice control~~ DONE
+`play_music` (artist, track, album, playlist, genre, Liked Songs) and `music_control` (pause, resume, next, previous, what's playing), on the Voice PE or a named HA speaker. go-librespot plays into a FIFO that the server streams as MP3 (AD-037).
+
+Follow-ups:
+- **Phone → speaker**: "Assistant vocal" is in the account's Spotify Connect device list, but music started from a phone plays to nobody until a speaker listens to the stream. Watch go-librespot's `/events` websocket and point the default speaker at the stream when playback starts from elsewhere.
+- **One stream at a time**: a single go-librespot is a single queue. Two rooms playing different music need a second player (and a second Spotify account, as Spotify allows one stream per account).
 
 ## Infrastructure
 

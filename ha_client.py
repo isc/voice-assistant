@@ -40,6 +40,11 @@ def normalize(text: str) -> str:
     return " ".join(words)
 
 
+def compact(text: str) -> str:
+    """normalize() without spaces or punctuation, for names said many ways ("Rire & Chansons")."""
+    return "".join(c for c in normalize(text) if c.isalnum())
+
+
 # Sub-kinds inside the `cover` domain. A house can have roller shutters and roof
 # windows side by side — both are HA covers, but they are not interchangeable
 # (opening a skylight when asked for a shutter lets the rain in).
@@ -354,7 +359,8 @@ class HAClient:
                 continue
             if norm_room:
                 norm_area = normalize(info.get("area_name", ""))
-                if norm_room not in norm_area and norm_area not in norm_room:
+                # No area means in no room, not in every one ("" is in any name)
+                if not norm_area or (norm_room not in norm_area and norm_area not in norm_room):
                     continue
             candidates[eid] = normalize(info["friendly_name"])
 
