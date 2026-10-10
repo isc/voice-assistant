@@ -1,116 +1,88 @@
 # Roadmap
 
-Features and improvements planned for the voice assistant.
-
-## Conversation flow
-
-### ~~Continuous conversation (no wake word between turns)~~ DONE
-Implemented via announcement API with `start_conversation=True`. 5s follow-up timeout, `end_conversation` tool for clean closure.
-
-### ~~TTS sentence-level streaming~~ DONE
-Split response into sentences, pipeline generation with playback. First sentence plays in ~2s while subsequent ones generate in parallel.
-
-### More concise, less repetitive responses
-The LLM tends to repeat context unnecessarily (e.g., "à Paris, avec un risque de pluie à 0%" on every weather response). Tune the system prompt to encourage shorter, more natural follow-ups — especially when answering a continuation like "et demain?", the response should be minimal ("Non plus, 0% de pluie").
+What is still open. Shipped work is recorded in `DECISIONS.md` and the git history, not here.
 
 ## Robustness
 
-### ~~LLM retry on finish_reason=length~~ DONE
-`chat_completion()` in `llm.py` detects `finish_reason == "length"` and retries with double the token limit (up to 2 retries, ceiling 2000) before returning. Handles reasoning models that spend the whole budget on internal thinking. If still truncated at the ceiling, returns the partial response rather than failing.
+### Voice PE stalls when it plays music and answers
+2026-10-10, 23:13 in Paris: the Voice PE was playing the Spotify stream itself when a spoken reply with follow-up arrived. It never sent `VoiceAssistantAnnounceFinished` (8 s timeout), then most likely rebooted: a solid warm-white ring is the firmware's init-without-Wi-Fi state, and the API reconnected right away while its stream connection dropped 7 s later. To try, in order:
+- Pause the ESP's own media before announcing a reply, and resume after; or skip the follow-up while the ESP itself plays media, as `_after_media_change` already does after a media command.
+- Add ESPHome's `debug:` component to the Voice PE firmware so the reset reason shows up, instead of inferring a reboot from the LED.
 
-### Fallback TTS
-If Kokoro crashes or fails, fall back to raw espeak for audio output. The response quality degrades but the assistant remains functional instead of going silent.
+### Duck the music while listening
+The same evening, a request said next to the playing Sonos was recorded for 14 s (the VAD never heard silence) and transcribed into song lyrics. The Voice PE ducks only its own speaker. On wake word, lower the HA speakers playing in the satellite's room, and restore them once the request is transcribed. Needs the satellite's room (see "Room of the voice satellite").
+
+### Media target from live player state
+Media commands without a room go to `_last_media_target`, a value kept in memory: it is lost on restart (picked up from HA at startup since 2026-10-10) and goes stale when music is started or stopped from a phone or the Sonos app. Reading HA player states at command time would send "stop" and "plus fort" to whatever actually plays. It would also let the conversation stay open after a media command when nothing plays near the satellite (AD-035 ends it unconditionally). Cost: one HA read per media command, or a websocket subscription.
 
 ## UX
 
-### ~~Timers and alarms~~ DONE
-LLM tools `set_timer`, `set_alarm`, `cancel_timer` with server-side `TimerManager` (asyncio scheduling). Timer events forwarded to ESP via native `send_voice_assistant_timer_event()` API (STARTED/UPDATED/CANCELLED/FINISHED). ESP handles LED animations and sounds. TTS announcement on timer finish with `start_conversation=True` for follow-up.
+### Proactive announcements
+The assistant speaks without wake word: washing machine done, doorbell, reminders. Simplest shape: Home Assistant already knows when these happen, so an HA automation calls a server endpoint (`POST /announce` with the text, through a `rest_command`) and the server plays it like a timer announcement. Needs quiet hours (no washing-machine news at 23:00) and a choice of satellite once there are several.
 
-### Notifications (proactive announcements)
-The assistant announces events without wake word: washing machine done, doorbell, reminders. Requires event listeners on HA entities and a push mechanism to the ESP via announcement API.
+### Room of the voice satellite
+"Éteins la lumière" should target the room the request came from. The room of the satellite that heard the wake word is the reliable signal: give each satellite an HA area and use it as the default `room`. This replaces the earlier idea of tracking phones through UniFi Wi-Fi access points, set aside because an AP covers several rooms and the phone is not always on the person. Only matters once a site has more than one satellite.
 
-### Multi-language support
-Automatic French/English detection for guests. Would require language-aware STT (Whisper handles this natively, Parakeet is French-only), and language parameter in the system prompt for the LLM response.
+### Answer in the speaker's language
+Parakeet v3 already transcribes 25 European languages with automatic detection: spoken to in English, it understands (seen 2026-10-10), but the assistant answers in French. Two pieces are missing:
+- The LLM answering in the language of the request: the system prompt is French and says nothing about it.
+- The TTS speaking that language: `ff_siwis` and the misaki G2P are set up for French. Kokoro has English voices; the reply's language has to pick the voice and the G2P, either detected on the reply text or stated by the LLM.
 
-### Automatic room detection
-Use UniFi Wi-Fi client tracking to detect which room the user is in (phone → nearest AP → room). When room is known, the `room` parameter becomes implicit: "éteins la lumière" targets the current room without needing to specify it.
+## Pictures
 
-## Services
+### Generated pictures
+"Dessine-moi un dragon" → generate the picture locally and show it on the Nest Hub, next to `show_image` (AD-038). charras already has `stable-diffusion.cpp` with Z-Image-Turbo q8 in `/opt/sd/` (~22 s per 1024² image; exact command in home-infra `charras/trellis/beast.sh`). Blocked by VRAM today: Z-Image needs ~6.3 GB beside the voice assistant's ~4 GB and `gemma4:12b`'s 8.1 GB on the 16 GB card. A second GPU is ordered for charras. Unlike web pictures, the result is a local file, so it must be served over HTTP, beside `/tts/`, which the Paris relay forwards.
 
-### ~~Google Calendar integration~~ DONE
-Connected to Google Calendar via OAuth2 (`calendar.events` scope). LLM tools: `query_calendar` (date range, search), `create_event` (title, datetime, duration). V1: single primary calendar. Multi-calendar with voice identification planned for later.
+### Family photos from Immich
+"Montre-moi des photos de Zoé", "les vacances en Bretagne l'été dernier", "Charlie à la plage" → find them in Immich and show them on the Nest Hub as a slideshow. Immich on charras (v2.7.5, port 2283) already has smart search (CLIP), facial recognition and reverse geocoding enabled, so: people for names, place and date for trips, smart search for descriptions. Cast shows one picture at a time, so a slideshow means casting every few seconds, with "suivante" and "arrête". Immich needs an API key and the Paris Nest cannot reach the charras LAN, so the server fetches each preview and serves it under `/tts/`. Prerequisites on the family's side: migrate the photos, name the face clusters.
+
+## Media
+
+### Spotify started from a phone
+"Assistant vocal" is in the account's Spotify Connect device list, but music started from a phone plays to nobody until a speaker listens to the stream. Watch go-librespot's `/events` websocket and point the default speaker at the stream when playback starts from elsewhere.
+
+### Two rooms, two musics
+A single go-librespot is a single queue. Different music in two rooms needs a second player and a second Spotify account, as Spotify allows one stream per account.
 
 ## Memory and context
 
-### ~~Family profile (static knowledge)~~ DONE
-Household members (first names, roles, optional birth dates) stored under a `family` key in `config.local.json` (gitignored, documented in `config.local.example.json`). Loaded via `LOCAL_CONFIG` and injected into the system prompt by `_format_family_for_prompt()` in `voice_server.py`, which computes each member's age from `birth_date`. `birth_date` is optional — members without one are listed by name and role only.
-
-### Conversation memory (long-term)
-Beyond the current 5-exchange sliding window (2 min expiry), the assistant should retain interesting facts from past conversations. Architecture options to explore:
-- **Summary-based**: periodically summarize conversation highlights into a persistent file, inject as context
-- **Embedding + retrieval (RAG)**: store conversation snippets with embeddings, retrieve relevant ones before each LLM call
-- **Structured extraction**: extract key facts (preferences, recurring topics) into a knowledge base
-
-Trade-offs: prompt size vs relevance, local embedding model (RAM budget), staleness of old memories.
-
-## Mobile client
-
-### ~~Step 1: Mobile-optimized web UI~~ DONE
-Safe area insets for notch/home indicator, 44px touch targets, 16px input font (prevents iOS zoom), `100dvh` viewport, add-to-home-screen meta tags. iOS keyboard dictation works natively via the standard text input.
-
-### Step 2: PWA with voice input
-Progressive Web App installable on home screen. Use Web Speech API or stream audio to server-side Parakeet for STT. Tap-to-talk button that activates the mic immediately. No App Store needed, reuses existing backend. Limitation: Safari restricts mic access in background.
-
-- **~~Installable PWA shell~~ DONE**: `manifest.webmanifest` (standalone, icons, theme color), a minimal root-scope service worker (`/sw.js`) caching the app shell for offline load, and generated mic icons (192/512/apple-touch). Served via root routes in `web_ui.py` (`/manifest.webmanifest`, `/sw.js`) so the SW scope covers `/`. The SW deliberately never intercepts POST or `/api/*` so the live UI keeps hitting the network. **Remaining**: the tap-to-talk voice input (Web Speech API or audio streaming to the server) — needs on-device mic testing.
-
-### Step 3: Native iOS app (optional)
-Mic active on app open, background mode, possible local wake word detection, Siri Shortcut integration. Best UX but significant development effort — only worth it if PWA limitations become a real pain point.
+### Long-term memory
+Beyond the 5-exchange window (expires after 10 minutes), the assistant could keep facts across conversations. Start with explicit memory: "souviens-toi que la piscine ferme le 15 septembre" calls a tool that appends the fact to a file injected into the system prompt, like the family profile, and "oublie que…" removes it. Predictable, no embedding model, nothing remembered behind the family's back. Automatic extraction or retrieval over past conversations (RAG) only if the facts file outgrows the prompt.
 
 ## Identity
 
 ### Voice identification (speaker recognition)
-Identify who is speaking based on voice characteristics.
+Identify who is speaking. Two distinct problems:
+- **Coarse classification** (child vs adult, speaker A vs B): inferable from prosody. An audio-native LLM may do this near zero-shot.
+- **Nominative identification** (this voice is Ivan): biometric verification. Needs per-person enrollment and embedding comparison; no LLM knows household voices without references.
 
-Two distinct problems, often conflated under "native audio":
-- **Coarse classification / diarization** (child vs adult, speaker A vs B): inferable from prosody. An audio-native LLM does this well, possibly near zero-shot.
-- **Nominative identification** (map a voice → "Ivan"): a biometric verification problem. Requires per-person enrollment (reference samples) + embedding comparison. An audio LLM does NOT know household voices without references — this stays a dedicated component regardless of the LLM.
+**Phase 1 — age adaptation**: simpler language for children. Coarse classification, so near-free with an audio-native model (see "STT through the LLM").
 
-**Phase 1 — age adaptation**: simpler language for children, detailed answers for adults. Falls under coarse classification, so it becomes near-free with an audio-native model (see "STT replacement via unified audio model" below).
+**Phase 2 — personal accounts**: the speaker's own Spotify, calendar, reminders. Needs nominative identification.
 
-**Phase 2 — personal accounts**: use the identified speaker's accounts for services like Spotify (their playlists, recommendations). Needs nominative identification → enrollment + verification component.
+**Per-speaker permissions**: children cannot create calendar events or change home automation settings. A security boundary: it must rely on a speaker-verification model, never on the LLM's guess that a voice sounds young.
 
-- **Per-speaker permissions**: restrict which tools/actions are available depending on who is speaking. Example: children cannot create calendar events or modify home automation settings. This is a **security boundary** — must NOT rely on the LLM's probabilistic "sounds like a child"; requires a reliable speaker-verification model.
-
-**Architectural dependency**: with the current Parakeet → text pipeline, all voice information is discarded at the STT stage, so voice ID would require a fully separate parallel audio pipeline. Moving to an audio-native LLM (Gemma 4 12B, see Infrastructure section) preserves the voice signal end-to-end, unlocking Phase 1 nearly for free. Phase 2 + permissions still need a dedicated enrollment/verification component, but it becomes an add-on rather than a full second pipeline. Target architecture: run a small speaker-verification model in parallel on the raw audio, inject the result ("Ivan / child / unknown") as structured context alongside the audio.
-
-## Media
-
-### ~~Spotify voice control~~ DONE
-`play_music` (artist, track, album, playlist, genre, Liked Songs) and `music_control` (pause, resume, next, previous, what's playing), on the Voice PE or a named HA speaker. go-librespot plays into a FIFO that the server streams as MP3 (AD-037).
-
-Follow-ups:
-- **Phone → speaker**: "Assistant vocal" is in the account's Spotify Connect device list, but music started from a phone plays to nobody until a speaker listens to the stream. Watch go-librespot's `/events` websocket and point the default speaker at the stream when playback starts from elsewhere.
-- **One stream at a time**: a single go-librespot is a single queue. Two rooms playing different music need a second player (and a second Spotify account, as Spotify allows one stream per account).
+Today Parakeet turns audio into text and every voice cue is lost there, so voice ID means a separate component on the raw audio: a small speaker-verification model whose verdict ("Ivan / child / unknown") is injected into the prompt.
 
 ## Infrastructure
 
-### ~~Health check endpoint~~ DONE
-`GET /health` (in `web_ui.py`) returns the status of STT, TTS, LLM, HA, ESP, and calendar. HTTP 200 when all required components (STT, TTS, LLM, HA) are ready, 503 otherwise. ESP and calendar are reported but optional (don't affect the verdict). LLM is checked by configuration only (mode/model/url) — not pinged, to avoid token cost; ops can curl the LLM URL directly. Also reports active timer count.
+### Several sites from one server
+Since 2026-10-10 the single `voice-assistant.service` on charras serves the Paris satellite (home-infra `charras/voice-paris`), and Charras's satellite is unplugged. Serving both from one instance means routing each satellite to its own Home Assistant, TTS base URL, screen and Spotify speaker, instead of one global configuration per process. Running two instances does not fit: the STT/TTS models would take ~4 GB twice beside `gemma4:12b`.
+
+### Re-evaluate the small-model workarounds
+The text tool-call fallback parser, the French-verb fallback and generic names were written for Qwen 3 4B. On charras with `gemma4:12b`, the text fallback never fired in the journal (32 voice requests in October, plus web tests). Once a few hundred requests have gone through with no `Function call (text fallback)` line, remove the parser. Generic names stay: they also drive group resolution and the shutter/roof-window split.
 
 ### Isolated test server instance
-Currently e2e tests (`test_e2e.py`) run against the live server via `/api/dry-run` — tool calls are not executed but conversation state is shared. If someone uses the assistant during tests, the reset clears their conversation. Refactor to launch a lightweight test instance (LLM + entity list only, no STT/TTS/ESP) on a separate port for full isolation.
+E2e tests (`test_e2e.py`) run against the live server through `/api/dry-run`: tool calls are not executed, but conversation state is shared, so a test run clears the conversation of someone using the assistant. Launch a lightweight instance for tests (LLM and entity list only, no STT/TTS/ESP) on another port.
 
-### Dedicated hardware migration (Zotac)
-Move from M1 Mac + cloud LLM to a Zotac Magnus EN275060TC (RTX 5060 Ti 16GB VRAM). Primary candidate: Gemma 4 26B A4B (MoE, 3.8B active params, ~50-80 tok/s, native function calling). Fallback: Qwen 3 14B Q6_K (~30 tok/s). Would enable removing Python workarounds (room groups, text tool call parser, generic names) as both models handle tool calling natively. See `HARDWARE.md` for detailed specs and benchmarks. Quality vs GPT-5.4 Nano is uncertain — needs benchmarking once hardware is available.
+### STT through the LLM
+Gemma 4 12B, now the LLM, takes audio input natively. It could absorb the STT stage, so that `audio → Gemma → tool calls` replaces `audio → Parakeet → transcript → LLM`. The LLM would hear the request instead of reasoning on a possibly misheard transcript, which also unlocks voice ID Phase 1. Parakeet is not slow (0.07–0.35 s on the GPU), so the case rests on understanding, not latency; it would also free part of the ~4 GB the STT/TTS models hold. It would not have saved the 2026-10-10 request drowned by the Sonos: that is an acoustic problem (see "Duck the music while listening").
 
-### STT replacement via unified audio model
-Gemma 4 12B (released 2026-06-03, Apache 2.0) is an encoder-free multimodal model with **native audio input** that runs on 16GB. If chosen as the LLM, it can absorb the STT stage: instead of `audio → Parakeet → transcript → LLM`, do `audio → Gemma 4 12B → tool calls` directly. This removes `stt.py` + the Parakeet model and eliminates the transcription bottleneck (the LLM hears full acoustic context instead of reasoning on a possibly-misheard transcript). Also unlocks voice ID Phase 1 (see Identity section).
+Audio specs: 16 kHz mono float32 in [-1, 1] (the pipeline has 16-bit PCM, a trivial conversion), 25 tokens/s, 30 s max segment.
 
-Audio specs: 16kHz mono, float32 normalized [-1,1] (current pipeline sends 16-bit PCM → trivial conversion), 25 tokens/sec, 30s max segment. Prompt: `Transcribe the following speech segment in French into French text.`
+Open questions, settled by a short test on real French command recordings:
+1. **Runtime**: does Ollama (or llama.cpp) accept audio input for Gemma 4 12B?
+2. **French recognition**: no published French WER against Parakeet.
+3. **Audio and tool calling in the same call**: does the chat template handle both?
 
-Unknowns to de-risk before committing (a short POC on real French command WAVs settles all three):
-1. **French ASR quality** — docs say "multilingual" but don't list French explicitly; no published WER vs Parakeet/Whisper.
-2. **Audio + tool calling in the same call** — verify the chat template handles both simultaneously.
-3. **Runtime on target hardware** — MLX audio path is undocumented; llama.cpp is the cited edge option. Depends on what hardware is bought.
-
-Trade-off: choosing 12B-unified over 26B A4B means one fewer model to load and a simpler architecture, but loses the explicit transcript used by the web UI debug log (mitigation: prompt the model to emit the transcript in its output).
+Trade-off: the web UI's debug log loses the transcript, unless the model is asked to write it out.
