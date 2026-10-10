@@ -370,7 +370,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
                         "query": {
                             "type": "string",
                             "description": (
-                                "Ce qu'il faut montrer, en quelques mots (ex: « tour Eiffel », « okapi », « chat roux »)"
+                                "Ce qu'il faut montrer, en quelques mots "
+                                "(ex: « tour Eiffel », « okapi », « chat roux »)"
                             ),
                         },
                     },
@@ -438,7 +439,10 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         },
         {
             "name": "open_cover",
-            "description": "Ouvrir un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements distincts : n'agir que sur celui qui est demandé.",
+            "description": (
+                "Ouvrir un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements "
+                "distincts : n'agir que sur celui qui est demandé."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -450,7 +454,10 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         },
         {
             "name": "close_cover",
-            "description": "Fermer entièrement un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements distincts : n'agir que sur celui qui est demandé.",
+            "description": (
+                "Fermer entièrement un volet, un store ou une fenêtre. Volets et fenêtres sont des "
+                "équipements distincts : n'agir que sur celui qui est demandé."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -462,7 +469,10 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         },
         {
             "name": "set_cover_position",
-            "description": "Régler la position d'un volet (0 = complètement fermé, 100 = complètement ouvert). Exemples : « ferme à moitié » = 50, « ouvre un peu » = 30, « ferme presque » = 10.",
+            "description": (
+                "Régler la position d'un volet (0 = complètement fermé, 100 = complètement ouvert). "
+                "Exemples : « ferme à moitié » = 50, « ouvre un peu » = 30, « ferme presque » = 10."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

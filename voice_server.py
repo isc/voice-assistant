@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
 
+import aiohttp
 from aioesphomeapi import (
     APIClient,
     APIConnectionError,
@@ -33,7 +34,6 @@ from aioesphomeapi import (
 )
 from aioesphomeapi.core import TimeoutAPIError
 from aioesphomeapi.reconnect_logic import ReconnectLogic
-import aiohttp
 from aiohttp import web
 
 from ha_client import LOCAL_CONFIG, compact, is_whole_house, normalize
@@ -239,7 +239,6 @@ class VoiceAssistantServer:
 
         # Google Calendar client
         self.calendar_client = None
-
 
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word
@@ -920,7 +919,9 @@ class VoiceAssistantServer:
                     desc = f"le timer de {_format_duration(timer.total_seconds)}"
                 return f"Annulé: {desc}"
             if running := self.timer_manager.get_timers():
-                names = ", ".join(t.target_time if t.is_alarm else (t.name or _format_duration(t.total_seconds)) for t in running)
+                names = ", ".join(
+                    t.target_time if t.is_alarm else (t.name or _format_duration(t.total_seconds)) for t in running
+                )
                 return f"Plusieurs timers en cours ({names}) : lequel annuler ?"
             return "Aucun timer actif"
 
@@ -1087,7 +1088,8 @@ class VoiceAssistantServer:
         return None
 
     def _after_media_change(self, target: Optional[tuple[str, str]]) -> None:
-        """Remember the speaker for volume follow-ups; no follow-up listening (an open mic would transcribe the radio)."""
+        """Remember the speaker for volume follow-ups; no follow-up listening (an open mic would
+        transcribe the radio)."""
         if target:
             self._last_media_target = target
         self._no_followup = True
@@ -1241,7 +1243,9 @@ class VoiceAssistantServer:
         # still on the stream, as it may have moved to a radio since
         if previous and previous != new and len(stream.listeners) > 1:
             previous_site, previous_target = previous
-            await self._media_command(previous_target, MediaPlayerCommand.STOP, ha_service="media_stop", site=previous_site)
+            await self._media_command(
+                previous_target, MediaPlayerCommand.STOP, ha_service="media_stop", site=previous_site
+            )
         self._spotify_at = new
         return True
 
@@ -1446,7 +1450,7 @@ class VoiceAssistantServer:
             history = self.conversation_history + turn + [{"role": "assistant", "content": response_text}]
             # The last 5 exchanges, cut at a request
             starts = [i for i, m in enumerate(history) if m["role"] == "user"]
-            self.conversation_history = history[starts[-5]:] if len(starts) > 5 else history
+            self.conversation_history = history[starts[-5] :] if len(starts) > 5 else history
 
         # Tool call loop: keep calling LLM until it returns text (max 3 rounds)
         import json
@@ -1619,7 +1623,9 @@ class VoiceAssistantServer:
         async def ping():
             try:
                 async with aiohttp.ClientSession() as session:
-                    await session.post(url, json={"model": LLM_MODEL, "keep_alive": -1}, timeout=aiohttp.ClientTimeout(total=30))
+                    await session.post(
+                        url, json={"model": LLM_MODEL, "keep_alive": -1}, timeout=aiohttp.ClientTimeout(total=30)
+                    )
             except Exception as e:
                 logger.debug(f"Ollama keep-alive failed: {e}")
 

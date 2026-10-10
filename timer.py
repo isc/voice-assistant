@@ -182,7 +182,6 @@ def format_timers_for_prompt(timers: list[Timer]) -> str:
             label = f'"{t.name}" ' if t.name else ""
             total = _format_remaining(t.total_seconds)
             parts.append(f"timer {label}de {total} ({remaining} restantes)")
-    return (
-        "Minuteurs/alarmes en cours (tu les as programmés, "
-        "donne ces infos si l'utilisateur demande): " + ", ".join(parts)
+    return "Minuteurs/alarmes en cours (tu les as programmés, donne ces infos si l'utilisateur demande): " + ", ".join(
+        parts
     )

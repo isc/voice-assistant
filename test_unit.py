@@ -248,7 +248,9 @@ class TestResolveAllEntities(unittest.TestCase):
     def test_unknown_room_found_in_a_device_name(self):
         """Paris names some lights after their room instead of placing them in one."""
         self.add("light.couloir", "Couloir")
-        self.assertEqual(self.client.resolve_all_entities("lumière", room="couloir", domain_hints=self.TURN_OFF), ["light.couloir"])
+        self.assertEqual(
+            self.client.resolve_all_entities("lumière", room="couloir", domain_hints=self.TURN_OFF), ["light.couloir"]
+        )
 
     def test_generic_name_then_room_in_one(self):
         eids = self.client.resolve_all_entities("lumière du salon", domain_hints=self.TURN_OFF)
@@ -258,7 +260,9 @@ class TestResolveAllEntities(unittest.TestCase):
         """At 0.4, « télé » found the light Entrée and « lumière » Charlie's Plafonnier."""
         self.add("light.entree", "Entrée")
         self.assertEqual(self.client.resolve_all_entities("télé", domain_hints=self.TURN_OFF), [])
-        self.assertEqual(self.client.resolve_all_entities("lumière", room="salle de bain", domain_hints=self.TURN_OFF), [])
+        self.assertEqual(
+            self.client.resolve_all_entities("lumière", room="salle de bain", domain_hints=self.TURN_OFF), []
+        )
 
     def test_lone_speaker_is_not_another_one(self):
         """The Sonos asleep, « mets la radio sur la Sonos » must not land on the Google Home."""
@@ -531,8 +535,11 @@ class TestLock(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.client = make_client()
         # Mirror Paris and Charras: a lock in no room, and alarm-sensor switches named after doors
-        for eid, name, domain, area in (("lock.smart_lock_pro", "Smart Lock Pro", "lock", ""),
-                                        ("switch.bas_porte_salon_night_mode", "Bas Porte salon night_mode", "switch", "Living Room")):  # fmt: skip
+        devices = (
+            ("lock.smart_lock_pro", "Smart Lock Pro", "lock", ""),
+            ("switch.bas_porte_salon_night_mode", "Bas Porte salon night_mode", "switch", "Living Room"),
+        )
+        for eid, name, domain, area in devices:
             self.client.entities[eid] = {
                 "friendly_name": name, "domain": domain, "state": "unlocked",
                 "attributes": {}, "area_id": None, "area_name": area,
@@ -1158,7 +1165,9 @@ class TestCalendarQueryValidation(unittest.IsolatedAsyncioTestCase):
 class TestSites(unittest.TestCase):
     def test_single_site_from_unprefixed_settings(self):
         (site,) = load_sites({"ESP_HOST": "10.0.0.5", "HA_URL": "http://ha:8123", "HA_TOKEN": "t"})
-        self.assertEqual((site.name, site.esp_host, site.esp_port, site.ha_url), ("", "10.0.0.5", 6053, "http://ha:8123"))
+        self.assertEqual(
+            (site.name, site.esp_host, site.esp_port, site.ha_url), ("", "10.0.0.5", 6053, "http://ha:8123")
+        )
 
     def test_named_sites(self):
         paris, charras = load_sites(
@@ -1174,8 +1183,12 @@ class TestSites(unittest.TestCase):
                 "HA_TOKEN": "an unprefixed token must not leak into a named site",
             }
         )
-        self.assertEqual((paris.name, paris.esp_port, paris.tts_base_url), ("paris", 16053, "http://192.168.1.189:8889/tts/"))
-        self.assertEqual((charras.esp_host, charras.esp_port, charras.tts_base_url), ("home-assistant-voice-09d3f1.local", 6053, ""))
+        self.assertEqual(
+            (paris.name, paris.esp_port, paris.tts_base_url), ("paris", 16053, "http://192.168.1.189:8889/tts/")
+        )
+        self.assertEqual(
+            (charras.esp_host, charras.esp_port, charras.tts_base_url), ("home-assistant-voice-09d3f1.local", 6053, "")
+        )
         self.assertEqual({paris.esp_noise_psk, charras.esp_noise_psk}, {"shared-key"})
         self.assertEqual((paris.ha_token, charras.ha_token), ("", ""))
 
@@ -1284,7 +1297,10 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
         self.server._keep_llm_loaded = lambda: None
         self.server.execute_function = AsyncMock(return_value="Il fait 18 degrés")
         call = {"id": "c1", "function": {"name": "get_weather", "arguments": '{"location": "Paris"}'}}
-        self.replies = [{"role": "assistant", "content": "", "tool_calls": [call]}, {"role": "assistant", "content": "18 degrés."}]
+        self.replies = [
+            {"role": "assistant", "content": "", "tool_calls": [call]},
+            {"role": "assistant", "content": "18 degrés."},
+        ]
 
     async def ask(self, dry_run=False):
         with patch("llm.chat_completion", AsyncMock(side_effect=self.replies)):

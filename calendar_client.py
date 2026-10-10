@@ -121,7 +121,9 @@ class CalendarClient:
         try:
             start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
-            return json.dumps({"error": f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False)
+            return json.dumps(
+                {"error": f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False
+            )
 
         if end_date:
             try:
@@ -129,7 +131,9 @@ class CalendarClient:
                 # Include the full end day
                 end_dt = end_dt + timedelta(days=1)
             except ValueError:
-                return json.dumps({"error": f"Date invalide: {end_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False)
+                return json.dumps(
+                    {"error": f"Date invalide: {end_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False
+                )
         elif search:
             # « c'est quand le dentiste ? » comes with today only: search the year ahead
             end_dt = start_dt + timedelta(days=365)
@@ -202,7 +206,10 @@ class CalendarClient:
         try:
             start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
-            return json.dumps({"error": f"Date/heure invalide: {start_datetime} (format attendu: AAAA-MM-JJ HH:MM)"}, ensure_ascii=False)
+            return json.dumps(
+                {"error": f"Date/heure invalide: {start_datetime} (format attendu: AAAA-MM-JJ HH:MM)"},
+                ensure_ascii=False,
+            )
 
         end_dt = start_dt + timedelta(minutes=duration_minutes)
 

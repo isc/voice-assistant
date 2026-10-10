@@ -103,7 +103,9 @@ def setup_routes(app, server):
     app.middlewares.append(lan_sees_only_speaker_paths)
 
     async def read_text(request) -> str:
-        """The prompt of a text request; the request then serves the site it names, if any: {"text": …, "site": "charras"}."""
+        """The prompt of a text request; the request then serves the site it names, if any.
+
+        {"text": …, "site": "charras"}"""
         try:
             body = await request.json()
         except Exception:

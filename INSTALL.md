@@ -25,8 +25,12 @@ sudo locale-gen fr_FR.UTF-8                           # dates are spoken in Fren
 sudo git clone https://github.com/isc/voice-assistant /opt/voice-assistant
 cd /opt/voice-assistant
 sudo python3 -m venv venv
-sudo venv/bin/pip install -r requirements-linux.txt   # adds onnx-asr for the STT
+sudo venv/bin/pip install -r requirements-linux.txt -c constraints-linux.txt   # adds onnx-asr for the STT
 ```
+
+`constraints-linux.txt` pins the versions charras runs (`pip freeze`, 2026-10-11): requirements are
+unpinned, and a fresh install would otherwise pull versions this code never ran with
+(aioesphomeapi 46, kokoro-onnx 0.6 on that date). Refresh it with `venv/bin/pip freeze` after an upgrade.
 
 The STT then runs on the CPU, with the `onnxruntime` that kokoro-onnx pulls in. For the GPU, swap
 it for the CUDA build and its CUDA 13 libraries:

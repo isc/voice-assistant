@@ -110,7 +110,9 @@ class SpotifyStream:
         task = asyncio.ensure_future(coroutine)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
-        task.add_done_callback(lambda t: t.cancelled() or not t.exception() or logger.error(f"Spotify: {t.exception()}"))
+        task.add_done_callback(
+            lambda t: t.cancelled() or not t.exception() or logger.error(f"Spotify: {t.exception()}")
+        )
 
     def _read(self) -> bytes:
         """Read up to one tick of whole frames from the FIFO, without blocking."""

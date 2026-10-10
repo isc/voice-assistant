@@ -64,7 +64,9 @@ _FUZZY_CUTOFF = 0.75
 
 
 def _area_matches(norm_area: str, norm_room: str) -> bool:
-    """Loose room match, either name inside the other. No area means in no room, not in every one ("" is in any name)."""
+    """Loose room match, either name inside the other.
+
+    No area means in no room, not in every one ("" is in any name)."""
     return bool(norm_area) and (norm_room in norm_area or norm_area in norm_room)
 
 
@@ -467,7 +469,9 @@ class HAClient:
             # them in one (« Couloir », « Bibliothèque »), so the room's words in a name locate it
             room_words = set(norm_room.split())
             candidates = {
-                eid: n for eid, n in self._candidates(norm_input, None, domain_hints).items() if room_words <= set(n.split())
+                eid: n
+                for eid, n in self._candidates(norm_input, None, domain_hints).items()
+                if room_words <= set(n.split())
             }
             if not candidates:
                 # "salon" for an area called "Living Room": the name alone may still say which
@@ -480,7 +484,9 @@ class HAClient:
             # The device named exactly; else the closest name containing the request; else the
             # longest name the request contains (« lumière du salon » holds « salon »)
             exact = [eid for eid, n in candidates.items() if n == norm_input]
-            containing = sorted((eid for eid, n in candidates.items() if norm_input in n), key=lambda e: len(candidates[e]))
+            containing = sorted(
+                (eid for eid, n in candidates.items() if norm_input in n), key=lambda e: len(candidates[e])
+            )
             contained = sorted(
                 (eid for eid, n in candidates.items() if n and n in norm_input), key=lambda e: -len(candidates[e])
             )
