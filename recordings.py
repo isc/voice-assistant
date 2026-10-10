@@ -13,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 RECORDINGS_DIR = Path(__file__).parent / "recordings"
 # Days kept; 0 turns recording off
-RECORDINGS_DAYS = int(os.environ.get("RECORDINGS_DAYS", "90"))
+try:
+    RECORDINGS_DAYS = max(0, int(os.environ.get("RECORDINGS_DAYS", "90")))  # negative deleted today's too
+except ValueError:
+    RECORDINGS_DAYS = 90
 
 
 class Recordings:
@@ -23,10 +26,14 @@ class Recordings:
         self.directory = directory
         self.days = days
         if days:
-            directory.mkdir(parents=True, exist_ok=True)
-            # The family's voices: for root only, the user the server runs as
-            os.chmod(directory, 0o700)
-            logger.info(f"Recording voice requests in {directory}, kept {days} days")
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                # The family's voices: for root only, the user the server runs as
+                os.chmod(directory, 0o700)
+                logger.info(f"Recording voice requests in {directory}, kept {days} days")
+            except OSError as e:
+                logger.warning(f"Recording off, {directory} unusable: {e}")
+                self.days = 0
 
     def save(self, audio: bytes) -> Optional[str]:
         """Write a request's 16 kHz 16-bit mono audio; returns its path under the directory, None when off."""
@@ -42,10 +49,13 @@ class Recordings:
                 wav.setsampwidth(2)
                 wav.setframerate(16000)
                 wav.writeframes(audio)
-            self._purge()
         except OSError as e:
             logger.warning(f"Recording not saved: {e}")
             return None
+        try:
+            self._purge()
+        except OSError as e:
+            logger.warning(f"Old recordings not deleted: {e}")
         return recording
 
     def describe(self, recording: Optional[str], details: dict) -> None:

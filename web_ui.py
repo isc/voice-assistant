@@ -3,6 +3,7 @@
 import ipaddress
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -50,13 +51,18 @@ class ExchangeLog:
             if self.path.exists():
                 data = json.loads(self.path.read_text())
                 return data[-self.max_entries :]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Exchange log unreadable, starting empty: {e}")
         return []
 
     def _save(self):
+        """Written whole to a temporary file then renamed: a crash mid-write left invalid JSON, read as
+        empty and overwritten. Mode 600: transcripts and calendar answers, kept from other users."""
+        tmp = self.path.with_name(self.path.name + ".tmp")
         try:
-            self.path.write_text(json.dumps(self.entries, ensure_ascii=False, indent=1))
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+                f.write(json.dumps(self.entries, ensure_ascii=False, indent=1))
+            os.replace(tmp, self.path)
         except Exception as e:
             logger.warning(f"Failed to save exchange log: {e}")
 
@@ -102,8 +108,10 @@ def setup_routes(app, server):
             body = await request.json()
         except Exception:
             body = {"text": (await request.text()).strip()}
+        if not isinstance(body, dict):
+            body = {}
         text = body.get("text", "")
-        if not text:
+        if not isinstance(text, str) or not text.strip():
             raise _json_error(web.HTTPBadRequest, "missing 'text' field")
         if body.get("site"):
             site = server.site_named(body["site"])
@@ -249,7 +257,9 @@ def setup_routes(app, server):
         ESP and calendar are reported but optional (don't affect the verdict).
         LLM is checked by configuration only — not pinged, to avoid token cost.
         """
-        from voice_server import LLM_API_KEY, LLM_MODEL, LLM_URL
+        # From the server, not `from voice_server import`: the service runs voice_server as __main__,
+        # so that import loaded a second copy of the module
+        LLM_API_KEY, LLM_MODEL, LLM_URL = server.llm_config
 
         stt_ready = server.stt is not None and server.stt.model is not None
         tts_ready = server.tts is not None and server.tts.engine is not None

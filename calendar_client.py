@@ -40,6 +40,9 @@ class CalendarClient:
         self._credentials_path = Path(credentials_path)
         self._token_path = Path(token_path)
         self._service = None
+        # One API call at a time: the service's httplib2 connection is not thread-safe, and two
+        # query_calendar calls of one turn ran concurrently, each in its own thread
+        self._lock = asyncio.Lock()
 
     async def connect(self) -> bool:
         """Load OAuth credentials and build the Calendar API service."""
@@ -113,12 +116,12 @@ class CalendarClient:
             JSON string with events list for the LLM.
         """
         if not self._service:
-            return json.dumps({"error": "Agenda non disponible"})
+            return json.dumps({"error": "Agenda non disponible"}, ensure_ascii=False)
 
         try:
             start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
-            return json.dumps({"error": f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)"})
+            return json.dumps({"error": f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False)
 
         if end_date:
             try:
@@ -126,7 +129,10 @@ class CalendarClient:
                 # Include the full end day
                 end_dt = end_dt + timedelta(days=1)
             except ValueError:
-                return json.dumps({"error": f"Date invalide: {end_date} (format attendu: AAAA-MM-JJ)"})
+                return json.dumps({"error": f"Date invalide: {end_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False)
+        elif search:
+            # « c'est quand le dentiste ? » comes with today only: search the year ahead
+            end_dt = start_dt + timedelta(days=365)
         else:
             end_dt = start_dt + timedelta(days=1)
 
@@ -134,10 +140,11 @@ class CalendarClient:
         time_max = end_dt.isoformat()
 
         try:
-            result = await asyncio.to_thread(self._list_events, time_min, time_max, search)
+            async with self._lock:
+                result = await asyncio.to_thread(self._list_events, time_min, time_max, search)
         except Exception as e:
             logger.error(f"Calendar query failed: {e}")
-            return json.dumps({"error": "Erreur lors de la consultation de l'agenda"})
+            return json.dumps({"error": "Erreur lors de la consultation de l'agenda"}, ensure_ascii=False)
 
         events = []
         for item in result.get("items", []):
@@ -190,12 +197,12 @@ class CalendarClient:
             JSON string with confirmation for the LLM.
         """
         if not self._service:
-            return json.dumps({"error": "Agenda non disponible"})
+            return json.dumps({"error": "Agenda non disponible"}, ensure_ascii=False)
 
         try:
             start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
-            return json.dumps({"error": f"Date/heure invalide: {start_datetime} (format attendu: AAAA-MM-JJ HH:MM)"})
+            return json.dumps({"error": f"Date/heure invalide: {start_datetime} (format attendu: AAAA-MM-JJ HH:MM)"}, ensure_ascii=False)
 
         end_dt = start_dt + timedelta(minutes=duration_minutes)
 
@@ -206,10 +213,11 @@ class CalendarClient:
         }
 
         try:
-            created = await asyncio.to_thread(self._insert_event, event_body)
+            async with self._lock:
+                created = await asyncio.to_thread(self._insert_event, event_body)
         except Exception as e:
             logger.error(f"Calendar event creation failed: {e}")
-            return json.dumps({"error": "Erreur lors de la création de l'événement"})
+            return json.dumps({"error": "Erreur lors de la création de l'événement"}, ensure_ascii=False)
 
         # Format duration for display
         if duration_minutes >= 60:
@@ -247,9 +255,16 @@ def _format_event(item: dict) -> dict:
         start_str = "toute la journée"
         date_str = start.get("date", "")
 
+    # The end, with its date when it is another day: the Toussaint holidays came out as one day
     if "dateTime" in end:
         end_dt = datetime.fromisoformat(end["dateTime"])
         end_str = end_dt.strftime("%H:%M")
+        if end_dt.strftime("%Y-%m-%d") != date_str:
+            end_str = end_dt.strftime("%Y-%m-%d %H:%M")
+    elif end.get("date"):
+        # All-day events end the day after their last day
+        last_day = (datetime.strptime(end["date"], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        end_str = last_day if last_day != date_str else ""
     else:
         end_str = ""
 

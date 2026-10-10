@@ -40,10 +40,12 @@ _WMO_CODES = {
 
 async def _geocode(city: str) -> Optional[tuple[float, float, str]]:
     """Resolve city name to (lat, lon, display_name) via Open-Meteo geocoding."""
-    url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=fr"
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    # Encoded: « Saint-Jean-de-Luz & co », an accent or a space must not break the query
+    params = {"name": city, "count": 1, "language": "fr"}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as r:
                 if r.status != 200:
                     return None
                 data = await r.json()
@@ -65,12 +67,12 @@ async def get_weather(location: str = "", home: Optional[dict] = None) -> str:
     if city:
         geo = await _geocode(city)
         if not geo:
-            return json.dumps({"error": f"Ville {city} introuvable"})
+            return json.dumps({"error": f"Ville {city} introuvable"}, ensure_ascii=False)
         lat, lon, display_name = geo
     elif home and home.get("latitude") is not None:
         lat, lon, display_name = home["latitude"], home["longitude"], "la maison"
     else:
-        return json.dumps({"error": "Ville non précisée"})
+        return json.dumps({"error": "Ville non précisée"}, ensure_ascii=False)
 
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
@@ -84,11 +86,11 @@ async def get_weather(location: str = "", home: Optional[dict] = None) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
                 if r.status != 200:
-                    return json.dumps({"error": "API météo indisponible"})
+                    return json.dumps({"error": "API météo indisponible"}, ensure_ascii=False)
                 data = await r.json()
     except Exception as e:
         logger.error(f"Weather API error: {e}")
-        return json.dumps({"error": "API météo indisponible"})
+        return json.dumps({"error": "API météo indisponible"}, ensure_ascii=False)
 
     current = data.get("current", {})
     daily = data.get("daily", {})

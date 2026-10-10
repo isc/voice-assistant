@@ -217,6 +217,7 @@ class VoiceAssistantServer:
     _no_followup = _request_attribute("no_followup")
 
     def __init__(self):
+        self.llm_config = (LLM_API_KEY, LLM_MODEL, LLM_URL)  # for /health
         self.sites: list[Site] = load_sites()
         # Whose satellite holds the recording, VAD and pipeline state below: one conversation at a
         # time. Also the site served by a task that names none, such as an untagged web request.

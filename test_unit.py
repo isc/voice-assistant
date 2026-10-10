@@ -1076,7 +1076,9 @@ class TestCalendarFormatEvent(unittest.TestCase):
         self.assertEqual(result["title"], "Vacances")
         self.assertEqual(result["start"], "toute la journée")
         self.assertEqual(result["date"], "2026-04-01")
-        self.assertNotIn("end", result)
+        self.assertEqual(result["end"], "2026-04-07")  # the last day: all-day events end the day after
+        one_day = _format_event({"summary": "Férié", "start": {"date": "2026-05-01"}, "end": {"date": "2026-05-02"}})
+        self.assertNotIn("end", one_day)
 
     def test_no_title(self):
         from calendar_client import _format_event
@@ -1176,6 +1178,17 @@ class TestSites(unittest.TestCase):
         self.assertEqual((charras.esp_host, charras.esp_port, charras.tts_base_url), ("home-assistant-voice-09d3f1.local", 6053, ""))
         self.assertEqual({paris.esp_noise_psk, charras.esp_noise_psk}, {"shared-key"})
         self.assertEqual((paris.ha_token, charras.ha_token), ("", ""))
+
+
+class TestSiteNames(unittest.TestCase):
+    def test_names_must_be_env_prefixes_and_unique(self):
+        for sites in ("paris-nord", "paris,paris"):
+            with self.assertRaises(ValueError):
+                load_sites({"SITES": sites})
+
+    def test_empty_port_is_the_default(self):
+        (site,) = load_sites({"ESP_PORT": ""})
+        self.assertEqual(site.esp_port, 6053)
 
 
 class TestServerSites(unittest.IsolatedAsyncioTestCase):

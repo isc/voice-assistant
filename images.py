@@ -20,6 +20,7 @@ _DEADLINE = 8
 _SIZE = 1280
 # Openverse hands out originals, up to 13000 px wide for some sources
 _MAX_SIDE = 4096
+_SCREEN_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 
 
 class Picture(NamedTuple):
@@ -29,7 +30,8 @@ class Picture(NamedTuple):
 
 
 def _words(text: str) -> set[str]:
-    return set(normalize(re.sub(r"[()'’-]", " ", text)).split())
+    # Words only: « Paris, Texas » kept « paris, » and missed the article « Paris (Texas) »
+    return set(re.findall(r"\w+", normalize(text)))
 
 
 def is_about(query: str, title: str) -> bool:
@@ -80,7 +82,8 @@ async def _image_type(session: aiohttp.ClientSession, url: str) -> Optional[str]
     """Content type of the image at url, None when it answers with no image (a deleted Flickr photo)."""
     try:
         async with session.head(url, allow_redirects=True) as r:
-            if r.status == 200 and r.content_type.startswith("image/"):
+            # What a Cast screen shows: an Openverse original may be an SVG or a TIFF
+            if r.status == 200 and r.content_type in _SCREEN_TYPES:
                 return r.content_type
             logger.info(f"Image skipped ({r.status}, {r.content_type}): {url}")
     except (aiohttp.ClientError, asyncio.TimeoutError) as e:

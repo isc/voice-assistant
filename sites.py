@@ -6,6 +6,7 @@ Without `SITES`, the unprefixed variables describe a single site, as before.
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
@@ -44,6 +45,11 @@ class Site:
 
 def load_sites(env: Mapping[str, str] = os.environ) -> list[Site]:
     names = [name.strip().lower() for name in env.get("SITES", "").split(",") if name.strip()] or [""]
+    # A name is an env prefix: « paris-nord » could never be configured, a duplicate would share a satellite
+    if bad := [n for n in names if n and not re.fullmatch(r"[a-z0-9_]+", n)]:
+        raise ValueError(f"SITES: invalid site names {bad} (letters, digits, _)")
+    if len(set(names)) != len(names):
+        raise ValueError(f"SITES: duplicate site names in {names}")
 
     def setting(name: str, key: str, default: str = "") -> str:
         if name and f"{name.upper()}_{key}" in env:
@@ -56,7 +62,7 @@ def load_sites(env: Mapping[str, str] = os.environ) -> list[Site]:
         Site(
             name=name,
             esp_host=setting(name, "ESP_HOST"),
-            esp_port=int(setting(name, "ESP_PORT", "6053")),
+            esp_port=int(setting(name, "ESP_PORT") or 6053),
             esp_password=setting(name, "ESP_PASSWORD"),
             esp_noise_psk=setting(name, "ESP_NOISE_PSK"),
             ha_url=setting(name, "HA_URL"),

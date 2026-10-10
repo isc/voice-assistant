@@ -70,6 +70,7 @@
 </header>
 <div id="exchanges"><div class="empty">Aucun echange pour le moment</div></div>
 <div id="input-bar">
+  <select id="site" hidden aria-label="Maison"></select>
   <input type="text" id="cmd" placeholder="Commande..." autocomplete="off">
   <button id="send-btn">Envoyer</button>
 </div>
@@ -77,6 +78,14 @@
 <script>
 const ex = document.getElementById('exchanges');
 const cmd = document.getElementById('cmd');
+const siteSel = document.getElementById('site');
+// Several homes: a typed command goes to the one chosen here, never silently to the other
+fetch('/health').then(r => r.json()).then(h => {
+  const names = Object.keys(h.sites || {});
+  if (names.length < 2) return;
+  siteSel.innerHTML = names.map(n => '<option>' + esc(n) + '</option>').join('');
+  siteSel.hidden = false;
+}).catch(() => {});
 const btn = document.getElementById('send-btn');
 let lastHash = '';
 
@@ -113,7 +122,7 @@ function renderExchange(e, i, isFirst) {
   const hasDebug = (e.timings && Object.keys(e.timings).length) || (e.tool_calls && e.tool_calls.length);
   return `<div class="exchange">
     <div class="meta">
-      ${isFirst ? '<span class="badge ' + e.source + '">' + e.source + '</span><span>' + e.timestamp + '</span>' : ''}
+      ${isFirst ? '<span class="badge ' + e.source + '">' + e.source + '</span>' + (e.site ? '<span>' + esc(e.site) + '</span>' : '') + '<span>' + e.timestamp + '</span>' : ''}
       ${e.timings && e.timings.total ? '<span class="timings">' + e.timings.total + 's</span>' : ''}
     </div>
     <div class="input-line">${esc(e.input)}</div>
@@ -174,7 +183,7 @@ async function send() {
   cmd.value = '';
   btn.disabled = true;
   try {
-    await fetch('/api/send', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text}) });
+    await fetch('/api/send', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(siteSel.hidden ? {text} : {text, site: siteSel.value}) });
     await refresh();
   } catch(e) { alert('Erreur: ' + e.message); }
   btn.disabled = false;
@@ -182,7 +191,8 @@ async function send() {
 }
 
 btn.addEventListener('click', send);
-cmd.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+// Enter while a request runs sent it twice; Enter that ends an IME composition is no send
+cmd.addEventListener('keydown', e => { if (e.key === 'Enter' && !btn.disabled && !e.isComposing) send(); });
 refresh();
 setInterval(refresh, 3000);
 cmd.focus();
