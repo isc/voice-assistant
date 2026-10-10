@@ -1316,6 +1316,7 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
     async def test_dry_run_leaves_the_conversation_alone(self):
         await self.ask(dry_run=True)
         self.assertEqual(self.server.conversation_history, [])
+        self.assertEqual(len(self.server.site.dry_run_history), 4)  # a conversation of its own, for tests
         self.server.execute_function.assert_not_awaited()
 
     async def test_malformed_arguments_do_not_fail_the_request(self):

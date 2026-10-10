@@ -243,6 +243,7 @@ def setup_routes(app, server):
                 raise _json_error(web.HTTPNotFound, f"unknown site {name}")
             server.site = site
         server.conversation_history = []
+        server.site.dry_run_history = []
         server.conversation_id = None
         return web.json_response({"status": "ok"})
 

@@ -1387,7 +1387,11 @@ class VoiceAssistantServer:
             "Si la demande couvre plusieurs actions ou sujets "
             "(ex: contrôler un appareil ET demander la météo), "
             "appelle TOUTES les fonctions nécessaires "
-            "en parallèle dans ta réponse."
+            "en parallèle dans ta réponse. "
+            # Without it, « merci bonne nuit » got a goodbye and no call 5 times out of 5 (dry runs,
+            # 2026-10-11), once with « (end_conversation) » written in the text
+            "Quand l'utilisateur prend congé (merci, au revoir, bonne nuit, c'est tout), "
+            "appelle end_conversation en plus de ta réponse."
         )
         family = LOCAL_CONFIG.get("family", [])
         if family:
@@ -1425,7 +1429,7 @@ class VoiceAssistantServer:
 
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(self.conversation_history)
+        messages.extend(self.site.dry_run_history if dry_run else self.conversation_history)
         messages.append({"role": "system", "content": "\n".join(context)})
         messages.append({"role": "user", "content": text})
 
@@ -1445,12 +1449,11 @@ class VoiceAssistantServer:
         turn = [{"role": "user", "content": text}]
 
         def save_to_history(response_text):
-            if dry_run:  # a test leaves the family's conversation alone
-                return
-            history = self.conversation_history + turn + [{"role": "assistant", "content": response_text}]
+            attribute = "dry_run_history" if dry_run else "conversation_history"  # tests stay apart
+            history = getattr(self.site, attribute) + turn + [{"role": "assistant", "content": response_text}]
             # The last 5 exchanges, cut at a request
             starts = [i for i, m in enumerate(history) if m["role"] == "user"]
-            self.conversation_history = history[starts[-5] :] if len(starts) > 5 else history
+            setattr(self.site, attribute, history[starts[-5] :] if len(starts) > 5 else history)
 
         # Tool call loop: keep calling LLM until it returns text (max 3 rounds)
         import json
