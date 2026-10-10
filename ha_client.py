@@ -359,7 +359,8 @@ class HAClient:
                 continue
             if norm_room:
                 norm_area = normalize(info.get("area_name", ""))
-                if norm_room not in norm_area and norm_area not in norm_room:
+                # No area means in no room, not in every one ("" is in any name)
+                if not norm_area or (norm_room not in norm_area and norm_area not in norm_room):
                     continue
             candidates[eid] = normalize(info["friendly_name"])
 

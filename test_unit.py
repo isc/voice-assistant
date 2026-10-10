@@ -231,6 +231,20 @@ class TestResolveAllEntities(unittest.TestCase):
         eids = self.client.resolve_all_entities("lumière", room="Living Room")
         self.assertNotIn("light.orphan", eids)
 
+    def test_no_area_leak_by_name(self):
+        """A speaker with no area must not answer for another speaker's name or room."""
+        for eid, name, area in (("media_player.google_home", "Google Home", "Living Room"),
+                                ("media_player.sonos", "Sonos Paris", "")):  # fmt: skip
+            self.client.entities[eid] = {
+                "friendly_name": name, "domain": "media_player", "state": "idle",
+                "attributes": {}, "area_id": None, "area_name": area,
+            }  # fmt: skip
+        for room in ("Google Home", "Living Room"):
+            eids = self.client.resolve_all_entities(room, room=room, domain_hints=["media_player"])
+            self.assertEqual(eids, ["media_player.google_home"], room)
+        eids = self.client.resolve_all_entities("Sonos", room="Sonos", domain_hints=["media_player"])
+        self.assertEqual(eids, ["media_player.sonos"])
+
 
 # ---------------------------------------------------------------------------
 # Tests: cover sub-kinds (roller shutters vs roof windows, both `cover`)

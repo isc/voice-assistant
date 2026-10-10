@@ -965,6 +965,26 @@ class VoiceAssistantServer:
             logger.error(f"Spotify error: {e}")
             return "Spotify ne répond pas"
 
+    async def _music_for_prompt(self) -> Optional[str]:
+        """What Spotify plays and where, so that "mets la musique sur la Sonos" moves it rather than replace it."""
+        if not self.spotify or not self.spotify.stream.listeners or not self._spotify_target:
+            return None
+        try:
+            track = await self.spotify.playing()
+        except SpotifyError:
+            return None
+        if not track:
+            return None
+        kind, ident = self._spotify_target
+        if kind == "ha" and self.ha_client:
+            where = self.ha_client.entities.get(ident, {}).get("friendly_name", ident)
+        else:
+            where = "l'enceinte de l'appareil vocal"
+        return (
+            f"Musique Spotify en cours sur {where} : {track}. Pour la mettre sur une autre enceinte, "
+            "music_control resume avec room : elle continue sans changer."
+        )
+
     async def _point_at_spotify(self, target: tuple[str, str]) -> None:
         """Make the target speaker play the Spotify stream, and move it off the previous one.
 
@@ -1125,6 +1145,9 @@ class VoiceAssistantServer:
         timers_info = format_timers_for_prompt(self.timer_manager.get_timers())
         if timers_info:
             system_prompt += f"\n{timers_info}"
+        music_info = await self._music_for_prompt()
+        if music_info:
+            system_prompt += f"\n{music_info}"
 
         tools = get_tool_definitions(self.ha_client, self.calendar_client, music=self.spotify is not None)
 

@@ -190,6 +190,14 @@ def _artists(names: list[str]) -> str:
     return ", ".join(names[:2])
 
 
+def _track(status: dict) -> Optional[str]:
+    """go-librespot's current track as told to the LLM, None when there is none."""
+    track = status.get("track")
+    if not track or status.get("stopped"):
+        return None
+    return f"« {track['name']} » de {_artists(track['artist_names'])}"
+
+
 def _describe(kind: str, item: dict) -> str:
     """How the LLM is told what is playing."""
     if kind == "artist":
@@ -293,11 +301,16 @@ class Spotify:
 
     async def now_playing(self) -> str:
         status = await self.status()
-        track = status.get("track")
-        if not track or status.get("stopped"):
+        track = _track(status)
+        if not track:
             return "Rien en cours sur Spotify"
         paused = " (en pause)" if status.get("paused") else ""
-        return f"En cours sur Spotify : « {track['name']} » de {_artists(track['artist_names'])}{paused}"
+        return f"En cours sur Spotify : {track}{paused}"
+
+    async def playing(self) -> Optional[str]:
+        """The track playing right now, None when nothing plays (or it is paused)."""
+        status = await self.status()
+        return None if status.get("paused") else _track(status)
 
     async def _search_token(self) -> str:
         if not CLIENT_ID or not CLIENT_SECRET:
