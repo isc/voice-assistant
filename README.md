@@ -36,7 +36,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 
 ### Infrastructure
 - Linux server in production (systemd, CUDA, Ollama); macOS for development (launchd, secrets in Keychain)
-- One server can serve a voice device at another site: `TTS_BASE_URL` points it at a relay
+- One server for several homes (`SITES`): each satellite talks to its own Home Assistant, with its own conversation, timers and speakers; a satellite at another site reaches the TTS through a relay (`TTS_BASE_URL`)
 - Automatic ESP reconnection; hot reload of Home Assistant entities via SIGHUP
 - Time zone taken from Home Assistant, so the server itself may run in UTC
 - Web debug UI with exchange log, timings and text input; `/health` endpoint

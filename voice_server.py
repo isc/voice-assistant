@@ -14,6 +14,8 @@ import socket
 import sys
 import tempfile
 import time
+from contextvars import ContextVar
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
@@ -30,6 +32,7 @@ from aiohttp import web
 from ha_client import LOCAL_CONFIG, compact, is_whole_house
 from images import find_image
 from recordings import Recordings
+from sites import Site, load_sites
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -40,19 +43,11 @@ try:
 except locale.Error:
     pass  # Fall back to system locale
 
-# Configuration via environment variables
-ESP_HOST = os.environ.get("ESP_HOST", "")
-ESP_PORT = int(os.environ.get("ESP_PORT", "6053"))
-ESP_PASSWORD = os.environ.get("ESP_PASSWORD", "")
-ESP_NOISE_PSK = os.environ.get("ESP_NOISE_PSK", "")
+# Configuration via environment variables; satellite and Home Assistant are per site (sites.py)
 LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")  # empty = llama-server's only model
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
-# URL the ESP fetches TTS files from, when it cannot reach this host's own LAN address
-TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "")
-HA_URL = os.environ.get("HA_URL", "")
-HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
 
 # French web radio streams. All MP3: the Voice PE does not decode AAC.
@@ -153,19 +148,42 @@ def _format_family_for_prompt(family: list) -> str:
     return "Membres de la famille: " + ", ".join(parts)
 
 
+# The site the running task serves: set where a satellite's request or a web request comes in.
+# asyncio copies it into every task created from there (service calls, TTS generation, timers).
+_current_site: ContextVar[Site] = ContextVar("current_site")
+
+
+def _site_attribute(name: str) -> property:
+    """An attribute of the site this task serves."""
+    return property(lambda self: getattr(self.site, name), lambda self, value: setattr(self.site, name, value))
+
+
 class VoiceAssistantServer:
     """
     Custom voice assistant server for ESPHome
     Handles the STT -> LLM -> TTS pipeline
     """
 
+    # Per home, read from the active site (sites.py)
+    ha_client = _site_attribute("ha_client")
+    timer_manager = _site_attribute("timer_manager")
+    conversation_history = _site_attribute("conversation_history")
+    conversation_id = _site_attribute("conversation_id")
+    last_interaction_time = _site_attribute("last_interaction_time")
+    _last_media_target = _site_attribute("last_media_target")
+    _shown_images = _site_attribute("shown_images")
+
     def __init__(self):
+        self.sites: list[Site] = load_sites()
+        # Whose satellite holds the recording, VAD and pipeline state below: one conversation at a
+        # time. Also the site served by a task that names none, such as an untagged web request.
+        self._voice_site = self.sites[0]
+        self._pipeline_running = False
+        # Site name -> its satellite, once connected
         self.devices: Dict[str, APIClient] = {}
-        self._reconnect_logic: Optional[ReconnectLogic] = None
+        self._reconnect_logics: list[ReconnectLogic] = []
 
         # Voice pipeline state
-        self.conversation_id = None
-        self.current_device = None
         self.audio_buffer = bytearray()
         self.is_recording = False
         self.recording_task = None
@@ -175,21 +193,10 @@ class VoiceAssistantServer:
         self.tts = None  # tts.KokoroTTS
         self.stt = None  # stt.ParakeetSTT
 
-        # Home Assistant client
-        self.ha_client = None
-
         # Google Calendar client
         self.calendar_client = None
 
-        # Timer manager
-        from timer import TimerManager
-
-        self.timer_manager = TimerManager()
-
-        # Conversation history for multi-turn context
-        self.conversation_history = []
-        self.conversation_id = None  # Groups exchanges in the same conversation
-        self.last_interaction_time = 0
+        # Conversation history (per site) for multi-turn context.
         # Forget context after this much silence. Long enough that a typed
         # follow-up ("et dans la salle de jeux ?") still resolves, short enough
         # that a wake word much later starts clean. Voice conversations usually
@@ -200,18 +207,15 @@ class VoiceAssistantServer:
         self.is_followup = False  # True when pipeline was started without wake word
         self._end_conversation = False  # Set by end_conversation tool
 
-        # Media playback state
-        # ESP host -> media_player entity key (discovered at connect time)
+        # Media playback state. Media targets are ("esp", site name) or ("ha", entity_id),
+        # the last one per site for follow-ups (_last_media_target).
+        # Site name -> its satellite's media_player entity key (discovered at connect time)
         self.device_media_keys: Dict[str, int] = {}
-        # Last media target for follow-ups: ("esp", host) or ("ha", entity_id)
-        self._last_media_target: Optional[tuple[str, str]] = None
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
-        # The speaker playing the Spotify stream: one stream, one speaker at a time
-        self._spotify_target: Optional[tuple[str, str]] = None
-        # Pictures shown in this conversation, so that "une autre" moves on
-        self._shown_images: set[str] = set()
+        # The speaker playing the Spotify stream, with its site: one stream, one speaker at a time
+        self._spotify_at: Optional[tuple[Site, tuple[str, str]]] = None
 
         # Exchange log for web UI (persisted to disk)
         from web_ui import ExchangeLog
@@ -232,12 +236,41 @@ class VoiceAssistantServer:
         self.tts_dir.mkdir(exist_ok=True)
         logger.info(f"TTS directory: {self.tts_dir}")
 
+    @property
+    def site(self) -> Site:
+        """The site this task serves; for a task that names none, where someone last spoke."""
+        return _current_site.get(self._voice_site)
+
+    @site.setter
+    def site(self, site: Site) -> None:
+        _current_site.set(site)
+
+    @property
+    def device(self) -> Optional[APIClient]:
+        """This site's satellite, when connected."""
+        return self.devices.get(self.site.name)
+
+    def claim_voice(self, site: Site) -> bool:
+        """A site's satellite starts a request; refused while another site's conversation holds the voice state."""
+        if site is not self._voice_site and (self.is_recording or self._pipeline_running):
+            logger.warning(f"Site {site.label} refused: a conversation is running at {self._voice_site.label}")
+            return False
+        self._voice_site = self.site = site
+        return True
+
+    def site_named(self, name: str) -> Optional[Site]:
+        return next((site for site in self.sites if site.name == name.strip().lower()), None)
+
     # === INIT ===
 
     async def start(self):
         """Start the server and connect to devices"""
         logger.info("Voice Assistant Server started")
-        logger.info(f"ESP: {ESP_HOST}:{ESP_PORT} | LLM: {LLM_MODEL or '(server default)'} at {LLM_URL} | HTTP: {HTTP_PORT}")
+        for site in self.sites:
+            logger.info(
+                f"Site {site.label}: ESP {site.esp_host or '(none)'}:{site.esp_port} | HA {site.ha_url or '(none)'}"
+            )
+        logger.info(f"LLM: {LLM_MODEL or '(server default)'} at {LLM_URL} | HTTP: {HTTP_PORT}")
 
         from stt import ParakeetSTT
         from tts import KokoroTTS
@@ -248,33 +281,45 @@ class VoiceAssistantServer:
         self.tts = KokoroTTS()
         await self.tts.init()
 
-        await self.init_ha_client()
+        await self.init_ha_clients()
         await self.init_calendar_client()
         await self.init_spotify()
         await self.start_http_server()
         self._recover_media_target()
-        await self.connect_to_device(ESP_HOST)
+        for site in self.sites:
+            if site.esp_host:
+                await self.connect_to_device(site)
+            else:
+                logger.info(f"Site {site.label}: no satellite configured")
 
-    async def init_ha_client(self):
-        """Connect to Home Assistant and discover entities."""
+    async def init_ha_clients(self):
+        """Connect to every site's Home Assistant, all at once, and discover entities."""
+        await asyncio.gather(*(self._connect_ha(site) for site in self.sites))
+        # Local time is the home's: the server may run elsewhere, or in UTC (charras). Homes in
+        # several time zones would need it per site; both are in Europe/Paris.
+        time_zone = next((site.ha_client.home.get("time_zone") for site in self.sites if site.ha_client), None)
+        if time_zone and not os.environ.get("TZ"):
+            os.environ["TZ"] = time_zone
+            time.tzset()
+            logger.info(f"Time zone: {time_zone} (from Home Assistant)")
+
+    async def _connect_ha(self, site: Site):
         from ha_client import HAClient
 
-        if not HA_TOKEN:
-            logger.info("No HA_TOKEN configured, device control disabled")
+        if not site.ha_token:
+            logger.info(f"Site {site.label}: no HA token configured, device control disabled")
             return
-
-        self.ha_client = HAClient(HA_URL, HA_TOKEN)
-        if await self.ha_client.connect():
-            logger.info(f"Home Assistant: {len(self.ha_client.entities)} entities discovered")
-            # Local time is the home's: the server may run elsewhere, or in UTC (charras)
-            time_zone = self.ha_client.home.get("time_zone")
-            if time_zone and not os.environ.get("TZ"):
-                os.environ["TZ"] = time_zone
-                time.tzset()
-                logger.info(f"Time zone: {time_zone} (from Home Assistant)")
+        client = HAClient(site.ha_url, site.ha_token)
+        if not await client.connect():
+            await client.close()
+            logger.warning(f"Site {site.label}: Home Assistant not reachable, device control disabled")
+            client = None
         else:
-            logger.warning("Home Assistant not reachable, device control disabled")
-            self.ha_client = None
+            logger.info(f"Site {site.label}: Home Assistant, {len(client.entities)} entities discovered")
+        # Swapped in once ready, so that a reload (SIGHUP) leaves no gap
+        previous, site.ha_client = site.ha_client, client
+        if previous:
+            await previous.close()
 
     async def init_calendar_client(self):
         """Connect to Google Calendar API."""
@@ -306,30 +351,35 @@ class VoiceAssistantServer:
         self._spotify_task = asyncio.create_task(spotify.stream.run())
         logger.info("Spotify enabled (go-librespot)")
 
+    @staticmethod
+    def _spotify_url(site: Site) -> str:
+        # Beside /tts/, so that a relay serving the site's TTS_BASE_URL serves it too
+        return urljoin(site.http_base_url, "../spotify/stream.mp3")
+
     @property
-    def _spotify_url(self) -> str:
-        # Beside /tts/, so that a relay serving TTS_BASE_URL serves it too
-        return urljoin(self.http_base_url, "../spotify/stream.mp3")
+    def _spotify_here(self) -> Optional[tuple[str, str]]:
+        """The speaker playing the Spotify stream, if it is at this site."""
+        return self._spotify_at[1] if self._spotify_at and self._spotify_at[0] is self.site else None
 
     def _recover_media_target(self) -> None:
-        """Pick up the HA speaker a previous run left on a radio or on the Spotify stream.
+        """Pick up, per site, the HA speaker a previous run left on a radio or on the Spotify stream.
 
         A restart forgot it, so media commands without a room went to the voice device
         while the music went on, on the Sonos.
         """
-        if not self.ha_client:
-            return
-        urls = {url for _, url in RADIO_STATIONS.values()}
-        if self.spotify:
-            urls.add(self._spotify_url)
-        found = _speaker_left_on(self.ha_client.entities, urls)
-        if not found:
-            return
-        speaker, url = found
-        self._last_media_target = ("ha", speaker)
-        if self.spotify and url == self._spotify_url:
-            self._spotify_target = ("ha", speaker)
-        logger.info(f"{speaker} left on {url}: media commands without a room go there")
+        radios = {url for _, url in RADIO_STATIONS.values()}
+        for site in self.sites:
+            if not site.ha_client:
+                continue
+            stream = self._spotify_url(site) if self.spotify else None
+            found = _speaker_left_on(site.ha_client.entities, radios | {stream} - {None})
+            if not found:
+                continue
+            speaker, url = found
+            site.last_media_target = ("ha", speaker)
+            if url == stream:
+                self._spotify_at = (site, ("ha", speaker))
+            logger.info(f"Site {site.label}: {speaker} left on {url}, media commands without a room go there")
 
     async def start_http_server(self):
         """Start HTTP server to host TTS audio files and web UI"""
@@ -358,87 +408,84 @@ class VoiceAssistantServer:
         logger.info(
             f'Test endpoint: curl -X POST http://{local_ip}:{HTTP_PORT}/test -d \'{{"text": "allume la lumière"}}\''
         )
-        self.http_base_url = TTS_BASE_URL or f"http://{local_ip}:{HTTP_PORT}/tts/"
-        logger.info(f"TTS URL announced to the ESP: {self.http_base_url}")
+        for home in self.sites:
+            # A site whose satellite cannot reach this host's LAN address names a relay
+            home.http_base_url = home.tts_base_url or f"http://{local_ip}:{HTTP_PORT}/tts/"
+            logger.info(f"Site {home.label}: TTS URL announced to the ESP: {home.http_base_url}")
 
     # === ESP CONNECTION ===
 
-    async def connect_to_device(self, host: str):
-        """Connect to an ESPHome device with automatic reconnection."""
-        logger.info(f"Connecting to {host}...")
+    async def connect_to_device(self, site: Site):
+        """Connect to a site's satellite with automatic reconnection."""
+        host = site.esp_host
+        logger.info(f"Site {site.label}: connecting to {host}...")
 
-        if ESP_NOISE_PSK:
+        if site.esp_noise_psk:
             logger.info("Auth: Noise encryption")
             api = APIClient(
                 host,
-                ESP_PORT,
+                site.esp_port,
                 None,
-                noise_psk=ESP_NOISE_PSK,
+                noise_psk=site.esp_noise_psk,
                 client_info="voice-assistant",
             )
         else:
             api = APIClient(
                 host,
-                ESP_PORT,
-                ESP_PASSWORD,
+                site.esp_port,
+                site.esp_password,
                 client_info="voice-assistant",
             )
 
         async def on_connect() -> None:
             device_info = await api.device_info()
-            logger.info(f"Connected to {host}: {device_info.name} (v{device_info.esphome_version})")
+            logger.info(f"Site {site.label}: connected to {host}: {device_info.name} (v{device_info.esphome_version})")
 
             if device_info.voice_assistant_feature_flags:
                 logger.info(f"Voice assistant supported (flags: {device_info.voice_assistant_feature_flags})")
             else:
                 logger.warning("Voice assistant may not be supported")
 
-            self.devices[host] = api
-            self.current_device = host
-            await self._discover_device_entities(api, host)
-            await self.setup_voice_assistant(api, host)
+            self.devices[site.name] = api
+            await self._discover_device_entities(api, site)
+            await self.setup_voice_assistant(api, site)
 
         async def on_disconnect(expected_disconnect: bool) -> None:
             reason = "expected" if expected_disconnect else "unexpected"
-            logger.warning(f"ESP {host} disconnected ({reason}), will reconnect automatically")
-            self.devices.pop(host, None)
-            if self.current_device == host:
-                self.current_device = None
+            logger.warning(f"Site {site.label}: ESP {host} disconnected ({reason}), will reconnect automatically")
+            self.devices.pop(site.name, None)
 
-        self._reconnect_logic = ReconnectLogic(
-            client=api,
-            on_connect=on_connect,
-            on_disconnect=on_disconnect,
-            name=host,
-        )
-        await self._reconnect_logic.start()
+        # No name: ReconnectLogic derives it from the host, and matches mDNS announcements with it
+        # (an x.local satellite reconnects as soon as it appears; an IP gets no listener)
+        reconnect_logic = ReconnectLogic(client=api, on_connect=on_connect, on_disconnect=on_disconnect)
+        self._reconnect_logics.append(reconnect_logic)
+        await reconnect_logic.start()
 
-    async def _discover_device_entities(self, api: APIClient, device_host: str):
-        """List ESP entities and remember the media_player key (for direct radio playback)."""
+    async def _discover_device_entities(self, api: APIClient, site: Site):
+        """List the satellite's entities and remember its media_player key (for direct radio playback)."""
         try:
             entities, _ = await api.list_entities_services()
         except Exception as e:
-            logger.warning(f"Could not list entities on {device_host}: {e}")
+            logger.warning(f"Site {site.label}: could not list ESP entities: {e}")
             return
         media_players = [e for e in entities if isinstance(e, MediaPlayerInfo)]
         if not media_players:
-            logger.info(f"{device_host} has no media_player entity — radio playback via HA only")
+            logger.info(f"Site {site.label}: ESP has no media_player entity — radio playback via HA only")
             return
         mp = media_players[0]
-        self.device_media_keys[device_host] = mp.key
-        logger.info(f"{device_host} media_player: key={mp.key} name={mp.name!r}")
+        self.device_media_keys[site.name] = mp.key
+        logger.info(f"Site {site.label}: ESP media_player key={mp.key} name={mp.name!r}")
 
-    async def setup_voice_assistant(self, api: APIClient, device_host: str):
-        """Set up voice assistant subscription"""
-        logger.info(f"Setting up voice assistant for {device_host}")
+    async def setup_voice_assistant(self, api: APIClient, site: Site):
+        """Set up the voice assistant subscription; the handlers know which site they serve."""
+        logger.info(f"Setting up voice assistant for {site.label}")
 
         try:
-            unsubscribe = api.subscribe_voice_assistant(
-                handle_start=self.handle_voice_assistant_start,
-                handle_stop=self.handle_voice_assistant_stop,
-                handle_audio=self.handle_voice_assistant_audio,
+            api.subscribe_voice_assistant(
+                handle_start=partial(self.handle_voice_assistant_start, site),
+                handle_stop=partial(self.handle_voice_assistant_stop, site),
+                handle_audio=partial(self.handle_voice_assistant_audio, site),
             )
-            self.va_unsubscribe = unsubscribe
             logger.info("Voice assistant subscription successful")
 
         except Exception as e:
@@ -448,17 +495,21 @@ class VoiceAssistantServer:
 
     async def handle_voice_assistant_start(
         self,
+        site: Site,
         conversation_id: str,
         flags: int,
         audio_settings: Any,
         wake_word_phrase: str | None,
     ) -> int | None:
-        """Called when the voice assistant starts"""
-        logger.info("Voice Assistant START")
+        """Called when a site's voice assistant starts"""
+        logger.info(f"Voice Assistant START ({site.label})")
         logger.info(f"   Conversation ID: {conversation_id}")
         logger.info(f"   Flags: {flags}")
         logger.info(f"   Wake word: {wake_word_phrase}")
         logger.info(f"   Audio settings: {audio_settings}")
+
+        if not self.claim_voice(site):
+            return None  # the ESP takes it as an error
 
         self.is_followup = wake_word_phrase is None
         # Only overwrite conversation_id for new conversations (wake word detected).
@@ -478,8 +529,7 @@ class VoiceAssistantServer:
         # In follow-up mode, skip initial audio to avoid picking up TTS echo
         self.skip_audio_until = time.time() + 0.5 if self.is_followup else 0
 
-        if self.current_device:
-            api = self.devices[self.current_device]
+        if api := self.device:
             try:
                 api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_START, {})
                 logger.info(f"STT_START sent - {'follow-up' if self.is_followup else 'wake word'} mode")
@@ -531,16 +581,18 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.error(f"Error stopping recording: {e}")
 
-    async def handle_voice_assistant_stop(self, abort: bool):
-        """Called when the voice assistant stops"""
-        logger.info(f"Voice Assistant STOP (abort={abort})")
+    async def handle_voice_assistant_stop(self, site: Site, abort: bool):
+        """Called when a site's voice assistant stops"""
+        logger.info(f"Voice Assistant STOP ({site.label}, abort={abort})")
+        if site is not self._voice_site:
+            return
+        self.site = site
 
         if self.is_recording and len(self.audio_buffer) > 0:
             logger.info(f"Complete audio received: {len(self.audio_buffer)} bytes")
             self.is_recording = False
 
-            if self.current_device:
-                api = self.devices[self.current_device]
+            if api := self.device:
                 await self.process_voice_pipeline(api, bytes(self.audio_buffer))
         else:
             logger.info("No audio to process")
@@ -570,11 +622,12 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.warning(f"TTS announcement error: {e}")
 
-    async def handle_voice_assistant_audio(self, audio_bytes: bytes, _data2: bytes | None = None):
-        """Handle audio received from the ESP with VAD detection.
+    async def handle_voice_assistant_audio(self, site: Site, audio_bytes: bytes, _data2: bytes | None = None):
+        """Handle audio received from a site's ESP with VAD detection.
 
         aioesphomeapi 45+ passes a second buffer (data2); a single mic stream is enough here."""
-        if self.is_recording:
+        if self.is_recording and site is self._voice_site:
+            self.site = site  # the pipeline may run from this task, once the VAD hears the end
             # Skip early audio in follow-up mode to avoid TTS echo
             if self.skip_audio_until and time.time() < self.skip_audio_until:
                 return
@@ -626,8 +679,7 @@ class VoiceAssistantServer:
 
                 if self.vad_has_speech and self.vad_silence_frames >= 31:
                     logger.info(f"Silence detected after speech ({self.vad_silence_frames} frames)")
-                    if self.current_device and self.is_recording:
-                        api = self.devices[self.current_device]
+                    if self.is_recording and (api := self.device):
                         await self.stop_recording(api, "VAD silence")
                     return
 
@@ -639,11 +691,13 @@ class VoiceAssistantServer:
 
     async def process_voice_pipeline(self, api: APIClient, audio_bytes: bytes):
         """Main pipeline: Audio -> STT -> LLM -> TTS"""
-        logger.info("Starting full voice pipeline")
+        logger.info(f"Starting full voice pipeline ({self.site.label})")
         self._end_conversation = False
+        self._pipeline_running = True
         timings = {}
         # What became of the request, for the exchange log and beside its recording
         entry = {
+            "site": self.site.name,
             "transcript": "",
             "response": None,
             "timings": timings,
@@ -715,6 +769,7 @@ class VoiceAssistantServer:
             entry["error"] = str(e)
             await self.send_error_to_device(api, f"Pipeline error: {e}")
         finally:
+            self._pipeline_running = False
             self.recordings.describe(entry["audio"], entry)
             # Failures too, with their audio: they are the ones worth hearing. Not a
             # follow-up nobody spoke in, which is how every conversation ends.
@@ -728,6 +783,7 @@ class VoiceAssistantServer:
                     tool_calls=entry.get("tool_calls"),
                     conversation_id=entry.get("conversation_id"),
                     audio=entry["audio"],
+                    site=entry["site"],
                 )
 
     # === FUNCTION CALLING ===
@@ -743,7 +799,7 @@ class VoiceAssistantServer:
             duration_minutes = arguments.get("duration_minutes", 0)
             total_seconds = int(duration_minutes * 60)
             label = arguments.get("label")
-            timer = self.timer_manager.start_timer(total_seconds, label, self._handle_timer_event)
+            timer = self.timer_manager.start_timer(total_seconds, label, partial(self._handle_timer_event, self.site))
             if label:
                 return f"Timer {label} de {_format_duration(total_seconds)} lancé"
             return f"Timer de {_format_duration(total_seconds)} lancé"
@@ -751,7 +807,7 @@ class VoiceAssistantServer:
         if function_name == "set_alarm":
             time_str = arguments.get("time", "")
             label = arguments.get("label")
-            timer = self.timer_manager.start_alarm(time_str, label, self._handle_timer_event)
+            timer = self.timer_manager.start_alarm(time_str, label, partial(self._handle_timer_event, self.site))
             return f"Alarme programmée pour {time_str}"
 
         if function_name == "cancel_timer":
@@ -760,7 +816,8 @@ class VoiceAssistantServer:
             if timer:
                 from aioesphomeapi import VoiceAssistantTimerEventType
 
-                await self._handle_timer_event(VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED, timer)
+                cancelled = VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED
+                await self._handle_timer_event(self.site, cancelled, timer)
                 if timer.is_alarm and timer.target_time:
                     desc = f"l'alarme pour {timer.target_time}"
                 elif timer.name:
@@ -923,8 +980,8 @@ class VoiceAssistantServer:
                 return self._last_media_target
 
         # Default: the current ESP, if it has a media_player
-        if self.current_device and self.current_device in self.device_media_keys:
-            return ("esp", self.current_device)
+        if self.device and self.site.name in self.device_media_keys:
+            return ("esp", self.site.name)
 
         return None
 
@@ -997,12 +1054,12 @@ class VoiceAssistantServer:
                     result = await self.spotify.control(action)
                 else:
                     return f"Action {action} inconnue"
-                self._after_media_change(self._spotify_target)
+                self._after_media_change(self._spotify_here)
                 return result
 
             room = arguments.get("room")
-            # "reprends la musique": back where it played
-            target = self._spotify_target if action == "resume" and not room else None
+            # "reprends la musique": back where it played, if that is at this site
+            target = self._spotify_here if action == "resume" and not room else None
             target = target or self._resolve_media_target(room)
             if not target:
                 return _no_speaker(room)
@@ -1028,7 +1085,7 @@ class VoiceAssistantServer:
 
     async def _music_for_prompt(self) -> Optional[str]:
         """What Spotify plays and where, so that "mets la musique sur la Sonos" moves it rather than replace it."""
-        if not self.spotify or not self.spotify.stream.listeners or not self._spotify_target:
+        if not self.spotify or not self.spotify.stream.listeners or not self._spotify_at:
             return None
         try:
             track = await self.spotify.playing()
@@ -1036,11 +1093,13 @@ class VoiceAssistantServer:
             return None
         if not track:
             return None
-        kind, ident = self._spotify_target
-        if kind == "ha" and self.ha_client:
-            where = self.ha_client.entities.get(ident, {}).get("friendly_name", ident)
+        site, (kind, ident) = self._spotify_at
+        if kind == "ha" and site.ha_client:
+            where = site.ha_client.entities.get(ident, {}).get("friendly_name", ident)
         else:
             where = "l'enceinte de l'appareil vocal"
+        if site is not self.site and site.name:
+            where += f", à {site.name.capitalize()}"
         return (
             f"Musique Spotify en cours sur {where} : {track}. Pour la mettre sur une autre enceinte, "
             "music_control resume avec room : elle continue sans changer."
@@ -1052,10 +1111,10 @@ class VoiceAssistantServer:
         A speaker taken off the stream (radio, stop) needs nothing here: once the music
         plays to nobody, the stream pauses go-librespot."""
         stream = self.spotify.stream
-        previous = self._spotify_target
-        if previous == target and stream.listeners:
+        previous, new = self._spotify_at, (self.site, target)
+        if previous == new and stream.listeners:
             return
-        url = self._spotify_url
+        url = self._spotify_url(self.site)
         joins = stream.joins
         await self._media_play_url(target, url)
         # Start the music once the speaker listens, so that the first seconds play
@@ -1063,9 +1122,10 @@ class VoiceAssistantServer:
             logger.warning(f"Spotify: {target} did not connect to {url}")
         # Stopped after the new one joined, so the encoder never runs dry; and only if
         # still on the stream, as it may have moved to a radio since
-        if previous and previous != target and len(stream.listeners) > 1:
-            await self._media_command(previous, MediaPlayerCommand.STOP, ha_service="media_stop")
-        self._spotify_target = target
+        if previous and previous != new and len(stream.listeners) > 1:
+            previous_site, previous_target = previous
+            await self._media_command(previous_target, MediaPlayerCommand.STOP, ha_service="media_stop", site=previous_site)
+        self._spotify_at = new
 
     async def _media_play_url(self, target: tuple[str, str], url: str, content_type: str = "music") -> None:
         """Start playback of an arbitrary media URL on the target speaker (or show it, for a picture)."""
@@ -1085,8 +1145,10 @@ class VoiceAssistantServer:
             media_content_type=content_type,
         )
 
-    async def _media_command(self, target: tuple[str, str], command: MediaPlayerCommand, ha_service: str) -> None:
-        """Send a media control command (STOP, VOLUME_UP, VOLUME_DOWN...) to the target."""
+    async def _media_command(
+        self, target: tuple[str, str], command: MediaPlayerCommand, ha_service: str, site: Optional[Site] = None
+    ) -> None:
+        """Send a media control command (STOP, VOLUME_UP...) to a target of the active site, or of `site`."""
         kind, ident = target
         if kind == "esp":
             api = self.devices.get(ident)
@@ -1095,7 +1157,9 @@ class VoiceAssistantServer:
                 logger.info(f"ESP media_player_command: {command.name} on {ident} (key={key})")
                 api.media_player_command(key, command=command)
             return
-        await self.ha_client.call_service("media_player", ha_service, ident)
+        ha_client = (site or self.site).ha_client
+        if ha_client:
+            await ha_client.call_service("media_player", ha_service, ident)
 
     async def _media_set_volume(self, target: tuple[str, str], level: int) -> None:
         """Set absolute volume (0-100) on the target speaker."""
@@ -1130,9 +1194,9 @@ class VoiceAssistantServer:
 
     # === TIMER EVENTS ===
 
-    async def _handle_timer_event(self, event_type, timer):
-        """Forward timer events to the ESP device. On FINISHED, also play TTS announcement."""
-        api = self.devices.get(self.current_device) if self.current_device else None
+    async def _handle_timer_event(self, site: Site, event_type, timer):
+        """Forward timer events to the satellite of the site the timer was set at. On FINISHED, also announce it."""
+        api = self.devices.get(site.name)
         if api:
             try:
                 api.send_voice_assistant_timer_event(
@@ -1149,9 +1213,9 @@ class VoiceAssistantServer:
         from aioesphomeapi import VoiceAssistantTimerEventType
 
         if event_type == VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_FINISHED and api:
-            await self._announce_timer_finished(api, timer)
+            await self._announce_timer_finished(api, timer, site)
 
-    async def _announce_timer_finished(self, api, timer):
+    async def _announce_timer_finished(self, api, timer, site: Site):
         """Generate TTS and play announcement when a timer finishes."""
         if timer.name:
             text = f"Le timer {timer.name} est terminé !"
@@ -1159,7 +1223,7 @@ class VoiceAssistantServer:
             text = f"Le timer de {_format_duration(timer.total_seconds)} est terminé !"
 
         try:
-            audio_url = await self.text_to_speech_file(text)
+            audio_url = await self.text_to_speech_file(text, site)
             logger.info(f"Timer finished announcement: {text}")
             await api.send_voice_assistant_announcement_await_response(
                 media_id=audio_url,
@@ -1406,9 +1470,9 @@ class VoiceAssistantServer:
 
     # === TTS ===
 
-    async def text_to_speech_file(self, text: str) -> str:
-        """Generate a TTS WAV file and return its URL."""
-        return await self.tts.synthesize_to_file(text, self.tts_dir, self.http_base_url)
+    async def text_to_speech_file(self, text: str, site: Optional[Site] = None) -> str:
+        """Generate a TTS WAV file and return its URL, as the active site's (or `site`'s) speakers reach it."""
+        return await self.tts.synthesize_to_file(text, self.tts_dir, (site or self.site).http_base_url)
 
     @staticmethod
     def _split_sentences(text: str) -> list[str]:
@@ -1558,7 +1622,7 @@ async def main():
             if reload_event.is_set():
                 reload_event.clear()
                 logger.info("Reloading...")
-                await server.init_ha_client()
+                await server.init_ha_clients()
                 logger.info("Reload complete")
 
     except KeyboardInterrupt:
@@ -1572,8 +1636,8 @@ async def main():
         if server._pending_service_calls:
             logger.info(f"Draining {len(server._pending_service_calls)} pending service calls...")
             await asyncio.gather(*server._pending_service_calls, return_exceptions=True)
-        if server._reconnect_logic:
-            await server._reconnect_logic.stop()
+        for reconnect_logic in server._reconnect_logics:
+            await reconnect_logic.stop()
         if server.calendar_client:
             await server.calendar_client.close()
 

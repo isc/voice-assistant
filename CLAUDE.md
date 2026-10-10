@@ -55,7 +55,8 @@ ESP (wake word) → audio stream → voice_server.py
 
 ## Key design patterns
 
-- **Room groups**: `room_groups` in `config.local.json` maps group names ("enfants") to lists of HA areas; "tout", "toute la maison" and "partout" are built in and mean every room. For a group, all entities of the matching domain are returned (only the named one for a generic name like "lumières").
+- **Sites** (`sites.py`): one server for several homes, each with its satellite, Home Assistant, TTS URL, conversation, timers and last speaker. The ESP handlers are bound to their site, and a voice request activates it; the other state (`ha_client`, `conversation_history`…) is read from the active site. One conversation at a time: a satellite that wakes while another site is mid-conversation gets an error. Text requests take an optional `"site"`.
+- **Room groups**: `room_groups` in `config.local.json`, shared by all sites (matched loosely: « Chambre Zoé » finds « Chambre de Zoé »), maps group names ("enfants") to lists of HA areas; "tout", "toute la maison" and "partout" are built in and mean every room. For a group, all entities of the matching domain are returned (only the named one for a generic name like "lumières").
 - **Entity resolution**: fuzzy matching on normalized friendly_name (accents stripped, stopwords removed), scoped by room/area.
 - **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls. A system reminder lists already-called functions to encourage completeness.
 - **Conversation history**: last 5 exchanges (10 messages), expires after 10 min inactivity (`CONVERSATION_TIMEOUT`).
@@ -71,7 +72,8 @@ ESP (wake word) → audio stream → voice_server.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `ESP_HOST` | (required) | ESPHome device IP |
+| `SITES` | (empty) | Comma-separated homes served by this server (`paris,charras`). Each then reads the satellite and Home Assistant settings below with its name as prefix (`PARIS_HA_URL`, `CHARRAS_ESP_HOST`…); `ESP_PORT`, `ESP_PASSWORD`, `ESP_NOISE_PSK` may stay unprefixed, shared. Empty: one site, unprefixed settings |
+| `ESP_HOST` | (empty) | ESPHome device IP or `name.local` (resolved by mDNS); empty for a site without satellite |
 | `ESP_PORT` | `6053` | ESPHome native API port |
 | `ESP_PASSWORD` | (empty) | Legacy password auth |
 | `ESP_NOISE_PSK` | (empty) | Noise encryption key (preferred) |

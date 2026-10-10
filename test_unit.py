@@ -18,12 +18,13 @@ import unittest
 import wave
 from datetime import date, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from ha_client import HAClient, cover_kind, normalize
 from images import is_about
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from recordings import Recordings
+from sites import load_sites
 from web_ui import is_trusted_client
 
 # ---------------------------------------------------------------------------
@@ -112,6 +113,20 @@ FAKE_ENTITIES = {
         "area_name": "Living Room",
     },
 }
+
+
+def make_server(env=None):
+    """A VoiceAssistantServer with its sites and nothing started (no models, HA or satellite)."""
+    from voice_server import VoiceAssistantServer
+
+    server = VoiceAssistantServer.__new__(VoiceAssistantServer)
+    server.sites = load_sites(env or {})
+    server._voice_site = server.sites[0]
+    server.site = server.sites[0]
+    server.devices = {}
+    server.is_recording = False
+    server._pipeline_running = False
+    return server
 
 
 def make_client() -> HAClient:
@@ -482,9 +497,7 @@ class TestLock(unittest.IsolatedAsyncioTestCase):
         self.assertIn("verrouillage", self.client._build_response("lock", "lock", "Smart Lock Pro", {}))
 
     async def test_only_the_lock_service_reaches_a_lock(self):
-        from voice_server import VoiceAssistantServer
-
-        server = VoiceAssistantServer.__new__(VoiceAssistantServer)
+        server = make_server()
         server.ha_client = self.client
         self.client.call_service = AsyncMock(return_value="ok")
         for invented in ("unlock", "open", "lock_door"):
@@ -1081,6 +1094,86 @@ class TestCalendarQueryValidation(unittest.IsolatedAsyncioTestCase):
         result = await client.query_events("2026-03-25")
         data = json.loads(result)
         self.assertEqual(data["error"], "Agenda non disponible")
+
+
+# ---------------------------------------------------------------------------
+# Tests: several sites from one server
+# ---------------------------------------------------------------------------
+
+
+class TestSites(unittest.TestCase):
+    def test_single_site_from_unprefixed_settings(self):
+        (site,) = load_sites({"ESP_HOST": "10.0.0.5", "HA_URL": "http://ha:8123", "HA_TOKEN": "t"})
+        self.assertEqual((site.name, site.esp_host, site.esp_port, site.ha_url), ("", "10.0.0.5", 6053, "http://ha:8123"))
+
+    def test_named_sites(self):
+        paris, charras = load_sites(
+            {
+                "SITES": "Paris, charras",
+                "ESP_NOISE_PSK": "shared-key",
+                "PARIS_ESP_HOST": "127.0.0.1",
+                "PARIS_ESP_PORT": "16053",
+                "PARIS_HA_URL": "http://127.0.0.1:18123",
+                "PARIS_TTS_BASE_URL": "http://192.168.1.189:8889/tts/",
+                "CHARRAS_ESP_HOST": "home-assistant-voice-09d3f1.local",
+                "CHARRAS_HA_URL": "http://localhost:8123",
+                "HA_TOKEN": "an unprefixed token must not leak into a named site",
+            }
+        )
+        self.assertEqual((paris.name, paris.esp_port, paris.tts_base_url), ("paris", 16053, "http://192.168.1.189:8889/tts/"))
+        self.assertEqual((charras.esp_host, charras.esp_port, charras.tts_base_url), ("home-assistant-voice-09d3f1.local", 6053, ""))
+        self.assertEqual({paris.esp_noise_psk, charras.esp_noise_psk}, {"shared-key"})
+        self.assertEqual((paris.ha_token, charras.ha_token), ("", ""))
+
+
+class TestServerSites(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.server = make_server({"SITES": "paris,charras"})
+        self.paris, self.charras = self.server.sites
+
+    def test_state_is_per_site(self):
+        server = self.server
+        server.conversation_history.append({"role": "user", "content": "allume le salon"})
+        server._shown_images.add("https://example.org/a.jpg")
+        server.site = self.charras
+        self.assertEqual((server.conversation_history, server._shown_images), ([], set()))
+        server.site = self.paris
+        self.assertEqual(len(server.conversation_history), 1)
+
+    def test_one_conversation_at_a_time(self):
+        self.server.is_recording = True
+        self.assertFalse(self.server.claim_voice(self.charras))
+        self.assertTrue(self.server.claim_voice(self.paris))  # its own follow-up
+
+    async def test_a_web_request_leaves_the_voice_site_alone(self):
+        async def web_request():
+            self.server.site = self.charras  # what read_text does for {"site": "charras"}
+            return self.server.site
+
+        self.server.is_recording = True  # someone speaks in Paris
+        self.assertIs(await asyncio.create_task(web_request()), self.charras)
+        self.assertIs(self.server.site, self.paris)
+
+    def test_device_is_this_sites_satellite(self):
+        satellite = object()
+        self.server.devices = {"charras": satellite}
+        self.assertIsNone(self.server.device)
+        self.server.site = self.charras
+        self.assertIs(self.server.device, satellite)
+
+    async def test_timer_event_goes_to_its_sites_satellite(self):
+        from aioesphomeapi import VoiceAssistantTimerEventType
+
+        from timer import Timer
+
+        paris_esp, charras_esp = MagicMock(), MagicMock()
+        self.server.devices = {"paris": paris_esp, "charras": charras_esp}
+        self.server.site = self.charras  # the timer was set in Paris, Charras is served now
+        timer = Timer(id="t1", name=None, total_seconds=60, fire_at=0)
+        updated = VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_UPDATED
+        await self.server._handle_timer_event(self.paris, updated, timer)
+        paris_esp.send_voice_assistant_timer_event.assert_called_once()
+        charras_esp.send_voice_assistant_timer_event.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

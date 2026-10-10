@@ -26,6 +26,10 @@ def is_trusted_client(remote: str | None) -> bool:
     return address.is_loopback or address in _TAILNET
 
 
+def _json_error(error: type[web.HTTPException], message: str) -> web.HTTPException:
+    return error(text=json.dumps({"error": message}), content_type="application/json")
+
+
 @web.middleware
 async def lan_sees_only_speaker_paths(request, handler):
     if request.path.startswith(_LAN_PATHS) or is_trusted_client(request.remote):
@@ -67,6 +71,7 @@ class ExchangeLog:
         tool_calls=None,
         conversation_id=None,
         audio=None,
+        site=None,
     ):
         entry = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -79,6 +84,7 @@ class ExchangeLog:
             "tool_calls": tool_calls or [],
             "conversation_id": conversation_id,
             "audio": audio,
+            "site": site,
         }
         self.entries.append(entry)
         if len(self.entries) > self.max_entries:
@@ -89,6 +95,22 @@ class ExchangeLog:
 def setup_routes(app, server):
     """Register web UI routes on an aiohttp app."""
     app.middlewares.append(lan_sees_only_speaker_paths)
+
+    async def read_text(request) -> str:
+        """The prompt of a text request; the request then serves the site it names, if any: {"text": …, "site": "charras"}."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {"text": (await request.text()).strip()}
+        text = body.get("text", "")
+        if not text:
+            raise _json_error(web.HTTPBadRequest, "missing 'text' field")
+        if body.get("site"):
+            site = server.site_named(body["site"])
+            if not site:
+                raise _json_error(web.HTTPNotFound, f"unknown site {body['site']}")
+            server.site = site  # for this request only: a conversation at another site goes on undisturbed
+        return text
 
     async def handle_web_ui(request):
         return web.Response(text=(STATIC_DIR / "index.html").read_text(), content_type="text/html")
@@ -112,14 +134,7 @@ def setup_routes(app, server):
         return web.json_response(server.exchange_log.entries)
 
     async def handle_web_send(request):
-        try:
-            body = await request.json()
-            text = body.get("text", "")
-        except Exception:
-            text = (await request.text()).strip()
-
-        if not text:
-            return web.json_response({"error": "missing 'text' field"}, status=400)
+        text = await read_text(request)
 
         timings = {}
         t0 = time.time()
@@ -134,6 +149,7 @@ def setup_routes(app, server):
                 "[Erreur LLM: pas de réponse]",
                 timings=timings,
                 conversation_id=server.conversation_id,
+                site=server.site.name,
             )
             return web.json_response({"error": "LLM returned no response"}, status=500)
 
@@ -153,6 +169,7 @@ def setup_routes(app, server):
             timings=timings,
             tool_calls=tool_calls,
             conversation_id=server.conversation_id,
+            site=server.site.name,
         )
         return web.json_response(
             {
@@ -165,14 +182,7 @@ def setup_routes(app, server):
         )
 
     async def handle_test_prompt(request):
-        try:
-            body = await request.json()
-            text = body.get("text", "")
-        except Exception:
-            text = (await request.text()).strip()
-
-        if not text:
-            return web.json_response({"error": "missing 'text' field"}, status=400)
+        text = await read_text(request)
 
         logger.info(f'[TEST] Input: "{text}"')
         response_text = await server.process_with_llm(None, text)
@@ -183,25 +193,21 @@ def setup_routes(app, server):
                 text,
                 "[Erreur LLM: pas de réponse]",
                 conversation_id=server.conversation_id,
+                site=server.site.name,
             )
             return web.json_response({"error": "LLM returned no response"}, status=500)
 
         tts_url = await server.text_to_speech_file(text=response_text)
         result = {"input": text, "response": response_text, "tts_url": tts_url}
         logger.info(f"[TEST] Result: {json.dumps(result, ensure_ascii=False)}")
-        server.exchange_log.add("web", text, text, response_text, tts_url, conversation_id=server.conversation_id)
+        server.exchange_log.add(
+            "web", text, text, response_text, tts_url, conversation_id=server.conversation_id, site=server.site.name
+        )
         return web.json_response(result)
 
     async def handle_dry_run(request):
         """LLM-only endpoint: produces tool calls without executing them."""
-        try:
-            body = await request.json()
-            text = body.get("text", "")
-        except Exception:
-            text = (await request.text()).strip()
-
-        if not text:
-            return web.json_response({"error": "missing 'text' field"}, status=400)
+        text = await read_text(request)
 
         server._last_tool_calls = []
         response_text = await server.process_with_llm(None, text, dry_run=True)
@@ -238,7 +244,17 @@ def setup_routes(app, server):
 
         stt_ready = server.stt is not None and server.stt.model is not None
         tts_ready = server.tts is not None and server.tts.engine is not None
-        ha_ready = server.ha_client is not None
+        sites = {
+            site.label: {
+                "ha": site.ha_client is not None,
+                "entities": len(site.ha_client.entities) if site.ha_client else 0,
+                "esp": site.name in server.devices,
+                "timers": len(site.timer_manager.get_timers()),
+            }
+            for site in server.sites
+        }
+        # One home reachable is a working server: the other may be closed for the season
+        ha_ready = any(home["ha"] for home in sites.values())
 
         is_cloud = bool(LLM_API_KEY)
         llm_ready = bool(LLM_MODEL) if is_cloud else bool(LLM_URL)
@@ -254,11 +270,11 @@ def setup_routes(app, server):
             },
             "ha": {
                 "ready": ha_ready,
-                "entities": len(server.ha_client.entities) if ha_ready else 0,
+                "entities": sum(home["entities"] for home in sites.values()),
             },
             "esp": {
-                "connected": server.current_device is not None,
-                "device": server.current_device,
+                "connected": bool(server.devices),
+                "device": ", ".join(site.esp_host for site in server.sites if site.name in server.devices) or None,
                 "count": len(server.devices),
             },
             "calendar": {"ready": server.calendar_client is not None},
@@ -269,7 +285,8 @@ def setup_routes(app, server):
         body = {
             "status": status,
             "components": components,
-            "timers": len(server.timer_manager.get_timers()),
+            "timers": sum(home["timers"] for home in sites.values()),
+            "sites": sites,
         }
         return web.json_response(body, status=200 if required_ok else 503)
 

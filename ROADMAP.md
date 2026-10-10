@@ -66,9 +66,6 @@ Today Parakeet turns audio into text and every voice cue is lost there, so voice
 
 ## Infrastructure
 
-### Several sites from one server
-Since 2026-10-10 the single `voice-assistant.service` on charras serves the Paris satellite (home-infra `charras/voice-paris`), and Charras's satellite is unplugged. Serving both from one instance means routing each satellite to its own Home Assistant, TTS base URL, screen and Spotify speaker, instead of one global configuration per process. Running two instances does not fit: the STT/TTS models would take ~4 GB twice beside `gemma4:12b`.
-
 ### Re-evaluate the small-model workarounds
 The text tool-call fallback parser, the French-verb fallback and generic names were written for Qwen 3 4B. On charras with `gemma4:12b`, the text fallback never fired in the journal (32 voice requests in October, plus web tests). Once a few hundred requests have gone through with no `Function call (text fallback)` line, remove the parser. Generic names stay: they also drive group resolution and the shutter/roof-window split.
 
