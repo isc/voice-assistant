@@ -260,11 +260,7 @@ class HAClient:
 
     def _area_exists(self, norm_room: str) -> bool:
         """Whether HA knows this area, using the same loose matching as the filter."""
-        return any(
-            norm_room in normalize(area) or normalize(area) in norm_room
-            for area in self.areas.values()
-            if area
-        )
+        return any(norm_room in normalize(area) or normalize(area) in norm_room for area in self.areas.values() if area)
 
     def _filter_by_cover_kind(self, entity_ids: list[str], kind: Optional[str]) -> list[str]:
         """Keep only covers of the requested kind (volet / fenetre)."""
@@ -275,11 +271,7 @@ class HAClient:
         # distinction — keep everything rather than resolving to nothing.
         if not any(cover_kind(self.entities[e]) for e in covers):
             return entity_ids
-        return [
-            e
-            for e in entity_ids
-            if self.entities[e]["domain"] != "cover" or cover_kind(self.entities[e]) == kind
-        ]
+        return [e for e in entity_ids if self.entities[e]["domain"] != "cover" or cover_kind(self.entities[e]) == kind]
 
     def resolve_all_entities(
         self, name: str, room: str | None = None, domain_hints: list[str] | None = None
@@ -533,6 +525,16 @@ class HAClient:
             ): f"Température réglée à {kwargs.get('temperature', '?')} degrés",
             ("media_player", "turn_on"): f"{display_name} allumé",
             ("media_player", "turn_off"): f"{display_name} éteint",
+            ("media_player", "play_media"): f"Lecture sur {display_name}",
+            ("media_player", "media_stop"): f"{display_name} arrêté",
+            ("media_player", "media_pause"): f"{display_name} en pause",
+            ("media_player", "media_play"): f"Lecture sur {display_name}",
+            (
+                "media_player",
+                "volume_set",
+            ): f"Volume à {round(kwargs.get('volume_level', 0) * 100)} pour cent",
+            ("media_player", "volume_up"): "Plus fort",
+            ("media_player", "volume_down"): "Moins fort",
         }
         return responses.get((domain, service), "C'est fait")
 

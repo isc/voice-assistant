@@ -344,9 +344,7 @@ class TestNoCrossRoomFallback(unittest.TestCase):
         del self.client.entities["cover.volet_zoe"]
 
     def test_existing_room_without_the_device_resolves_to_nothing(self):
-        eid = self.client.resolve_entity(
-            "Volet Chambre de Zoé", room="Chambre Zoé", domain_hints=["cover"]
-        )
+        eid = self.client.resolve_entity("Volet Chambre de Zoé", room="Chambre Zoé", domain_hints=["cover"])
         self.assertIsNone(eid)
 
     def test_does_not_actuate_a_neighbouring_room(self):
@@ -486,6 +484,15 @@ class TestParseTextToolCall(unittest.TestCase):
         self.assertEqual(fn, "turn_off")
         self.assertEqual(args["entity"], "appliques salon")
 
+    def test_volume_phrase_with_history(self):
+        self.assertEqual(parse_text_tool_call("Plus fort !", True), ("change_volume", {"direction": "up"}))
+        self.assertEqual(parse_text_tool_call("baisse le son", True), ("change_volume", {"direction": "down"}))
+
+    def test_reply_mentioning_volume_is_not_a_command(self):
+        fn, _ = parse_text_tool_call("Je ne peux pas parler plus fort, désolé.", True)
+        self.assertIsNone(fn)
+
+
     def test_french_verb_without_history(self):
         fn, args = parse_text_tool_call("Éteins les appliques salon.", False)
         self.assertIsNone(fn)
@@ -502,6 +509,23 @@ class TestParseTextToolCall(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Tests: format_state_for_speech
 # ---------------------------------------------------------------------------
+
+
+class TestResolveStation(unittest.TestCase):
+    def test_names_and_aliases(self):
+        from voice_server import _resolve_station
+
+        self.assertEqual(_resolve_station("France Inter")[0], "France Inter")
+        self.assertEqual(_resolve_station("Rire & Chansons")[0], "Rire et Chansons")
+        self.assertEqual(_resolve_station("la radio RTL")[0], "RTL")
+        self.assertEqual(_resolve_station("France Bleu")[0], "ici Paris")
+        self.assertEqual(_resolve_station("france inter sur FM")[0], "France Inter")
+
+    def test_unknown_or_ambiguous(self):
+        from voice_server import _resolve_station
+
+        for name in ("", "la radio", "musique classique", "Radio Nova"):
+            self.assertIsNone(_resolve_station(name), name)
 
 
 class TestFormatState(unittest.TestCase):
