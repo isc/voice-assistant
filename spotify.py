@@ -13,15 +13,16 @@ Songs come from go-librespot itself.
 """
 
 import asyncio
+import functools
 import logging
 import os
 import time
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import aiohttp
 from aiohttp import web
 
-from ha_client import normalize
+from ha_client import compact, normalize
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,11 @@ _FRAME = 4
 _BYTES_PER_SECOND = 44100 * _FRAME
 _TICK = 0.05
 _CHUNK = int(_BYTES_PER_SECOND * _TICK) // _FRAME * _FRAME
-# Music read while nobody listens this long gets paused: the speaker was stopped
-# some other way, and the account would otherwise stay "playing" on this device
-_IDLE_PAUSE = 15.0
+# The encoder outlives its last listener this long: a speaker reconnecting keeps it
+_ENCODER_LINGER = 3.0
+# Music read while nobody listens this long gets paused: its speaker moved to a radio,
+# was stopped, here or from elsewhere, and the account would stay "playing" on this device
+_IDLE_PAUSE = 5.0
 # A listener that has received nothing for this long was dropped as too slow
 _LISTENER_TIMEOUT = 5.0
 
@@ -52,6 +55,7 @@ class SpotifyStream:
         self.on_idle = on_idle
         self.listeners: set[asyncio.Queue] = set()
         self.joins = 0  # listeners that ever joined: tells a new connection from an old one
+        self._joined = asyncio.Condition()
         self._fd: Optional[int] = None
         self._pending = b""  # bytes of an incomplete frame, kept for the next read
         self._eof_ticks = 0
@@ -61,7 +65,7 @@ class SpotifyStream:
         """Pump PCM from the FIFO into the encoder at real-time pace, forever."""
         loop = asyncio.get_running_loop()
         deadline = loop.time()
-        unheard = 0.0
+        alone = unheard = 0.0
         while True:
             deadline += _TICK
             delay = deadline - loop.time()
@@ -71,10 +75,12 @@ class SpotifyStream:
                 deadline = loop.time()  # the event loop stalled: resync rather than burst
             pcm = self._read()
             if self.listeners:
-                unheard = 0.0
+                alone = unheard = 0.0
                 await self._encode(pcm.ljust(_CHUNK, b"\0"))
                 continue
-            await self._stop_encoder()
+            alone += _TICK
+            if self._encoder and alone >= _ENCODER_LINGER:
+                self._stop_encoder()
             unheard = unheard + _TICK if pcm else 0.0
             if unheard >= _IDLE_PAUSE and self.on_idle:
                 logger.info("Spotify: playing to nobody, pausing")
@@ -143,24 +149,19 @@ class SpotifyStream:
                 except asyncio.QueueFull:
                     self.listeners.discard(queue)  # too slow: its handler times out and closes
 
-    async def _stop_encoder(self) -> None:
-        if self._encoder is None:
-            return
-        encoder, self._encoder = self._encoder, None
-        encoder.stdin.close()
-        try:
-            await asyncio.wait_for(encoder.wait(), 2)
-        except TimeoutError:
-            encoder.kill()
+    def _stop_encoder(self) -> None:
+        self._encoder.stdin.close()  # ffmpeg flushes and exits; _fan_out ends with it
+        self._encoder = None
         logger.info("Spotify: encoder stopped (no listener)")
 
     async def wait_for_join(self, joins_before: int, timeout: float) -> bool:
         """Wait until a listener connects after `joins_before` was read from self.joins."""
-        loop = asyncio.get_running_loop()
-        end = loop.time() + timeout
-        while self.joins == joins_before and loop.time() < end:
-            await asyncio.sleep(0.1)
-        return self.joins != joins_before
+        async with self._joined:
+            try:
+                await asyncio.wait_for(self._joined.wait_for(lambda: self.joins != joins_before), timeout)
+            except TimeoutError:
+                return False
+        return True
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         """GET /spotify/stream.mp3: the endless stream."""
@@ -170,7 +171,9 @@ class SpotifyStream:
             return response
         queue: asyncio.Queue = asyncio.Queue(maxsize=256)
         self.listeners.add(queue)
-        self.joins += 1
+        async with self._joined:
+            self.joins += 1
+            self._joined.notify_all()
         logger.info(f"Spotify: listener {request.remote} joined ({len(self.listeners)} listening)")
         try:
             while True:
@@ -183,18 +186,19 @@ class SpotifyStream:
         return response
 
 
-def _artists(item: dict) -> str:
-    return ", ".join(a["name"] for a in item.get("artists", [])[:2])
+def _artists(names: list[str]) -> str:
+    return ", ".join(names[:2])
 
 
 def _describe(kind: str, item: dict) -> str:
     """How the LLM is told what is playing."""
     if kind == "artist":
         return item["name"]
+    artists = _artists([a["name"] for a in item.get("artists", [])])
     if kind == "track":
-        return f"« {item['name']} » de {_artists(item)}"
+        return f"« {item['name']} » de {artists}"
     if kind == "album":
-        return f"l'album « {item['name']} » de {_artists(item)}"
+        return f"l'album « {item['name']} » de {artists}"
     return f"la playlist « {item['name']} »"
 
 
@@ -203,54 +207,73 @@ _PLAYLIST_FILLER = {"playlist", "ma", "mon", "mes", "notre", "nos"}
 
 def match_playlist(playlists: list[dict], query: str) -> Optional[dict]:
     """Find one of the user's playlists by spoken name ("ma playlist du matin" → "Matin")."""
-    key = " ".join(w for w in normalize(query).split() if w not in _PLAYLIST_FILLER)
+    key = compact(" ".join(w for w in normalize(query).split() if w not in _PLAYLIST_FILLER))
     if not key:
         return None
-    names = [(normalize(p["name"]), p) for p in playlists]
-    for name, playlist in names:
-        if name == key:
-            return playlist
-    matches = [p for name, p in names if name and (key in name or name in key)]
-    return matches[0] if matches else None
-
-
-class SpotifyNotConnected(Exception):
-    """go-librespot runs but has no Spotify session (not paired with an account yet)."""
+    names = [(compact(p["name"]), p) for p in playlists]
+    exact = next((p for name, p in names if name == key), None)
+    return exact or next((p for name, p in names if name and (key in name or name in key)), None)
 
 
 class SpotifyError(Exception):
-    """A Web API failure, described without the request (its headers carry the token)."""
+    """Spotify or go-librespot failed. The message never quotes a request: its headers carry tokens."""
+
+
+class SpotifyNotConnected(SpotifyError):
+    """go-librespot runs but has no Spotify session (not paired with an account yet)."""
+
+
+# music_control actions → (go-librespot endpoint, what the LLM is told)
+CONTROLS = {
+    "pause": ("pause", "Musique en pause"),
+    "resume": ("resume", "Lecture reprise"),
+    "next": ("next", "Titre suivant"),
+    "previous": ("prev", "Titre précédent"),
+}
 
 
 class Spotify:
     """go-librespot's API (playback, library) plus Web API search."""
 
-    def __init__(self, base_url: str = LIBRESPOT_URL):
-        self.base_url = base_url
-        self.stream = SpotifyStream(on_idle=self.pause)
+    def __init__(self):
+        self.stream = SpotifyStream(on_idle=functools.partial(self.control, "pause"))
         self._session: Optional[aiohttp.ClientSession] = None
         self._app_token = ""
         self._app_token_expiry = 0.0
 
     def _http(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
+        if self._session is None:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
         return self._session
 
-    async def _api(self, method: str, path: str, **kwargs):
-        """Call go-librespot. Returns the JSON body, None when there is none."""
-        async with self._http().request(method, self.base_url + path, **kwargs) as resp:
-            resp.raise_for_status()
-            if resp.status == 204:
-                raise SpotifyNotConnected
-            return await resp.json() if resp.content_type == "application/json" else None
+    async def close(self) -> None:
+        if self._session:
+            await self._session.close()
+
+    async def _request(self, method: str, url: str, **kwargs) -> tuple[int, Any]:
+        """One HTTP call: (status, JSON body or None). Transport failures become SpotifyError."""
+        try:
+            async with self._http().request(method, url, **kwargs) as resp:
+                body = await resp.json() if resp.content_type == "application/json" else None
+                return resp.status, body
+        except (aiohttp.ClientError, TimeoutError) as e:
+            raise SpotifyError(f"{method} {url}: {type(e).__name__}") from None
+
+    async def _api(self, method: str, path: str, **kwargs) -> Any:
+        """Call go-librespot; its 204 means no Spotify session."""
+        status, body = await self._request(method, LIBRESPOT_URL + path, **kwargs)
+        if status == 204:
+            raise SpotifyNotConnected("go-librespot has no Spotify session")
+        if status >= 400:
+            raise SpotifyError(f"go-librespot {path}: HTTP {status}")
+        return body
 
     async def reachable(self) -> bool:
         try:
-            await self._api("GET", "/status")
+            await self.status()
         except SpotifyNotConnected:
             pass
-        except (aiohttp.ClientError, TimeoutError):
+        except SpotifyError:
             return False
         return True
 
@@ -262,17 +285,19 @@ class Spotify:
         await self._api("POST", "/player/shuffle_context", json={"shuffle_context": shuffle})
         await self._api("POST", "/player/play", json={"uri": uri})
 
-    async def pause(self) -> None:
-        await self._api("POST", "/player/pause")
+    async def control(self, action: str) -> str:
+        """Run a CONTROLS action; returns what the LLM is told."""
+        endpoint, label = CONTROLS[action]
+        await self._api("POST", f"/player/{endpoint}")
+        return label
 
-    async def resume(self) -> None:
-        await self._api("POST", "/player/resume")
-
-    async def next(self) -> None:
-        await self._api("POST", "/player/next")
-
-    async def previous(self) -> None:
-        await self._api("POST", "/player/prev")
+    async def now_playing(self) -> str:
+        status = await self.status()
+        track = status.get("track")
+        if not track or status.get("stopped"):
+            return "Rien en cours sur Spotify"
+        paused = " (en pause)" if status.get("paused") else ""
+        return f"En cours sur Spotify : « {track['name']} » de {_artists(track['artist_names'])}{paused}"
 
     async def _search_token(self) -> str:
         if not CLIENT_ID or not CLIENT_SECRET:
@@ -281,10 +306,9 @@ class Spotify:
             return self._app_token
         auth = aiohttp.BasicAuth(CLIENT_ID, CLIENT_SECRET)
         data = {"grant_type": "client_credentials"}
-        async with self._http().post("https://accounts.spotify.com/api/token", data=data, auth=auth) as resp:
-            if resp.status != 200:
-                raise SpotifyError(f"app token: HTTP {resp.status}")
-            body = await resp.json()
+        status, body = await self._request("POST", "https://accounts.spotify.com/api/token", data=data, auth=auth)
+        if status != 200:
+            raise SpotifyError(f"app token: HTTP {status}")
         self._app_token = body["access_token"]
         self._app_token_expiry = time.monotonic() + body["expires_in"] - 60
         return self._app_token
@@ -293,13 +317,12 @@ class Spotify:
         # An app token has no user to take the market from
         params = {"q": query, "type": kind, "limit": 5, "market": "FR"}
         headers = {"Authorization": f"Bearer {await self._search_token()}"}
-        async with self._http().get(f"{WEB_API}/search", params=params, headers=headers) as resp:
-            if resp.status != 200:
-                raise SpotifyError(f"search: HTTP {resp.status}")
-            body = await resp.json()
+        status, body = await self._request("GET", f"{WEB_API}/search", params=params, headers=headers)
+        if status != 200:
+            raise SpotifyError(f"search: HTTP {status}")
         return [item for item in body[f"{kind}s"]["items"] if item]  # playlist results hold nulls
 
-    async def find(self, query: str, kind: str) -> Optional[tuple[str, str]]:
+    async def find(self, query: str, kind: Optional[str]) -> Optional[tuple[str, str]]:
         """Resolve a spoken request to (context URI, description), or None if nothing matches.
 
         kind: artist, track, album, playlist (the user's own first, then search) or liked."""
@@ -317,6 +340,6 @@ class Spotify:
         if not items:
             return None
         # Spotify ranks by popularity: prefer an exact name match among the top results
-        key = normalize(query)
-        item = next((i for i in items if normalize(i["name"]) == key), items[0])
+        key = compact(query)
+        item = next((i for i in items if compact(i["name"]) == key), items[0])
         return item["uri"], _describe(kind, item)

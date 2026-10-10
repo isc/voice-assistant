@@ -40,6 +40,11 @@ def normalize(text: str) -> str:
     return " ".join(words)
 
 
+def compact(text: str) -> str:
+    """normalize() without spaces or punctuation, for names said many ways ("Rire & Chansons")."""
+    return "".join(c for c in normalize(text) if c.isalnum())
+
+
 # Sub-kinds inside the `cover` domain. A house can have roller shutters and roof
 # windows side by side — both are HA covers, but they are not interchangeable
 # (opening a skylight when asked for a shutter lets the rain in).
