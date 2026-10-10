@@ -13,8 +13,8 @@ Usage:
 import asyncio
 import unittest
 
-from ha_client import HAClient, normalize
-from llm import parse_text_tool_call
+from ha_client import HAClient, cover_kind, normalize
+from llm import claims_completed_action, parse_text_tool_call
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -110,6 +110,7 @@ def make_client() -> HAClient:
     client.base_url = "http://fake"
     client.token = "fake"
     client.entities = dict(FAKE_ENTITIES)
+    client.entity_areas = {}
     client.areas = {
         "living_room": "Living Room",
         "chambre_charlie": "Chambre Charlie",
@@ -229,6 +230,196 @@ class TestResolveAllEntities(unittest.TestCase):
         }
         eids = self.client.resolve_all_entities("lumière", room="Living Room")
         self.assertNotIn("light.orphan", eids)
+
+
+# ---------------------------------------------------------------------------
+# Tests: cover sub-kinds (roller shutters vs roof windows, both `cover`)
+# ---------------------------------------------------------------------------
+
+
+class TestCoverKinds(unittest.TestCase):
+    def setUp(self):
+        self.client = make_client()
+        # A room with both a roof window and its shutter, as Velux exposes them:
+        # device_class set on the window, absent on the shutter.
+        self.client.entities["cover.velux_window_cuisine"] = {
+            "friendly_name": "Fenêtre Cuisine",
+            "domain": "cover",
+            "state": "closed",
+            "attributes": {"device_class": "window"},
+            "area_id": "cuisine",
+            "area_name": "Cuisine",
+        }
+        self.client.entities["cover.velux_shutter_cuisine"] = {
+            "friendly_name": "Volet Cuisine",
+            "domain": "cover",
+            "state": "closed",
+            "attributes": {},
+            "area_id": "cuisine",
+            "area_name": "Cuisine",
+        }
+        self.client.areas["cuisine"] = "Cuisine"
+
+    def test_device_class_wins_over_name(self):
+        """An unhelpfully named cover is still classified by its device_class."""
+        self.assertEqual(
+            cover_kind({"friendly_name": "Toiture 3", "attributes": {"device_class": "window"}}),
+            "fenetre",
+        )
+        self.assertEqual(
+            cover_kind({"friendly_name": "Toiture 3", "attributes": {"device_class": "shutter"}}),
+            "volet",
+        )
+
+    def test_name_fallback_when_no_device_class(self):
+        self.assertEqual(cover_kind({"friendly_name": "Volet Cuisine", "attributes": {}}), "volet")
+        self.assertEqual(cover_kind({"friendly_name": "Fenêtre Cuisine", "attributes": {}}), "fenetre")
+        self.assertIsNone(cover_kind({"friendly_name": "Portail", "attributes": {}}))
+
+    def test_volet_does_not_match_window(self):
+        eids = self.client.resolve_all_entities("volets", room="Cuisine")
+        self.assertEqual(eids, ["cover.velux_shutter_cuisine"])
+
+    def test_fenetre_does_not_match_shutter(self):
+        eids = self.client.resolve_all_entities("fenêtres", room="Cuisine")
+        self.assertEqual(eids, ["cover.velux_window_cuisine"])
+
+    def test_resolve_entity_scoped_by_kind(self):
+        eid = self.client.resolve_entity("volet", room="Cuisine", domain_hints=["cover"])
+        self.assertEqual(eid, "cover.velux_shutter_cuisine")
+
+    def test_undistinguished_house_keeps_all_covers(self):
+        """A house whose covers carry no kind at all must behave as before."""
+        eids = self.client.resolve_all_entities("volet", room="Chambre invités")
+        self.assertEqual(eids, ["cover.volet_invites"])
+
+    def test_prompt_lists_windows_apart(self):
+        prompt = self.client.get_entity_list_for_prompt()
+        self.assertIn("fenêtres: Fenêtre Cuisine", prompt)
+        self.assertIn("volets: Volet Cuisine", prompt)
+
+
+# ---------------------------------------------------------------------------
+# Tests: detecting an action claimed without any function call
+# ---------------------------------------------------------------------------
+
+
+class TestActionClaimDetection(unittest.TestCase):
+    def test_claims(self):
+        for text in [
+            "C'est fait, j'ai ouvert toutes les fenêtres à l'exception de celle de Charlie.",
+            "C'est entendu, je ferme tous les volets sauf celui de la chambre de Charlie.",
+            "Voilà, la lumière du salon est allumée.",
+            "J'ai bien réglé le thermostat à 20 degrés.",
+            "J'ai éteint les lumières.",
+        ]:
+            self.assertTrue(claims_completed_action(text), text)
+
+    def test_does_not_flag_state_reports(self):
+        """Reading a state out loud is not claiming to have changed it."""
+        for text in [
+            "Oui, le volet de la salle de jeux est fermé.",
+            "Non, les volets de la cuisine sont actuellement fermés.",
+            "L'eau de la piscine est à 29,8 degrés.",
+            "Il est actuellement 20h32.",
+            "Lundi 27 juillet, tu as la livraison du piano.",
+            "Je n'ai pas accès à cette information.",
+        ]:
+            self.assertFalse(claims_completed_action(text), text)
+
+    def test_empty(self):
+        self.assertFalse(claims_completed_action(""))
+        self.assertFalse(claims_completed_action(None))
+
+
+# ---------------------------------------------------------------------------
+# Tests: a named room must never leak into another room
+# ---------------------------------------------------------------------------
+
+
+class TestNoCrossRoomFallback(unittest.TestCase):
+    def setUp(self):
+        self.client = make_client()
+        # Mirror Charras: Zoé's room has no cover at all, Charlie's next door does.
+        del self.client.entities["cover.volet_zoe"]
+
+    def test_existing_room_without_the_device_resolves_to_nothing(self):
+        eid = self.client.resolve_entity("Volet Chambre de Zoé", room="Chambre Zoé", domain_hints=["cover"])
+        self.assertIsNone(eid)
+
+    def test_does_not_actuate_a_neighbouring_room(self):
+        eids = self.client.resolve_all_entities("volet", room="Chambre Zoé", domain_hints=["cover"])
+        self.assertEqual(eids, [])
+        self.assertNotIn("cover.volet_charlie", eids)
+
+    def test_unknown_room_still_falls_back(self):
+        """The rescue path stays: HA has no 'Garage' area, so the filter is dropped."""
+        eid = self.client.resolve_entity("Appliques salon", room="Garage")
+        self.assertEqual(eid, "light.appliques_salon")
+
+
+# ---------------------------------------------------------------------------
+# Tests: sensor search (read-only, kept out of the system prompt)
+# ---------------------------------------------------------------------------
+
+
+def sensor_state(entity_id, name, state, unit=None):
+    attrs = {"friendly_name": name}
+    if unit:
+        attrs["unit_of_measurement"] = unit
+    return {"entity_id": entity_id, "state": state, "attributes": attrs}
+
+
+FAKE_SENSOR_STATES = [
+    sensor_state("sensor.piscine_water_temperature", "Piscine Water Temperature", "29.8", "°C"),
+    sensor_state("sensor.piscine_air_temperature", "Piscine Air Temperature", "23", "°C"),
+    sensor_state("sensor.piscine_ph_level", "Piscine pH Level", "7.2"),
+    sensor_state("sensor.piscine_pump_state", "Piscine Pump State", "unknown"),
+    sensor_state("sensor.piscine_cover_state", "Piscine Pool Cover State", "unavailable"),
+    sensor_state("sensor.chaudiere_temperature", "Chaudière température", "51.4", "°C"),
+    # Not a sensor: must never surface, whatever it is called.
+    {
+        "entity_id": "light.piscine",
+        "state": "on",
+        "attributes": {"friendly_name": "Lumière piscine"},
+    },
+]
+
+
+class TestSensorSearch(unittest.TestCase):
+    def setUp(self):
+        self.client = make_client()
+
+    def search(self, query, limit=15):
+        return self.client.match_sensors(FAKE_SENSOR_STATES, query, limit)
+
+    def test_finds_by_keyword(self):
+        out = self.search("piscine")
+        self.assertIn("Piscine Water Temperature: 29.8 °C", out)
+        self.assertIn("Piscine pH Level: 7.2", out)
+
+    def test_skips_unknown_and_unavailable(self):
+        out = self.search("piscine")
+        self.assertNotIn("Pump State", out)
+        self.assertNotIn("Pool Cover State", out)
+
+    def test_ignores_non_sensor_domains(self):
+        self.assertNotIn("Lumière piscine", self.search("piscine"))
+
+    def test_more_specific_query_ranks_first(self):
+        """Both words matching beats one — 'piscine ph' must not lead with a temperature."""
+        self.assertTrue(self.search("piscine ph").startswith("Piscine pH Level"))
+
+    def test_accent_and_case_insensitive(self):
+        self.assertIn("Chaudière température: 51.4 °C", self.search("CHAUDIERE"))
+
+    def test_no_match(self):
+        self.assertIn("Aucun capteur trouvé", self.search("tracteur"))
+
+    def test_truncates_and_says_so(self):
+        out = self.search("piscine", limit=2)
+        self.assertEqual(len(out.split("\n")), 3)
+        self.assertIn("1 autres capteurs non affichés", out)
 
 
 # ---------------------------------------------------------------------------

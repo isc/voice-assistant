@@ -175,9 +175,16 @@ This document tracks all architecture and technology decisions made for this pro
 - **Decision**: No prompt injection. The LLM calls `query_calendar` on demand, which returns fresh data directly from the Google API.
 - **Trade-off**: Every calendar question costs one tool round-trip (~1.5s), but the data is always fresh and the prompt stays lean.
 
-## 2026-04-15: Web radio playback
+## 2026-10-10: ESP on another site's network
 
-### AD-034: Web radio playback, direct-to-ESP by default, HA fallback by room
+### AD-034: `TTS_BASE_URL` overrides the announced TTS URL
+- **Context**: Testing whether one GPU server (Charras) can serve an ESP at another site (Paris). The server connects out to the ESP, but the ESP downloads each reply WAV from the URL the server announces, built from the server's LAN address. Both sites use the same `192.168.1.0/24`, so that address names a different machine on the ESP's side, and no routing can tell the two apart.
+- **Decision**: An optional `TTS_BASE_URL` env var replaces the computed URL, pointing at a relay on the ESP's LAN that forwards `/tts/` to the server. The native API needs no change: `ESP_HOST`/`ESP_PORT` already accept a forwarded port, and audio travels over that TCP connection (no UDP).
+- **Trade-off**: One more setting, empty by default, so the single-LAN setup is unchanged. Rejected: site-to-site routing (impossible with overlapping subnets) and a second server instance per site (doubles STT/TTS VRAM beside the LLM).
+
+## 2026-10-10: Web radio playback
+
+### AD-035: Web radio playback, direct-to-ESP by default, HA fallback by room
 - **Context**: User wants to play French web radios ("mets France Inter") with volume follow-ups ("plus fort", "moins fort"). The ESP32-S3 running `speaker.media_player` can decode MP3/FLAC/OPUS/WAV HTTP streams natively — no HA round-trip needed if the target is the ESP itself.
 - **Decision**: Four tools — `play_radio(station, room)`, `stop_media(room)`, `set_volume(level, room)`, `change_volume(direction, room)`. Station names are fuzzy-resolved against a hardcoded `RADIO_STATIONS` dict in `voice_server.py` (18 French stations: Radio France family, RTL, Europe 1, NRJ, Skyrock, TSF Jazz, etc.).
   - Target resolution: `room` specified + matches an HA `media_player` entity → route via HA. Otherwise → the ESP that received the command, via `aioesphomeapi.APIClient.media_player_command()` (with `announcement=False` so the stream uses the default pipeline, not the TTS ducking pipeline).

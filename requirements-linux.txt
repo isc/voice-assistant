@@ -1,0 +1,8 @@
+# Linux / dedicated server: base deps + the ONNX STT backend (onnx-asr).
+# STT runs via onnx-asr (Parakeet v3); set STT_BACKEND=onnx.
+# The LLM is served separately by Ollama (OpenAI-compatible endpoint).
+# pip install -r requirements-linux.txt
+#   espeak-ng must be installed system-wide for misaki:  apt install espeak-ng
+-r requirements.txt
+onnx-asr
+huggingface_hub

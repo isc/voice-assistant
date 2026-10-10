@@ -45,6 +45,8 @@ LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")  # e.g. "gpt-5.4-nano" — empty = local llama.cpp
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
+# URL the ESP fetches TTS files from, when it cannot reach this host's own LAN address
+TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "")
 HA_URL = os.environ.get("HA_URL", "")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
@@ -125,9 +127,14 @@ def _format_family_for_prompt(family: list) -> str:
     parts = []
     role_fr = {"parent": "parent", "child": "enfant"}
     for m in family:
-        bday = datetime.date.fromisoformat(m["birth_date"])
-        age = today.year - bday.year - ((today.month, today.day) < (bday.month, bday.day))
-        parts.append(f"{m['name']} ({role_fr.get(m['role'], m['role'])}, {age} ans)")
+        role = role_fr.get(m["role"], m["role"])
+        birth_date = m.get("birth_date")
+        if birth_date:
+            bday = datetime.date.fromisoformat(birth_date)
+            age = today.year - bday.year - ((today.month, today.day) < (bday.month, bday.day))
+            parts.append(f"{m['name']} ({role}, {age} ans)")
+        else:
+            parts.append(f"{m['name']} ({role})")
     return "Membres de la famille: " + ", ".join(parts)
 
 
@@ -168,7 +175,11 @@ class VoiceAssistantServer:
         self.conversation_history = []
         self.conversation_id = None  # Groups exchanges in the same conversation
         self.last_interaction_time = 0
-        self.CONVERSATION_TIMEOUT = 120  # seconds — forget context after 2 min of silence
+        # Forget context after this much silence. Long enough that a typed
+        # follow-up ("et dans la salle de jeux ?") still resolves, short enough
+        # that a wake word much later starts clean. Voice conversations usually
+        # end sooner anyway, via the end_conversation tool.
+        self.CONVERSATION_TIMEOUT = 600  # seconds
 
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word
@@ -185,6 +196,12 @@ class VoiceAssistantServer:
 
         self.exchange_log = ExchangeLog(Path(__file__).parent / "exchanges.json")
         self._last_tool_calls = []
+        # Cap on concurrent tool calls: fast enough for a whole-house command while
+        # staying gentle on the single HomeKit bridge relaying every Velux.
+        self._tool_semaphore = asyncio.Semaphore(4)
+        # Actuation service calls are fired here and drain in the background — held
+        # so the tasks aren't garbage-collected mid-flight, discarded on completion.
+        self._pending_service_calls: set = set()
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -272,7 +289,8 @@ class VoiceAssistantServer:
         logger.info(
             f'Test endpoint: curl -X POST http://{local_ip}:{HTTP_PORT}/test -d \'{{"text": "allume la lumière"}}\''
         )
-        self.http_base_url = f"http://{local_ip}:{HTTP_PORT}/tts/"
+        self.http_base_url = TTS_BASE_URL or f"http://{local_ip}:{HTTP_PORT}/tts/"
+        logger.info(f"TTS URL announced to the ESP: {self.http_base_url}")
 
     # === ESP CONNECTION ===
 
@@ -482,8 +500,10 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.warning(f"TTS announcement error: {e}")
 
-    async def handle_voice_assistant_audio(self, audio_bytes: bytes):
-        """Handle audio received from the ESP with VAD detection"""
+    async def handle_voice_assistant_audio(self, audio_bytes: bytes, _data2: bytes | None = None):
+        """Handle audio received from the ESP with VAD detection.
+
+        aioesphomeapi 45+ passes a second buffer (data2); a single mic stream is enough here."""
         if self.is_recording:
             # Skip early audio in follow-up mode to avoid TTS echo
             if self.skip_audio_until and time.time() < self.skip_audio_until:
@@ -697,6 +717,10 @@ class VoiceAssistantServer:
         if not self.ha_client:
             return "Home Assistant non disponible"
 
+        # Sensors are searched by keyword, not resolved like actionable entities
+        if function_name == "get_sensor":
+            return await self.ha_client.search_sensors(arguments.get("query", ""))
+
         entity_name = arguments.get("entity", "")
         room = arguments.get("room")
 
@@ -738,9 +762,18 @@ class VoiceAssistantServer:
         if function_name == "set_cover_position" and "position" in arguments:
             extra["position"] = arguments["position"]
 
+        # Fire and forget. An HA service call blocks until the HomeKit bridge
+        # acknowledges (~0.5-1.8s/Velux, serialised by the bridge → ~10s for eight),
+        # but a 200 only means HA dispatched the command, not that the shutter
+        # finished moving — the spoken reply ("en cours d'ouverture") is optimistic
+        # either way. So don't make the user wait for acks: schedule the calls and
+        # let them drain while the pipeline moves on to the reply. call_service
+        # swallows and logs its own errors, so a failed background call never raises.
         for entity_id in entity_ids:
             domain = entity_id.split(".")[0]
-            await self.ha_client.call_service(domain, service, entity_id, **extra)
+            task = asyncio.ensure_future(self.ha_client.call_service(domain, service, entity_id, **extra))
+            self._pending_service_calls.add(task)
+            task.add_done_callback(self._pending_service_calls.discard)
 
         if len(entity_ids) > 1:
             whole_house = room and room.lower().strip() in (
@@ -875,9 +908,7 @@ class VoiceAssistantServer:
             media_content_type="music",
         )
 
-    async def _media_command(
-        self, target: tuple[str, str], command: MediaPlayerCommand, ha_service: str
-    ) -> None:
+    async def _media_command(self, target: tuple[str, str], command: MediaPlayerCommand, ha_service: str) -> None:
         """Send a media control command (STOP, VOLUME_UP, VOLUME_DOWN...) to the target."""
         kind, ident = target
         if kind == "esp":
@@ -952,7 +983,12 @@ class VoiceAssistantServer:
 
     async def process_with_llm(self, api: Optional[APIClient], text: str, dry_run: bool = False) -> Optional[str]:
         """LLM via OpenAI-compatible API (local llama.cpp or cloud provider)"""
-        from llm import chat_completion, get_tool_definitions, parse_text_tool_call
+        from llm import (
+            chat_completion,
+            claims_completed_action,
+            get_tool_definitions,
+            parse_text_tool_call,
+        )
 
         logger.info(f'LLM input: "{text}"')
 
@@ -1034,21 +1070,50 @@ class VoiceAssistantServer:
 
         self._last_tool_calls = []
         max_rounds = 3
+        challenged_empty_claim = False
         for round_num in range(max_rounds):
             if "tool_calls" not in message or not message["tool_calls"]:
+                # The model sometimes answers "c'est fait, j'ai ouvert les volets"
+                # having called nothing at all. With no tool call behind it, that
+                # claim is false by construction. Give it one chance to actually
+                # act before the answer reaches the user.
+                claim = (message.get("content") or "").strip()
+                if not self._last_tool_calls and not challenged_empty_claim and claims_completed_action(claim):
+                    challenged_empty_claim = True
+                    logger.warning(f"Action claimed with no function call: {claim!r} — challenging")
+                    messages.append(message)
+                    messages.append(
+                        {
+                            "role": "system",
+                            "content": (
+                                "Tu viens d'affirmer avoir effectué une action alors que tu n'as "
+                                "appelé AUCUNE fonction : rien n'a été fait. Appelle maintenant les "
+                                "fonctions nécessaires. Si la demande n'exige aucune action, réponds "
+                                "sans prétendre avoir agi."
+                            ),
+                        }
+                    )
+                    message = await chat_completion(LLM_URL, LLM_API_KEY, LLM_MODEL, messages, tools=tools)
+                    if not message:
+                        break
+                    continue
                 break
 
-            tool_messages = []
-            for tool_call in message["tool_calls"]:
+            # Run this round's calls concurrently. An HA service call blocks until
+            # the device acknowledges — ~0.5-1.8s for a Velux over HomeKit, vs 14ms
+            # for a state read — so "ferme tous les volets" spent 11 of its 19
+            # seconds waiting on eight of them one after another. The LLM emits the
+            # batch in one go, so the calls are independent by construction.
+            async def run_tool(tool_call):
                 function_name = tool_call["function"]["name"]
                 function_args = json.loads(tool_call["function"]["arguments"])
                 logger.info(f"Function call: {function_name}({function_args})")
                 tc_entry = {"function": function_name, "args": function_args}
                 if dry_run:
-                    result = "OK"
-                    tc_entry["result"] = result
                     logger.info(f"Dry run: {function_name}({function_args})")
-                else:
+                    tc_entry["result"] = "OK"
+                    return tc_entry, "OK"
+                async with self._tool_semaphore:
                     try:
                         result = await self.execute_function(function_name, function_args)
                         logger.info(f"Function result: {result}")
@@ -1057,6 +1122,12 @@ class VoiceAssistantServer:
                         logger.error(f"Function execution error: {e}")
                         result = f"Erreur: {e}"
                         tc_entry["error"] = str(e)
+                return tc_entry, result
+
+            outcomes = await asyncio.gather(*(run_tool(tc) for tc in message["tool_calls"]))
+
+            tool_messages = []
+            for (tc_entry, result), tool_call in zip(outcomes, message["tool_calls"]):
                 self._last_tool_calls.append(tc_entry)
                 tool_messages.append(
                     {
@@ -1118,6 +1189,14 @@ class VoiceAssistantServer:
                 return result
             except Exception as e:
                 logger.warning(f"Failed to execute text tool call: {e}")
+
+        # Last resort: never hand back a claim of an action that never ran. Safe
+        # because we only get here with zero tool calls executed this turn.
+        if not self._last_tool_calls and claims_completed_action(content):
+            logger.error(f"Unbacked action claim survived the challenge: {content!r}")
+            response = "Désolé, je n'ai pas réussi à faire ça."
+            save_to_history(response)
+            return response
 
         logger.info(f'LLM response: "{content}"')
         if content:
@@ -1291,6 +1370,11 @@ async def main():
         logger.error(f"Fatal error: {e}")
         sys.exit(1)
     finally:
+        # Let any fire-and-forget service calls reach HA before we tear down the
+        # session — otherwise a restart right after "ferme tout" drops commands.
+        if server._pending_service_calls:
+            logger.info(f"Draining {len(server._pending_service_calls)} pending service calls...")
+            await asyncio.gather(*server._pending_service_calls, return_exceptions=True)
         if server._reconnect_logic:
             await server._reconnect_logic.stop()
         if server.calendar_client:

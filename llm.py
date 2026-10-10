@@ -2,12 +2,19 @@
 
 import json
 import logging
+import os
 import re
+import unicodedata
 from typing import Optional
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+# Reasoning budget for thinking-capable models. Empty = leave the field out.
+# Local models default to "none" (see chat_completion); cloud APIs validate this
+# field strictly, so there it is only sent when explicitly configured.
+REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "")
 
 _TOOL_NAMES = {
     "turn_on",
@@ -17,6 +24,7 @@ _TOOL_NAMES = {
     "set_cover_position",
     "set_temperature",
     "get_state",
+    "get_sensor",
     "set_timer",
     "set_alarm",
     "cancel_timer",
@@ -27,6 +35,26 @@ _TOOL_NAMES = {
     "set_volume",
     "change_volume",
 }
+
+
+# Claims of having carried something out, matched on accent-stripped lowercase.
+# Deliberately about *actions performed*: a state report ("le volet est fermé")
+# must not match.
+_ACTION_CLAIM = re.compile(
+    r"c'est fait|c'est entendu|voila|"
+    r"j'ai (?:bien )?(?:ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont)|"
+    r"\bje (?:ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte)\b"
+)
+
+
+def claims_completed_action(text: str) -> bool:
+    """Whether a reply asserts an action was carried out.
+
+    Only meaningful when the model called no function at all — in that case the
+    claim is false by construction, since nothing was executed.
+    """
+    flat = "".join(c for c in unicodedata.normalize("NFD", (text or "").lower()) if unicodedata.category(c) != "Mn")
+    return bool(_ACTION_CLAIM.search(flat))
 
 
 def get_tool_definitions(ha_client, calendar_client=None) -> list:
@@ -107,7 +135,12 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         calendar_tools = [
             {
                 "name": "query_calendar",
-                "description": "Consulter l'agenda. Chercher des événements par date ou mot-clé.",
+                "description": (
+                    "Consulter l'agenda. Chercher des événements par date ou mot-clé. "
+                    "Dès que la demande couvre une période (« cette semaine », « ce week-end », "
+                    "« en août », « dans les prochains jours »), renseigne OBLIGATOIREMENT end_date : "
+                    "sans elle la recherche ne couvre que la seule journée start_date."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -117,7 +150,11 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
                         },
                         "end_date": {
                             "type": "string",
-                            "description": "Date de fin au format AAAA-MM-JJ. Par défaut: même jour que start_date",
+                            "description": (
+                                "Date de fin au format AAAA-MM-JJ, incluse. Obligatoire pour toute "
+                                "période. Ex. « cette semaine » = aujourd'hui → dimanche qui suit ; "
+                                "« ce week-end » = samedi → dimanche. Par défaut : start_date seule."
+                            ),
                         },
                         "search": {
                             "type": "string",
@@ -268,11 +305,11 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         },
         {
             "name": "open_cover",
-            "description": "Ouvrir un volet ou un store",
+            "description": "Ouvrir un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements distincts : n'agir que sur celui qui est demandé.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom du volet"},
+                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
                     "room": room_param,
                 },
                 "required": ["entity"],
@@ -280,11 +317,11 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
         },
         {
             "name": "close_cover",
-            "description": "Fermer un volet ou un store entièrement",
+            "description": "Fermer entièrement un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements distincts : n'agir que sur celui qui est demandé.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom du volet"},
+                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
                     "room": room_param,
                 },
                 "required": ["entity"],
@@ -296,7 +333,7 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "Nom du volet"},
+                    "entity": {"type": "string", "description": "Nom exact du volet ou de la fenêtre"},
                     "room": room_param,
                     "position": {
                         "type": "integer",
@@ -332,6 +369,31 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
                     "room": room_param,
                 },
                 "required": ["entity"],
+            },
+        },
+        {
+            "name": "get_sensor",
+            "description": (
+                "Consulter les capteurs de mesure de la maison par mot-clé : piscine "
+                "(température de l'eau, pH, chlore, sel), chauffage et chaudière, "
+                "températures intérieures/extérieure, CO2, humidité, consommation "
+                "électrique, batteries. Ces capteurs ne figurent PAS dans la liste "
+                "des appareils ci-dessus — utilise cet outil dès qu'on te demande une "
+                "mesure qui n'y est pas."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "Mots-clés du capteur cherché (ex: « piscine », « piscine ph », "
+                            "« chaudière », « température extérieure »). Rester large : "
+                            "la recherche renvoie tous les capteurs correspondants."
+                        ),
+                    },
+                },
+                "required": ["query"],
             },
         },
         weather_tool,
@@ -436,6 +498,16 @@ async def chat_completion(
         max_tokens_key: max_tokens,
         "temperature": temperature,
     }
+    # Thinking models burn the whole token budget on internal deliberation before
+    # emitting anything: gemma4:12b spent 441 tokens reasoning about "et dans la
+    # salle de jeux ?" and 9.8s, vs 13 tokens and 0.7s with reasoning off. Worse,
+    # it usually hits the cap first, leaving `content` empty and triggering the
+    # length-retry below — which regenerates from scratch with a *bigger* budget
+    # to ruminate in. Nothing here needs a scratchpad: the pipeline is a tool call
+    # or a one-sentence answer. Beware "low" — it thinks anyway, then truncates.
+    effort = REASONING_EFFORT or ("" if api_key else "none")
+    if effort:
+        payload["reasoning_effort"] = effort
     if model:
         payload["model"] = model
     if tools:
@@ -450,22 +522,46 @@ async def chat_completion(
     if tool_names:
         logger.info(f"Tools: {tool_names}")
 
+    # Retry on finish_reason=length: the completion was truncated (often a
+    # reasoning model spending the whole budget on internal thinking). Bump the
+    # token limit and retry rather than returning a truncated/empty message.
+    MAX_TOKEN_CEILING = 2000
+    MAX_LENGTH_RETRIES = 2
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as response:
-                if response.status == 200:
+            for attempt in range(MAX_LENGTH_RETRIES + 1):
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(f"LLM error {response.status}: {error_text}")
+                        return None
+
                     result = await response.json()
                     logger.info(f"LLM raw response: {json.dumps(result, ensure_ascii=False, indent=2)}")
-                    return result["choices"][0]["message"]
-                else:
-                    error_text = await response.text()
-                    logger.error(f"LLM error {response.status}: {error_text}")
-                    return None
+                    choice = result["choices"][0]
+                    finish_reason = choice.get("finish_reason")
+
+                    if finish_reason == "length" and payload[max_tokens_key] < MAX_TOKEN_CEILING:
+                        if attempt < MAX_LENGTH_RETRIES:
+                            new_limit = min(payload[max_tokens_key] * 2, MAX_TOKEN_CEILING)
+                            logger.warning(
+                                f"LLM truncated (finish_reason=length) at {payload[max_tokens_key]} tokens, "
+                                f"retrying with {new_limit}"
+                            )
+                            payload[max_tokens_key] = new_limit
+                            continue
+                        logger.warning(
+                            f"LLM still truncated after {MAX_LENGTH_RETRIES} retries "
+                            f"(max {payload[max_tokens_key]} tokens), returning partial response"
+                        )
+
+                    return choice["message"]
     except Exception as e:
         logger.error(f"LLM error: {e}")
         import traceback

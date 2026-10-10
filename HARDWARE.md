@@ -1,5 +1,26 @@
 # Hardware Upgrade — Dedicated Voice Assistant Server
 
+## Status & deployment plan (June 2026)
+
+**Deployment plan.** The M1 16GB is the owner's personal MacBook (travels Paris ⇄ Charras), not a fixed instance — each fixed site needs its own dedicated server.
+- **Charras first** — server on site for the July–August summer stay; real-world test bench. Charras also needs a fresh Home Assistant install (Velux skylights + Legrand lighting + Magiline pool via community HACS plugin). Idea: co-host HA (Docker/VM) + voice server on the same box → `HA_URL=localhost`, one box, no extra Pi.
+- **Paris in September** (la rentrée) — second server, *only if* Charras validates.
+
+**Availability / pricing reality check (June 2026).** The recommended Zotac Magnus EN275060TC became effectively unbuyable:
+- Barebone: cheap listings sold out; only Fnac left at **~2,900€** (real price was ~1,600€).
+- Windows SKU (`EN275060TC-W`): **~2,760€** — no relief, both SKUs spiked together.
+- DDR5 SO-DIMM surged (AI-driven DRAM shortage): a single 32GB DDR5-5600 SO-DIMM is now **~338€** — the ~80€ estimate further down is stale.
+- Zotac build at current prices ≈ **~3,380€** (2,900 + 338 RAM + 140 SSD). Not worth it.
+
+**Pivot — prebuilt tower with RTX 5060 Ti 16GB.** In stock at Materiel.net / LDLC, shipped <24h, ~**1,700–1,800€** all-in (RAM + SSD + Win11 bundled → dodges the DDR5 surge; wipe to Ubuntu Server). Loses the 2.65L form factor — irrelevant for a closet server. Concrete configs (June 2026, ⚠️ verify the GPU is the **16GB** variant, not 8GB):
+- **Materiel.net "PC Gamer Hellfest Valley"** — i5-14400F, 32GB DDR5, 1TB NVMe — 1,999€ (~1,700€ with code `GAME`), pre-assembled & tested. ← recommended.
+- **Materiel.net "PC Gamer Viper 16G"** — i5-14600KF, 32GB DDR5, 1TB NVMe — 2,049€ (~1,800€ with code `GAME`), 5-yr warranty, 24h.
+- **DIY alternative** ≈ 1,150–1,250€ (desktop RTX 5060 Ti 16GB from ~329€ + ITX/mATX parts) — saves ~500€ but assembly + multi-part order.
+
+**Porting caveat for an x86+CUDA server.** STT (Parakeet) and TTS (Kokoro) currently use MLX (Apple-only). On the new box they must run on CUDA/CPU and share the 16GB VRAM with the LLM (~2GB for STT+TTS → ~14GB left, OK for Gemma 4 26B A4B Q4). Separate porting effort.
+
+> The sections below predate this update — they keep the original Zotac recommendation and the (now stale) ~1,700€ total for reference.
+
 ## Why
 
 The M1 16GB runs the pipeline but the LLM (Qwen 3 4B Q4_K_M) is limited:

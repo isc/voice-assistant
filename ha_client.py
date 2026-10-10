@@ -40,6 +40,37 @@ def normalize(text: str) -> str:
     return " ".join(words)
 
 
+# Sub-kinds inside the `cover` domain. A house can have roller shutters and roof
+# windows side by side — both are HA covers, but they are not interchangeable
+# (opening a skylight when asked for a shutter lets the rain in).
+# HA's device_class is authoritative; the name is only consulted for integrations
+# that leave it unset (HomeKit Controller exposes Velux shutters with no class).
+COVER_KIND_BY_DEVICE_CLASS = {
+    "window": "fenetre",
+    "shutter": "volet",
+    "blind": "volet",
+    "shade": "volet",
+    "curtain": "volet",
+    "awning": "volet",
+}
+COVER_KIND_KEYWORDS = {
+    "volet": ("volet", "volets", "store", "stores"),
+    "fenetre": ("fenetre", "fenetres", "velux"),
+}
+
+
+def cover_kind(info: dict) -> Optional[str]:
+    """Classify a cover as 'volet' or 'fenetre', None if undetermined."""
+    device_class = info.get("attributes", {}).get("device_class")
+    if device_class in COVER_KIND_BY_DEVICE_CLASS:
+        return COVER_KIND_BY_DEVICE_CLASS[device_class]
+    words = set(normalize(info.get("friendly_name", "")).split())
+    for kind, keywords in COVER_KIND_KEYWORDS.items():
+        if words.intersection(keywords):
+            return kind
+    return None
+
+
 class HAClient:
     """Home Assistant REST API client with area-based entity discovery."""
 
@@ -49,6 +80,9 @@ class HAClient:
         # entity_id -> {friendly_name, domain, state, attributes, area_id, area_name}
         self.entities: dict[str, dict] = {}
         self.areas: dict[str, str] = {}  # area_id -> area_name
+        # entity_id -> area_id, for every domain — sensors aren't in self.entities
+        # but search_sensors still wants to know which room they belong to.
+        self.entity_areas: dict[str, str] = {}
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -129,6 +163,7 @@ class HAClient:
             return
 
         entity_to_area = await self._fetch_entity_areas()
+        self.entity_areas = entity_to_area
 
         self.entities.clear()
         for state in states:
@@ -191,6 +226,10 @@ class HAClient:
                 "climate": "thermostats",
                 "media_player": "médias",
             }.get(info["domain"], info["domain"])
+            # Roof windows are covers too — list them apart so the LLM never
+            # offers a skylight when the user asked for a roller shutter.
+            if info["domain"] == "cover" and cover_kind(info) == "fenetre":
+                domain_label = "fenêtres"
             by_area.setdefault(area, {}).setdefault(domain_label, []).append(info["friendly_name"])
 
         parts = []
@@ -205,17 +244,34 @@ class HAClient:
             parts.append(f"Groupes: {', '.join(group_parts)}")
         return ". ".join(parts)
 
-    # Generic names that mean "all entities of this domain in the room"
+    # Generic names that mean "all entities of this domain in the room".
+    # Keys are normalize()d; the second element narrows covers to a sub-kind.
     _GENERIC_NAMES = {
-        "volet": "cover",
-        "volets": "cover",
-        "les volets": "cover",
-        "lumière": "light",
-        "lumières": "light",
-        "les lumières": "light",
-        "lumiere": "light",
-        "lumieres": "light",
+        "volet": ("cover", "volet"),
+        "volets": ("cover", "volet"),
+        "store": ("cover", "volet"),
+        "stores": ("cover", "volet"),
+        "fenetre": ("cover", "fenetre"),
+        "fenetres": ("cover", "fenetre"),
+        "velux": ("cover", "fenetre"),
+        "lumiere": ("light", None),
+        "lumieres": ("light", None),
     }
+
+    def _area_exists(self, norm_room: str) -> bool:
+        """Whether HA knows this area, using the same loose matching as the filter."""
+        return any(norm_room in normalize(area) or normalize(area) in norm_room for area in self.areas.values() if area)
+
+    def _filter_by_cover_kind(self, entity_ids: list[str], kind: Optional[str]) -> list[str]:
+        """Keep only covers of the requested kind (volet / fenetre)."""
+        if not kind:
+            return entity_ids
+        covers = [e for e in entity_ids if self.entities[e]["domain"] == "cover"]
+        # If no cover here is named for its kind, this house doesn't make the
+        # distinction — keep everything rather than resolving to nothing.
+        if not any(cover_kind(self.entities[e]) for e in covers):
+            return entity_ids
+        return [e for e in entity_ids if self.entities[e]["domain"] != "cover" or cover_kind(self.entities[e]) == kind]
 
     def resolve_all_entities(
         self, name: str, room: str | None = None, domain_hints: list[str] | None = None
@@ -223,6 +279,8 @@ class HAClient:
         """Resolve entity name, expanding room groups and generic names into multiple entity_ids."""
         is_group = False
         rooms_to_search = [room]
+        # Generic name (e.g. "volet" -> all shutters in the room), with its cover sub-kind
+        target_domain, generic_kind = self._GENERIC_NAMES.get(normalize(name), (None, None))
 
         # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"])
         if room:
@@ -249,12 +307,10 @@ class HAClient:
                         continue
                     if eid not in entity_ids:
                         entity_ids.append(eid)
+            entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
             if entity_ids:
                 logger.info(f"Group resolve: '{name}' (group={room}) -> {entity_ids}")
                 return entity_ids
-
-        # Check if name is generic (e.g. "volet" -> all covers in room)
-        target_domain = self._GENERIC_NAMES.get(normalize(name))
 
         if target_domain and any(r is not None for r in rooms_to_search):
             entity_ids = []
@@ -271,6 +327,7 @@ class HAClient:
                             continue
                     if eid not in entity_ids:
                         entity_ids.append(eid)
+            entity_ids = self._filter_by_cover_kind(entity_ids, generic_kind)
             if entity_ids:
                 logger.info(f"Generic resolve: '{name}' (room={room}) -> {entity_ids}")
                 return entity_ids
@@ -301,11 +358,25 @@ class HAClient:
                     continue
             candidates[eid] = normalize(info["friendly_name"])
 
+        # "les volets" must never fall back onto a roof window (both are covers)
+        kind = self._GENERIC_NAMES.get(norm_input, (None, None))[1]
+        if kind:
+            kept = self._filter_by_cover_kind(list(candidates), kind)
+            candidates = {eid: candidates[eid] for eid in kept}
+
         if not candidates:
-            # Retry without room filter if no match
-            if norm_room:
-                logger.info(f"No match in room '{room}', retrying without room filter")
+            # Dropping the room filter rescues a room name HA doesn't know ("salon"
+            # for an area called "Living Room"). But when the area *does* exist and
+            # simply holds no such device, searching the rest of the house is how
+            # "ouvre tous les volets sauf celui de Charlie" ended up opening
+            # Charlie's: the LLM invented a shutter in Zoé's room, nothing matched
+            # there, and the unscoped retry landed on the one room to avoid.
+            # Admitting there is no such device beats actuating another room's.
+            if norm_room and not self._area_exists(norm_room):
+                logger.info(f"Room '{room}' unknown to HA, retrying without room filter")
                 return self.resolve_entity(name, room=None, domain_hints=domain_hints)
+            if norm_room:
+                logger.info(f"No match for '{name}' in room '{room}' (room exists, no such device)")
             return None
 
         # If room narrows to a single entity of the matching domain, use it directly
@@ -322,13 +393,7 @@ class HAClient:
 
         # If we have a room and multiple candidates, pick the first one
         # (common case: user says "la lumière" and there's only one light in that room)
-        if norm_room and norm_input in (
-            "lumiere",
-            "lumières",
-            "lumiere",
-            "volet",
-            "volets",
-        ):
+        if norm_room and norm_input in self._GENERIC_NAMES:
             eid = next(iter(candidates))
             logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (generic name, first in room)")
             return eid
@@ -370,6 +435,62 @@ class HAClient:
         except Exception as e:
             logger.error(f"HA service call failed: {e}")
             return "Impossible de contacter Home Assistant"
+
+    async def search_sensors(self, query: str, limit: int = 15) -> str:
+        """Search read-only sensors by keyword and return their current values.
+
+        Sensors are deliberately kept out of `self.entities` and out of the system
+        prompt: there are hundreds of them (273 at Charras vs 92 actionable
+        entities) and they are only ever read, never controlled. Searching on
+        demand keeps the prompt small while leaving every sensor reachable —
+        including those HA gives no device_class (pool pH, salinity, chlorine).
+        States are read live rather than from the discovery snapshot, since the
+        whole point of a sensor is that its value moves.
+        """
+        if not normalize(query).split():
+            return "Précise ce que tu cherches"
+
+        try:
+            async with self._session.get(f"{self.base_url}/api/states") as resp:
+                if resp.status != 200:
+                    return "Capteurs non disponibles"
+                states = await resp.json()
+        except Exception as e:
+            logger.error(f"Error fetching sensor states: {e}")
+            return "Capteurs non disponibles"
+
+        return self.match_sensors(states, query, limit)
+
+    def match_sensors(self, states: list[dict], query: str, limit: int = 15) -> str:
+        """Rank sensor states against a keyword query. Pure — see search_sensors."""
+        words = normalize(query).split()
+        matches = []
+        for state in states:
+            eid = state["entity_id"]
+            if not eid.startswith("sensor."):
+                continue
+            value = state["state"]
+            if value in ("unknown", "unavailable", ""):
+                continue
+            attrs = state.get("attributes", {})
+            name = attrs.get("friendly_name") or eid
+            area = self.areas.get(self.entity_areas.get(eid, ""), "")
+            score = sum(1 for w in words if w in normalize(f"{name} {area}"))
+            if not score:
+                continue
+            unit = attrs.get("unit_of_measurement") or ""
+            # A measurement beats a raw status code when results get truncated.
+            matches.append((score, bool(unit), f"{name}: {value} {unit}".strip()))
+
+        if not matches:
+            return f"Aucun capteur trouvé pour « {query} »"
+
+        matches.sort(key=lambda m: (-m[0], not m[1], m[2]))
+        lines = [m[2] for m in matches[:limit]]
+        if len(matches) > limit:
+            lines.append(f"({len(matches) - limit} autres capteurs non affichés)")
+        logger.info(f"Sensor search '{query}' -> {len(matches)} matches")
+        return "\n".join(lines)
 
     async def get_entity_state(self, entity_id: str) -> Optional[dict]:
         """Get the current state of an entity."""
