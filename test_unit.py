@@ -328,6 +328,7 @@ class TestActionClaimDetection(unittest.TestCase):
             "Voilà, la lumière du salon est allumée.",
             "J'ai bien réglé le thermostat à 20 degrés.",
             "J'ai éteint les lumières.",
+            "J'ai éteint les lumières. Autre chose ?",
         ]:
             self.assertTrue(claims_completed_action(text), text)
 
@@ -340,6 +341,15 @@ class TestActionClaimDetection(unittest.TestCase):
             "Il est actuellement 20h32.",
             "Lundi 27 juillet, tu as la livraison du piano.",
             "Je n'ai pas accès à cette information.",
+        ]:
+            self.assertFalse(claims_completed_action(text), text)
+
+    def test_does_not_flag_questions(self):
+        """Offering an action is not claiming it (2026-10-10: the challenge made it play music)."""
+        for text in [
+            "Je ne suis pas sûr de comprendre ce que vous voulez dire par cette dernière phrase. "
+            "Souhaitez-vous que je lance de la musique ou que j'affiche une image d'une ville ?",
+            "Voulez-vous que je ferme les volets du salon?",
         ]:
             self.assertFalse(claims_completed_action(text), text)
 
@@ -577,6 +587,35 @@ class TestResolveStation(unittest.TestCase):
 
         for name in ("", "la radio", "musique classique", "Radio Nova"):
             self.assertIsNone(_resolve_station(name), name)
+
+
+class TestSpeakerLeftOn(unittest.TestCase):
+    STREAM = "http://192.168.1.189:8889/spotify/stream.mp3"
+    FIP = "http://icecast.radiofrance.fr/fip-midfi.mp3"
+
+    @staticmethod
+    def player(state, content_id):
+        return {"state": state, "attributes": {"media_content_id": content_id}}
+
+    def test_finds_the_speaker_left_on_a_known_url(self):
+        from voice_server import _speaker_left_on
+
+        entities = {
+            "media_player.google_home": self.player("paused", "https://thumb.wikimedia.org/okapi.jpg"),
+            "media_player.sonos_paris": self.player("paused", self.STREAM),
+            "light.salon": {"state": "on", "attributes": {}},
+        }
+        found = _speaker_left_on(entities, {self.STREAM, self.FIP})
+        self.assertEqual(found, ("media_player.sonos_paris", self.STREAM))
+
+    def test_none_when_stopped_or_elsewhere(self):
+        from voice_server import _speaker_left_on
+
+        entities = {
+            "media_player.a": self.player("idle", self.STREAM),
+            "media_player.b": self.player("playing", "http://example.com/podcast.mp3"),
+        }
+        self.assertIsNone(_speaker_left_on(entities, {self.STREAM, self.FIP}))
 
 
 class TestMatchPlaylist(unittest.TestCase):

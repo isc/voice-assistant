@@ -102,6 +102,18 @@ def _resolve_station(name: str) -> Optional[tuple[str, str]]:
     return matches.pop() if len(matches) == 1 else None
 
 
+def _speaker_left_on(entities: dict, urls: set[str]) -> Optional[tuple[str, str]]:
+    """The HA media player left playing one of urls, with that URL; None if none is."""
+    return next(
+        (
+            (entity_id, info["attributes"]["media_content_id"])
+            for entity_id, info in entities.items()
+            if info["state"] in ("playing", "paused") and info["attributes"].get("media_content_id") in urls
+        ),
+        None,
+    )
+
+
 def _no_speaker(room: Optional[str]) -> str:
     return f"Aucune enceinte trouvée pour {room}" if room else "Aucune enceinte disponible"
 
@@ -238,6 +250,7 @@ class VoiceAssistantServer:
         await self.init_calendar_client()
         await self.init_spotify()
         await self.start_http_server()
+        self._recover_media_target()
         await self.connect_to_device(ESP_HOST)
 
     async def init_ha_client(self):
@@ -290,6 +303,31 @@ class VoiceAssistantServer:
         self.spotify = spotify
         self._spotify_task = asyncio.create_task(spotify.stream.run())
         logger.info("Spotify enabled (go-librespot)")
+
+    @property
+    def _spotify_url(self) -> str:
+        # Beside /tts/, so that a relay serving TTS_BASE_URL serves it too
+        return urljoin(self.http_base_url, "../spotify/stream.mp3")
+
+    def _recover_media_target(self) -> None:
+        """Pick up the HA speaker a previous run left on a radio or on the Spotify stream.
+
+        A restart forgot it, so media commands without a room went to the voice device
+        while the music went on, on the Sonos.
+        """
+        if not self.ha_client:
+            return
+        urls = {url for _, url in RADIO_STATIONS.values()}
+        if self.spotify:
+            urls.add(self._spotify_url)
+        found = _speaker_left_on(self.ha_client.entities, urls)
+        if not found:
+            return
+        speaker, url = found
+        self._last_media_target = ("ha", speaker)
+        if self.spotify and url == self._spotify_url:
+            self._spotify_target = ("ha", speaker)
+        logger.info(f"{speaker} left on {url}: media commands without a room go there")
 
     async def start_http_server(self):
         """Start HTTP server to host TTS audio files and web UI"""
@@ -1007,8 +1045,7 @@ class VoiceAssistantServer:
         previous = self._spotify_target
         if previous == target and stream.listeners:
             return
-        # Beside /tts/, so that a relay serving TTS_BASE_URL serves it too
-        url = urljoin(self.http_base_url, "../spotify/stream.mp3")
+        url = self._spotify_url
         joins = stream.joins
         await self._media_play_url(target, url)
         # Start the music once the speaker listens, so that the first seconds play

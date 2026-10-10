@@ -54,10 +54,12 @@ def claims_completed_action(text: str) -> bool:
     """Whether a reply asserts an action was carried out.
 
     Only meaningful when the model called no function at all — in that case the
-    claim is false by construction, since nothing was executed.
+    claim is false by construction, since nothing was executed. Questions are left
+    out: « souhaitez-vous que je lance de la musique ? » offers an action, and
+    challenging it once pushed the model into playing music nobody asked for.
     """
     flat = "".join(c for c in unicodedata.normalize("NFD", (text or "").lower()) if unicodedata.category(c) != "Mn")
-    return bool(_ACTION_CLAIM.search(flat))
+    return bool(_ACTION_CLAIM.search(re.sub(r"[^.!?]*\?", "", flat)))
 
 
 def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
