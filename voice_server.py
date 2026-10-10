@@ -26,7 +26,7 @@ from aioesphomeapi import (
 from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
-from ha_client import LOCAL_CONFIG
+from ha_client import LOCAL_CONFIG, normalize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,57 +51,59 @@ HA_URL = os.environ.get("HA_URL", "")
 HA_TOKEN = os.environ.get("HA_TOKEN", "")
 
 
-# French web radio streams. Keys are normalized (lowercase, no accents/spaces)
-# so fuzzy lookups work. Values are (display_name, stream_url).
-RADIO_STATIONS: Dict[str, tuple[str, str]] = {
-    "franceinter": ("France Inter", "https://icecast.radiofrance.fr/franceinter-midfi.mp3"),
-    "franceinfo": ("France Info", "https://icecast.radiofrance.fr/franceinfo-midfi.mp3"),
-    "info": ("France Info", "https://icecast.radiofrance.fr/franceinfo-midfi.mp3"),
-    "franceculture": ("France Culture", "https://icecast.radiofrance.fr/franceculture-midfi.mp3"),
-    "culture": ("France Culture", "https://icecast.radiofrance.fr/franceculture-midfi.mp3"),
-    "francemusique": ("France Musique", "https://icecast.radiofrance.fr/francemusique-midfi.mp3"),
-    "musique": ("France Musique", "https://icecast.radiofrance.fr/francemusique-midfi.mp3"),
-    "francebleu": ("France Bleu", "https://icecast.radiofrance.fr/fbidf-midfi.mp3"),
-    "bleu": ("France Bleu", "https://icecast.radiofrance.fr/fbidf-midfi.mp3"),
-    "fip": ("FIP", "https://icecast.radiofrance.fr/fip-midfi.mp3"),
-    "mouv": ("Mouv'", "https://icecast.radiofrance.fr/mouv-midfi.mp3"),
-    "rtl": ("RTL", "https://streamer.radio.rtl.fr/rtl-1-48-192"),
-    "europe1": ("Europe 1", "https://europe1.lmn.fm/europe1.mp3"),
-    "rmc": ("RMC", "https://rmc.bfmtv.com/rmcinfo-mp3"),
-    "nrj": ("NRJ", "https://scdn.nrjaudio.fm/audio1/fr/30001/mp3_128.mp3"),
-    "skyrock": ("Skyrock", "http://icecast.skyrock.net/s/natio_mp3_128k"),
-    "nostalgie": ("Nostalgie", "https://scdn.nrjaudio.fm/audio1/fr/30601/mp3_128.mp3"),
-    "cheriefm": ("Chérie FM", "https://scdn.nrjaudio.fm/audio1/fr/30201/mp3_128.mp3"),
-    "cherie": ("Chérie FM", "https://scdn.nrjaudio.fm/audio1/fr/30201/mp3_128.mp3"),
-    "rireetchansons": ("Rire et Chansons", "https://scdn.nrjaudio.fm/audio1/fr/30401/mp3_128.mp3"),
-    "tsfjazz": ("TSF Jazz", "https://tsfjazz.ice.infomaniak.ch/tsfjazz-high.mp3"),
-    "jazz": ("TSF Jazz", "https://tsfjazz.ice.infomaniak.ch/tsfjazz-high.mp3"),
-    "radioclassique": ("Radio Classique", "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3"),
-    "classique": ("Radio Classique", "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3"),
-    "rfi": ("RFI", "https://live02.rfi.fr/rfimonde-64.mp3"),
-}
+# French web radio streams. All MP3: the Voice PE does not decode AAC.
+# URLs checked 2026-10-10 (audio/mpeg, MP3 frame sync); NRJ group and RMC move theirs.
+_STATIONS = [
+    # (display name, stream URL, other names it answers to)
+    ("France Inter", "https://icecast.radiofrance.fr/franceinter-midfi.mp3", ()),
+    ("France Info", "https://icecast.radiofrance.fr/franceinfo-midfi.mp3", ("info",)),
+    ("France Culture", "https://icecast.radiofrance.fr/franceculture-midfi.mp3", ("culture",)),
+    ("France Musique", "https://icecast.radiofrance.fr/francemusique-midfi.mp3", ("musique",)),
+    # France Bleu became "ici" in 2025; fb1071 is ici Paris (ex-France Bleu Paris 107.1)
+    ("ici Paris", "https://icecast.radiofrance.fr/fb1071-midfi.mp3", ("ici", "France Bleu", "bleu")),
+    ("FIP", "https://icecast.radiofrance.fr/fip-midfi.mp3", ()),
+    ("Mouv'", "https://icecast.radiofrance.fr/mouv-midfi.mp3", ()),
+    ("RTL", "https://streamer.radio.rtl.fr/rtl-1-48-192", ()),
+    ("Europe 1", "https://europe1.lmn.fm/europe1.mp3", ()),
+    ("RMC", "https://audio.bfmtv.com/rmcradio_128.mp3", ()),
+    ("NRJ", "https://scdn.nrjaudio.fm/audio1/fr/30001/mp3_128.mp3", ()),
+    ("Skyrock", "http://icecast.skyrock.net/s/natio_mp3_128k", ()),
+    ("Nostalgie", "https://streaming.nrjaudio.fm/oug7girb92oc?origine=fluxradios", ()),
+    ("Chérie FM", "https://streaming.nrjaudio.fm/oubqggj25zuw?origine=fluxradios", ("Chérie",)),
+    ("Rire et Chansons", "https://streaming.nrjaudio.fm/ou8o8xgk7oiu?origine=fluxradios", ("Rire & Chansons",)),
+    ("TSF Jazz", "https://tsfjazz.ice.infomaniak.ch/tsfjazz-high.mp3", ("jazz",)),
+    ("Radio Classique", "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3", ("classique",)),
+    ("RFI", "https://live02.rfi.fr/rfimonde-64.mp3", ()),
+]
 
 
 def _normalize_station_key(name: str) -> str:
-    """Strip accents/spaces/punctuation for radio station lookup."""
-    import unicodedata
+    """Strip accents, stopwords, spaces and punctuation for radio station lookup."""
+    return "".join(c for c in normalize(name) if c.isalnum())
 
-    text = "".join(c for c in unicodedata.normalize("NFD", name.lower()) if unicodedata.category(c) != "Mn")
-    return "".join(c for c in text if c.isalnum())
+
+RADIO_STATIONS: Dict[str, tuple[str, str]] = {
+    _normalize_station_key(alias): (display, url)
+    for display, url, aliases in _STATIONS
+    for alias in (display, *aliases)
+}
 
 
 def _resolve_station(name: str) -> Optional[tuple[str, str]]:
-    """Fuzzy-resolve a station name to (display_name, url). Returns None if unknown."""
-    if not name:
-        return None
-    key = _normalize_station_key(name)
+    """Fuzzy-resolve a station name to (display_name, url). Returns None if unknown or ambiguous."""
+    key = _normalize_station_key(name or "")
     if key in RADIO_STATIONS:
         return RADIO_STATIONS[key]
-    # Substring match both ways (e.g. "france inter sur FM" → franceinter)
-    for station_key, info in RADIO_STATIONS.items():
-        if station_key in key or key in station_key:
-            return info
-    return None
+    # "radio RTL", "la radio France Inter": the word "radio" alone names no station
+    key = key.removeprefix("radio")
+    if not key:
+        return None
+    if key in RADIO_STATIONS:
+        return RADIO_STATIONS[key]
+    # Substring match both ways ("france inter sur FM" → franceinter), only when it points
+    # at a single station: "musique classique" matches two and must not pick one at random
+    matches = {info for station_key, info in RADIO_STATIONS.items() if station_key in key or key in station_key}
+    return matches.pop() if len(matches) == 1 else None
 
 
 def _format_duration(total_seconds: int) -> str:
@@ -355,7 +357,6 @@ class VoiceAssistantServer:
         if not media_players:
             logger.info(f"{device_host} has no media_player entity — radio playback via HA only")
             return
-        # Prefer an entity whose name doesn't look announcement-only
         mp = media_players[0]
         self.device_media_keys[device_host] = mp.key
         logger.info(f"{device_host} media_player: key={mp.key} name={mp.name!r}")
@@ -840,6 +841,13 @@ class VoiceAssistantServer:
 
         return None
 
+    def _keep_media_target(self, target: tuple[str, str]) -> None:
+        """Remember the speaker for volume follow-ups, and skip the listening window when it is
+        the ESP itself: its open mic would transcribe the radio as a request."""
+        self._last_media_target = target
+        if target[0] == "esp":
+            self._end_conversation = True
+
     async def _execute_media_function(self, function_name: str, arguments: dict) -> str:
         """Handle play_radio / stop_media / set_volume / change_volume tool calls.
 
@@ -853,7 +861,6 @@ class VoiceAssistantServer:
                 return f"Aucune enceinte trouvée pour {room}"
             return "Aucune enceinte disponible"
 
-        # Build the per-function payload, then dispatch once at the end
         if function_name == "play_radio":
             station_name = arguments.get("station", "")
             station = _resolve_station(station_name)
@@ -861,7 +868,7 @@ class VoiceAssistantServer:
                 return f"Station {station_name} inconnue"
             display_name, url = station
             await self._media_play_url(target, url)
-            self._last_media_target = target
+            self._keep_media_target(target)
             return f"{display_name} en cours de lecture"
 
         if function_name == "stop_media":
@@ -874,7 +881,7 @@ class VoiceAssistantServer:
                 return "Niveau de volume manquant"
             level = max(0, min(100, int(level)))
             await self._media_set_volume(target, level)
-            self._last_media_target = target
+            self._keep_media_target(target)
             return f"Volume à {level} pour cent"
 
         if function_name == "change_volume":
@@ -885,7 +892,7 @@ class VoiceAssistantServer:
             else:
                 await self._media_command(target, MediaPlayerCommand.VOLUME_DOWN, ha_service="volume_down")
                 label = "Moins fort"
-            self._last_media_target = target
+            self._keep_media_target(target)
             return label
 
         return "C'est fait"

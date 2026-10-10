@@ -200,7 +200,7 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
             "description": (
                 "Lancer une radio en direct (ex: « mets France Inter », « joue FIP »). "
                 "Stations disponibles: France Inter, France Info, France Culture, "
-                "France Musique, France Bleu, FIP, Mouv', RTL, Europe 1, RMC, "
+                "France Musique, ici Paris (ex-France Bleu), FIP, Mouv', RTL, Europe 1, RMC, "
                 "NRJ, Skyrock, Nostalgie, Chérie FM, Rire et Chansons, "
                 "TSF Jazz, Radio Classique, RFI."
             ),
@@ -454,7 +454,9 @@ def parse_text_tool_call(content: str, has_history: bool) -> tuple[Optional[str]
         }
         for direction, phrases in volume_phrases.items():
             for phrase in phrases:
-                if phrase in lower:
+                # startswith, like the verbs below: a reply that merely mentions
+                # "plus fort" somewhere is not a volume command
+                if lower.startswith(phrase):
                     logger.info(f"French action fallback: '{content}' -> change_volume({direction})")
                     return "change_volume", {"direction": direction}
 
