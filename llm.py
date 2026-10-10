@@ -411,7 +411,11 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
     return [
         {
             "name": "turn_on",
-            "description": "Allumer un appareil (lumière, prise, etc.)",
+            # « et baisse à 30% » after a light went to set_cover_position (dry run, 2026-10-11)
+            "description": (
+                "Allumer un appareil (lumière, prise, etc.), ou régler la luminosité d'une lumière "
+                "(« baisse la lumière à 30% », « monte à 80% »)"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -470,7 +474,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         {
             "name": "set_cover_position",
             "description": (
-                "Régler la position d'un volet (0 = complètement fermé, 100 = complètement ouvert). "
+                "Régler la position d'un volet ou d'une fenêtre, jamais d'une lumière "
+                "(0 = complètement fermé, 100 = complètement ouvert). "
                 "Exemples : « ferme à moitié » = 50, « ouvre un peu » = 30, « ferme presque » = 10."
             ),
             "parameters": {
