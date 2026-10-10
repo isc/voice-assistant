@@ -453,8 +453,10 @@ class VoiceAssistantServer:
         logger.info(f"Recording stopped ({reason}): {len(audio_data)} bytes")
 
         try:
-            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
-            logger.info("STT_VAD_END sent - LEDs orange (thinking)")
+            # No "thinking" if nobody spoke: the ESP would ignore the RUN_END that follows (AD-036)
+            if self.vad_has_speech:
+                api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
+                logger.info("STT_VAD_END sent - LEDs orange (thinking)")
 
             if len(audio_data) > 0:
                 await self.process_voice_pipeline(api, audio_data)
