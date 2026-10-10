@@ -73,6 +73,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `HA_URL` | (required) | Home Assistant URL |
 | `HA_TOKEN` | (empty) | HA long-lived access token |
 | `HTTP_PORT` | `8888` | HTTP server port (TTS files + web UI) |
+| `TTS_BASE_URL` | `http://<LAN IP>:<HTTP_PORT>/tts/` | URL the ESP fetches TTS files from, ending in `/`. Set it when the ESP reaches `/tts/` through a relay on another network |
 | `CALENDAR_CREDENTIALS` | `client_secret.json` | Google OAuth credentials file path |
 | `CALENDAR_TOKEN` | `token.json` | Google OAuth token file path |
 
