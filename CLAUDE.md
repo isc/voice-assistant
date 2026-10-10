@@ -99,4 +99,15 @@ ESP (wake word) → audio stream → voice_server.py
 - All code and comments in English. French only in user-facing LLM prompts and TTS output.
 - No long `sleep` delays — use polling or signal-based waiting.
 - Architectural decisions documented in `DECISIONS.md`.
-- Never `git commit --amend` — always new commits, squash on merge.
+- Never `git commit --amend` — always new commits.
+
+## Commit straight to `main`
+
+No pull request: single maintainer, no reviewer, so a PR is a branch, a push and a merge to reach
+the commit that could have been made directly. Commit to `main` and push (from a worktree:
+`git push origin HEAD:main`). The commit message then carries the reasoning — what was tried,
+measured, ruled out — since there is no PR description to hold it.
+
+The live server is `/opt/voice-assistant` on charras-server, a root-owned checkout of `main`
+(`voice-assistant.service`, config in `/etc/voice-assistant.env`): deploy with
+`sudo git -C /opt/voice-assistant pull` then `sudo systemctl restart voice-assistant`.
