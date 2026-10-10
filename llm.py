@@ -378,11 +378,15 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         lock_tools = [
             {
                 "name": "lock",
+                # Both halves measured on gemma4:12b (AD-041): without the second, « déverrouille
+                # la porte » called lock and answered « j'ai déverrouillé »; without « à chaque
+                # demande », a door locked earlier in the conversation got the unlock refusal
                 "description": (
-                    "Verrouiller une porte, la fermer à clé (« ferme la porte à clé », "
-                    "« verrouille la porte »). Le déverrouillage à la voix n'existe pas, "
-                    "volontairement : si on demande d'ouvrir ou de déverrouiller une porte, "
-                    "réponds que ça se fait avec la clé ou l'application, sans appeler de fonction."
+                    "Verrouiller une porte, la fermer à clé (« ferme la porte », « tu peux fermer "
+                    "la porte ? », « verrouille la porte »). Appelle-la à chaque demande, même si la "
+                    "porte a déjà été verrouillée plus tôt : quelqu'un a pu la rouvrir depuis. "
+                    "Aucune fonction n'ouvre ni ne déverrouille une porte : ça se fait avec la clé "
+                    "ou l'application."
                 ),
                 "parameters": {
                     "type": "object",
