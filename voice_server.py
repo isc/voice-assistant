@@ -422,8 +422,10 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.warning(f"TTS announcement error: {e}")
 
-    async def handle_voice_assistant_audio(self, audio_bytes: bytes):
-        """Handle audio received from the ESP with VAD detection"""
+    async def handle_voice_assistant_audio(self, audio_bytes: bytes, _data2: bytes | None = None):
+        """Handle audio received from the ESP with VAD detection.
+
+        aioesphomeapi 45+ passes a second buffer (data2); a single mic stream is enough here."""
         if self.is_recording:
             # Skip early audio in follow-up mode to avoid TTS echo
             if self.skip_audio_until and time.time() < self.skip_audio_until:
