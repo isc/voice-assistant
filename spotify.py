@@ -45,6 +45,10 @@ _ENCODER_LINGER = 3.0
 _IDLE_PAUSE = 5.0
 # A listener that has received nothing for this long was dropped as too slow
 _LISTENER_TIMEOUT = 5.0
+# After a restart, speakers come back slowly (the Paris Sonos: 49 s): music is not paused before
+_STARTUP_GRACE = 60.0
+# Paused music still sent silence to its speaker forever (86 MB/h through the Paris tunnel)
+_SILENCE_STOP = 600.0
 
 
 class SpotifyStream:
@@ -53,6 +57,8 @@ class SpotifyStream:
     def __init__(self, fifo_path: str = PCM_FIFO, on_idle: Optional[Callable] = None):
         self.fifo_path = fifo_path
         self.on_idle = on_idle
+        self.on_silence: Optional[Callable] = None  # listeners hearing only silence for _SILENCE_STOP
+        self._tasks: set[asyncio.Task] = set()
         self.listeners: set[asyncio.Queue] = set()
         self.joins = 0  # listeners that ever joined: tells a new connection from an old one
         self._joined = asyncio.Condition()
@@ -65,7 +71,8 @@ class SpotifyStream:
         """Pump PCM from the FIFO into the encoder at real-time pace, forever."""
         loop = asyncio.get_running_loop()
         deadline = loop.time()
-        alone = unheard = 0.0
+        grace_until = loop.time() + _STARTUP_GRACE
+        alone = unheard = silent = 0.0
         while True:
             deadline += _TICK
             delay = deadline - loop.time()
@@ -73,19 +80,37 @@ class SpotifyStream:
                 await asyncio.sleep(delay)
             elif delay < -1:
                 deadline = loop.time()  # the event loop stalled: resync rather than burst
-            pcm = self._read()
-            if self.listeners:
-                alone = unheard = 0.0
-                await self._encode(pcm.ljust(_CHUNK, b"\0"))
-                continue
-            alone += _TICK
-            if self._encoder and alone >= _ENCODER_LINGER:
+            # An error here killed the stream silently for the life of the process
+            try:
+                pcm = self._read()
+                if self.listeners:
+                    alone = unheard = 0.0
+                    silent = 0.0 if pcm else silent + _TICK
+                    if silent >= _SILENCE_STOP and self.on_silence:
+                        logger.info("Spotify: silence for 10 minutes, stopping its speaker")
+                        silent = 0.0
+                        self._spawn(self.on_silence())
+                    await self._encode(pcm.ljust(_CHUNK, b"\0"))
+                    continue
+                alone += _TICK
+                if self._encoder and alone >= _ENCODER_LINGER:
+                    self._stop_encoder()
+                unheard = unheard + _TICK if pcm else 0.0
+                if unheard >= _IDLE_PAUSE and self.on_idle and loop.time() >= grace_until:
+                    logger.info("Spotify: playing to nobody, pausing")
+                    unheard = 0.0
+                    self._spawn(self.on_idle())
+            except Exception:
+                logger.exception("Spotify stream error")
                 self._stop_encoder()
-            unheard = unheard + _TICK if pcm else 0.0
-            if unheard >= _IDLE_PAUSE and self.on_idle:
-                logger.info("Spotify: playing to nobody, pausing")
-                unheard = 0.0
-                asyncio.ensure_future(self.on_idle())
+                await asyncio.sleep(1)
+
+    def _spawn(self, coroutine) -> None:
+        """Run a callback in the background, kept referenced and its failure logged."""
+        task = asyncio.ensure_future(coroutine)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(lambda t: t.cancelled() or not t.exception() or logger.error(f"Spotify: {t.exception()}"))
 
     def _read(self) -> bytes:
         """Read up to one tick of whole frames from the FIFO, without blocking."""
@@ -127,12 +152,14 @@ class SpotifyStream:
         if self._encoder is None:
             self._encoder = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
+                # No probing of raw PCM: the first MP3 byte came 1.2 s late, 0.05 s without
+                "-probesize", "32", "-analyzeduration", "0",
                 "-f", "s16le", "-ar", "44100", "-ac", "2", "-i", "pipe:0",
                 "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3", "-flush_packets", "1", "pipe:1",
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
             )  # fmt: skip
-            asyncio.ensure_future(self._fan_out(self._encoder))
+            self._spawn(self._fan_out(self._encoder))
             logger.info("Spotify: encoder started")
         try:
             self._encoder.stdin.write(pcm)
@@ -150,9 +177,11 @@ class SpotifyStream:
                     self.listeners.discard(queue)  # too slow: its handler times out and closes
 
     def _stop_encoder(self) -> None:
+        if self._encoder is None:
+            return
         self._encoder.stdin.close()  # ffmpeg flushes and exits; _fan_out ends with it
         self._encoder = None
-        logger.info("Spotify: encoder stopped (no listener)")
+        logger.info("Spotify: encoder stopped")
 
     async def wait_for_join(self, joins_before: int, timeout: float) -> bool:
         """Wait until a listener connects after `joins_before` was read from self.joins."""

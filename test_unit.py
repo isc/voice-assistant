@@ -1303,6 +1303,19 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await asyncio.gather(request("a"), request("b")), [["a"], ["b"]])
 
 
+class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
+    async def test_a_speaker_that_never_joins_is_not_said_playing(self):
+        server = make_server()
+        server.spotify = MagicMock()
+        server.spotify.find = AsyncMock(return_value=("spotify:artist:x", "Daft Punk"))
+        server.spotify.play = AsyncMock()
+        server._resolve_media_target = lambda room: ("ha", "media_player.google_home")
+        server._point_at_spotify = AsyncMock(return_value=False)
+        result = await server._execute_music_function("play_music", {"query": "Daft Punk", "kind": "artist"})
+        self.assertIn("ne répond pas", result)
+        server.spotify.play.assert_not_awaited()
+
+
 class TestTimers(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_the_only_timer_without_its_name(self):
         from timer import TimerManager

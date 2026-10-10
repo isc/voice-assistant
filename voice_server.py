@@ -410,6 +410,7 @@ class VoiceAssistantServer:
             await spotify.close()
             return
         self.spotify = spotify
+        spotify.stream.on_silence = self._stop_silent_spotify
         self._spotify_task = asyncio.create_task(spotify.stream.run())
         logger.info("Spotify enabled (go-librespot)")
 
@@ -1168,11 +1169,13 @@ class VoiceAssistantServer:
                 if not found:
                     return f"Rien trouvé sur Spotify pour {query}"
                 uri, description = found
-                await self._point_at_spotify(target)
+                if not await self._point_at_spotify(target):
+                    return f"{self._speaker_name(target)} ne répond pas"
                 await self.spotify.play(uri, shuffle=bool(arguments.get("shuffle")))
                 result = f"Lecture sur Spotify : {description}"
             else:
-                await self._point_at_spotify(target)
+                if not await self._point_at_spotify(target):
+                    return f"{self._speaker_name(target)} ne répond pas"
                 result = await self.spotify.control("resume")
             self._after_media_change(target)
             return result
@@ -1204,27 +1207,42 @@ class VoiceAssistantServer:
             "music_control resume avec room : elle continue sans changer."
         )
 
-    async def _point_at_spotify(self, target: tuple[str, str]) -> None:
+    def _speaker_name(self, target: tuple[str, str]) -> str:
+        kind, ident = target
+        if kind == "ha" and self.ha_client:
+            return self.ha_client.entities.get(ident, {}).get("friendly_name", ident)
+        return "L'enceinte de l'appareil vocal"
+
+    async def _stop_silent_spotify(self) -> None:
+        """Paused music kept sending silence to its speaker: stop the speaker after a while."""
+        if self._spotify_at:
+            site, target = self._spotify_at
+            await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop", site=site)
+
+    async def _point_at_spotify(self, target: tuple[str, str]) -> bool:
         """Make the target speaker play the Spotify stream, and move it off the previous one.
+        False if it never connected: nothing changed, the music must not start nor be said playing.
 
         A speaker taken off the stream (radio, stop) needs nothing here: once the music
         plays to nobody, the stream pauses go-librespot."""
         stream = self.spotify.stream
         previous, new = self._spotify_at, (self.site, target)
         if previous == new and stream.listeners:
-            return
+            return True
         url = self._spotify_url(self.site)
         joins = stream.joins
         await self._media_play_url(target, url)
         # Start the music once the speaker listens, so that the first seconds play
         if not await stream.wait_for_join(joins, timeout=8):
             logger.warning(f"Spotify: {target} did not connect to {url}")
+            return False
         # Stopped after the new one joined, so the encoder never runs dry; and only if
         # still on the stream, as it may have moved to a radio since
         if previous and previous != new and len(stream.listeners) > 1:
             previous_site, previous_target = previous
             await self._media_command(previous_target, MediaPlayerCommand.STOP, ha_service="media_stop", site=previous_site)
         self._spotify_at = new
+        return True
 
     async def _media_play_url(self, target: tuple[str, str], url: str, content_type: str = "music") -> None:
         """Start playback of an arbitrary media URL on the target speaker (or show it, for a picture)."""
