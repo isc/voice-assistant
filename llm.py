@@ -192,7 +192,10 @@ def get_tool_definitions(ha_client, calendar_client=None) -> list:
     # With HA, the `room` parameter can route to other media_players.
     media_room_param = {
         "type": "string",
-        "description": "Pièce où jouer le média. Par défaut: l'enceinte de l'appareil vocal.",
+        "description": (
+            "Pièce ou enceinte où jouer le média (ex: « salon », « Google Home »), parmi les "
+            "« médias » de la liste des appareils. Par défaut: l'enceinte de l'appareil vocal."
+        ),
     }
     media_tools = [
         {

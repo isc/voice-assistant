@@ -841,12 +841,10 @@ class VoiceAssistantServer:
 
         return None
 
-    def _keep_media_target(self, target: tuple[str, str]) -> None:
-        """Remember the speaker for volume follow-ups, and skip the listening window when it is
-        the ESP itself: its open mic would transcribe the radio as a request."""
+    def _after_media_change(self, target: tuple[str, str]) -> None:
+        """Remember the speaker for volume follow-ups and end the conversation (an open mic would transcribe the radio)."""
         self._last_media_target = target
-        if target[0] == "esp":
-            self._end_conversation = True
+        self._end_conversation = True
 
     async def _execute_media_function(self, function_name: str, arguments: dict) -> str:
         """Handle play_radio / stop_media / set_volume / change_volume tool calls.
@@ -868,7 +866,7 @@ class VoiceAssistantServer:
                 return f"Station {station_name} inconnue"
             display_name, url = station
             await self._media_play_url(target, url)
-            self._keep_media_target(target)
+            self._after_media_change(target)
             return f"{display_name} en cours de lecture"
 
         if function_name == "stop_media":
@@ -881,7 +879,7 @@ class VoiceAssistantServer:
                 return "Niveau de volume manquant"
             level = max(0, min(100, int(level)))
             await self._media_set_volume(target, level)
-            self._keep_media_target(target)
+            self._after_media_change(target)
             return f"Volume à {level} pour cent"
 
         if function_name == "change_volume":
@@ -892,7 +890,7 @@ class VoiceAssistantServer:
             else:
                 await self._media_command(target, MediaPlayerCommand.VOLUME_DOWN, ha_service="volume_down")
                 label = "Moins fort"
-            self._keep_media_target(target)
+            self._after_media_change(target)
             return label
 
         return "C'est fait"
