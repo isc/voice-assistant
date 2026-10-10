@@ -279,11 +279,11 @@ class TestResolveAllEntities(unittest.TestCase):
         self.assertNotIn("switch.freebox_wifi", eids)
         self.assertIn("light.plafonnier_charlie", eids)
 
-    def test_specific_name_in_a_group_is_that_device(self):
-        """« le grand volet des enfants » is one shutter, not every shutter of both rooms."""
+    def test_specific_name_in_a_group_sweeps_the_group(self):
+        """gemma4:12b sends « Petit volet » + « Grand volet » (Zoé's) for « les volets des enfants »."""
         self.add("cover.grand_volet_zoe", "Grand volet", "chambre_zoe")
         eids = self.client.resolve_all_entities("Grand volet", room="enfants", domain_hints=["cover"])
-        self.assertEqual(eids, ["cover.grand_volet_zoe"])
+        self.assertEqual(sorted(eids), ["cover.grand_volet_zoe", "cover.volet_charlie", "cover.volet_zoe"])
 
     def test_group_said_with_more_words(self):
         eids = self.client.resolve_all_entities("volets", room="les chambres des enfants", domain_hints=["cover"])

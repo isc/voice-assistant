@@ -387,14 +387,10 @@ class HAClient:
                     is_group = True
                     break
 
+        # A group or the whole house sweeps, even under a specific name: for « ferme les volets des
+        # enfants », gemma4:12b names the shutters of one room (« Petit volet », « Grand volet »,
+        # 6 times out of 6) and never Charlie's « Volet ». Only the kind the name says is kept.
         sweep = is_group or whole_house
-        # A specific name in a group: that device in each room of the group (« le grand volet des
-        # enfants » is one shutter, not the three); the sweep below only when no room has it
-        if is_group and not target_domain:
-            named = [eid for r in rooms_to_search if (eid := self.resolve_entity(name, r, domain_hints, strict=True))]
-            if named:
-                logger.info(f"Resolve all: '{name}' by name in {room} -> {named}")
-                return list(dict.fromkeys(named))
 
         # ALL entities in scope, for a room group, the whole house, or a generic name in a room
         # ("les volets des enfants" -> all covers in all children's rooms)
@@ -450,24 +446,16 @@ class HAClient:
         return found
 
     def resolve_entity(
-        self,
-        name: str,
-        room: str | None = None,
-        domain_hints: list[str] | None = None,
-        strict: bool = False,
+        self, name: str, room: str | None = None, domain_hints: list[str] | None = None
     ) -> Optional[str]:
-        """Match a spoken name to an entity_id, optionally scoped to a room.
-
-        strict: only a device whose name matches the request — no lone candidate, no fuzzy
-        matching, no retry elsewhere — for a group probing each of its rooms.
-        """
+        """Match a spoken name to an entity_id, optionally scoped to a room."""
         norm_input = normalize(name)
         norm_room = normalize(room) if room else None
         generic = norm_input in self._GENERIC_NAMES
 
         candidates = self._candidates(norm_input, norm_room, domain_hints)
         in_known_room = bool(candidates) and bool(norm_room)
-        if not candidates and norm_room and not strict:
+        if not candidates and norm_room:
             # When the area exists and simply holds no such device, searching the rest of the house
             # is how "ouvre tous les volets sauf celui de Charlie" ended up opening Charlie's: the LLM
             # invented a shutter in Zoé's room, nothing matched there, and the unscoped retry landed
@@ -496,13 +484,10 @@ class HAClient:
             contained = sorted(
                 (eid for eid, n in candidates.items() if n and n in norm_input), key=lambda e: -len(candidates[e])
             )
-            # Strict, a name the request merely contains is no match: « grand volet » is not « volet »
-            for how, found in (("exact", exact), ("substring", containing), ("substring", [] if strict else contained)):
+            for how, found in (("exact", exact), ("substring", containing), ("substring", contained)):
                 if found:
                     logger.info(f"Entity match: '{name}' (room='{room}') -> {found[0]} ({how})")
                     return found[0]
-        if strict:
-            return None
 
         # The one device left is meant when the request names no particular device (« la lumière »,
         # or the room itself for a speaker), when a one-domain action is scoped to a room HA knows
