@@ -29,6 +29,7 @@ from aiohttp import web
 
 from ha_client import LOCAL_CONFIG, compact, is_whole_house
 from images import find_image
+from recordings import Recordings
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -216,6 +217,7 @@ class VoiceAssistantServer:
         from web_ui import ExchangeLog
 
         self.exchange_log = ExchangeLog(Path(__file__).parent / "exchanges.json")
+        self.recordings = Recordings()
         self._last_tool_calls = []
         # Cap on concurrent tool calls: fast enough for a whole-house command while
         # staying gentle on the single HomeKit bridge relaying every Velux.
@@ -639,10 +641,18 @@ class VoiceAssistantServer:
         """Main pipeline: Audio -> STT -> LLM -> TTS"""
         logger.info("Starting full voice pipeline")
         self._end_conversation = False
+        timings = {}
+        # What became of the request, for the exchange log and beside its recording
+        entry = {
+            "transcript": "",
+            "response": None,
+            "timings": timings,
+            "audio": self.recordings.save(audio_bytes),
+            "wake_word": not self.is_followup,
+            "vad_speech": self.vad_has_speech,
+        }
 
         try:
-            timings = {}
-
             # 1. STT, skipped if the VAD heard no speech (AD-036)
             t0 = time.time()
             if self.vad_has_speech:
@@ -651,7 +661,9 @@ class VoiceAssistantServer:
                 logger.info("STT skipped: the VAD heard no speech")
                 transcript = ""
             timings["stt"] = round(time.time() - t0, 2)
+            entry["transcript"] = transcript
             if not transcript:
+                entry["response"] = "[Rien compris]"
                 if self.is_followup:
                     # Normal: no speech during follow-up, end conversation quietly
                     logger.info("No speech during follow-up - ending conversation")
@@ -671,16 +683,13 @@ class VoiceAssistantServer:
             response_text = await self.process_with_llm(api, transcript)
             timings["llm"] = round(time.time() - t0, 2)
             # Capture conversation_id now — TTS triggers ESP follow-up which overwrites it
-            conversation_id = self.conversation_id
+            entry.update(
+                response=response_text or "[Erreur LLM: pas de réponse]",
+                tool_calls=self._last_tool_calls,
+                conversation_id=self.conversation_id,
+            )
+            self._last_tool_calls = []
             if not response_text:
-                self.exchange_log.add(
-                    "voice",
-                    transcript,
-                    transcript,
-                    "[Erreur LLM: pas de réponse]",
-                    timings=timings,
-                    conversation_id=conversation_id,
-                )
                 await self.send_error_to_device(api, "LLM processing failed")
                 return
 
@@ -695,17 +704,6 @@ class VoiceAssistantServer:
                 logger.error(f"TTS failed, but exchange will still be logged: {e}")
                 await self.send_error_to_device(api, f"TTS error: {e}")
             timings["total"] = round(timings["stt"] + timings["llm"] + timings.get("tts_gen", 0), 2)
-
-            self.exchange_log.add(
-                "voice",
-                transcript,
-                transcript,
-                response_text,
-                timings=timings,
-                tool_calls=self._last_tool_calls,
-                conversation_id=conversation_id,
-            )
-            self._last_tool_calls = []
             logger.info(
                 f"Pipeline: STT={timings['stt']}s LLM={timings['llm']}s "
                 f"TTS={timings.get('tts_gen', '?')}s+{timings.get('tts_play', '?')}s "
@@ -714,7 +712,23 @@ class VoiceAssistantServer:
 
         except Exception as e:
             logger.error(f"Pipeline error: {e}")
+            entry["error"] = str(e)
             await self.send_error_to_device(api, f"Pipeline error: {e}")
+        finally:
+            self.recordings.describe(entry["audio"], entry)
+            # Failures too, with their audio: they are the ones worth hearing. Not a
+            # follow-up nobody spoke in, which is how every conversation ends.
+            if entry["wake_word"] or entry["vad_speech"] or "error" in entry:
+                self.exchange_log.add(
+                    "voice",
+                    entry["transcript"],
+                    entry["transcript"],
+                    entry["response"] or f"[Erreur: {entry.get('error', 'inconnue')}]",
+                    timings=timings,
+                    tool_calls=entry.get("tool_calls"),
+                    conversation_id=entry.get("conversation_id"),
+                    audio=entry["audio"],
+                )
 
     # === FUNCTION CALLING ===
 

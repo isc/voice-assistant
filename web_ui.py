@@ -1,5 +1,6 @@
 """Web UI and HTTP routes for the voice assistant."""
 
+import ipaddress
 import json
 import logging
 import time
@@ -10,6 +11,26 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+# Tailscale's address range: the web UI is reached through it, while :8888 also answers on the LAN
+_TAILNET = ipaddress.ip_network("100.64.0.0/10")
+# What speakers fetch from the LAN: TTS replies and the Spotify stream (and /health, for checks)
+_LAN_PATHS = ("/tts/", "/spotify/", "/health")
+
+
+def is_trusted_client(remote: str | None) -> bool:
+    """This machine and the tailnet. The web UI shows transcripts, plays recordings and runs commands."""
+    try:
+        address = ipaddress.ip_address(remote or "")
+    except ValueError:
+        return False
+    return address.is_loopback or address in _TAILNET
+
+
+@web.middleware
+async def lan_sees_only_speaker_paths(request, handler):
+    if request.path.startswith(_LAN_PATHS) or is_trusted_client(request.remote):
+        return await handler(request)
+    raise web.HTTPForbidden(text="The web UI is reachable through Tailscale only")
 
 
 class ExchangeLog:
@@ -45,6 +66,7 @@ class ExchangeLog:
         timings=None,
         tool_calls=None,
         conversation_id=None,
+        audio=None,
     ):
         entry = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -56,6 +78,7 @@ class ExchangeLog:
             "timings": timings or {},
             "tool_calls": tool_calls or [],
             "conversation_id": conversation_id,
+            "audio": audio,
         }
         self.entries.append(entry)
         if len(self.entries) > self.max_entries:
@@ -65,6 +88,7 @@ class ExchangeLog:
 
 def setup_routes(app, server):
     """Register web UI routes on an aiohttp app."""
+    app.middlewares.append(lan_sees_only_speaker_paths)
 
     async def handle_web_ui(request):
         return web.Response(text=(STATIC_DIR / "index.html").read_text(), content_type="text/html")
@@ -197,6 +221,12 @@ def setup_routes(app, server):
         server.conversation_id = None
         return web.json_response({"status": "ok"})
 
+    async def handle_recording(request):
+        path = server.recordings.path(request.match_info["recording"])
+        if not path.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(path)
+
     async def handle_health(request):
         """Health check: status of STT, TTS, LLM, HA, and ESP.
 
@@ -248,6 +278,8 @@ def setup_routes(app, server):
     app.router.add_get("/sw.js", handle_service_worker)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/api/exchanges", handle_get_exchanges)
+    # The patterns keep the path inside the recordings folder
+    app.router.add_get(r"/recordings/{recording:[\d-]+/[\d_]+\.wav}", handle_recording)
     app.router.add_post("/api/send", handle_web_send)
     app.router.add_post("/api/dry-run", handle_dry_run)
     app.router.add_post("/api/reset-conversation", handle_reset_conversation)

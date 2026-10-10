@@ -11,12 +11,20 @@ Usage:
 """
 
 import asyncio
+import json
+import os
+import tempfile
 import unittest
+import wave
+from datetime import date, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from ha_client import HAClient, cover_kind, normalize
 from images import is_about
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
+from recordings import Recordings
+from web_ui import is_trusted_client
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -1073,6 +1081,52 @@ class TestCalendarQueryValidation(unittest.IsolatedAsyncioTestCase):
         result = await client.query_events("2026-03-25")
         data = json.loads(result)
         self.assertEqual(data["error"], "Agenda non disponible")
+
+
+# ---------------------------------------------------------------------------
+# Tests: recordings of voice requests
+# ---------------------------------------------------------------------------
+
+
+class TestRecordings(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name) / "recordings"
+
+    def test_wav_and_details_side_by_side(self):
+        rec = Recordings(self.dir, days=90)
+        self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+        name = rec.save(b"\x00\x01" * 16000)  # one second
+        rec.describe(name, {"transcript": "ferme les volets", "vad_speech": True})
+        with wave.open(str(rec.path(name))) as wav:
+            self.assertEqual((wav.getframerate(), wav.getnframes()), (16000, 16000))
+        details = json.loads(rec.path(name).with_suffix(".json").read_text())
+        self.assertEqual(details["transcript"], "ferme les volets")
+
+    def test_old_days_deleted(self):
+        rec = Recordings(self.dir, days=90)
+        old = self.dir / (date.today() - timedelta(days=91)).isoformat()
+        kept = self.dir / (date.today() - timedelta(days=89)).isoformat()
+        old.mkdir()
+        kept.mkdir()
+        rec.save(b"\x00\x00" * 160)
+        self.assertFalse(old.exists())
+        self.assertTrue(kept.exists())
+
+    def test_off(self):
+        rec = Recordings(self.dir, days=0)
+        self.assertIsNone(rec.save(b"\x00\x00"))
+        rec.describe(None, {"transcript": "x"})
+        self.assertFalse(self.dir.exists())
+
+
+class TestWebUIAccess(unittest.TestCase):
+    def test_this_machine_and_tailnet_only(self):
+        for remote in ("127.0.0.1", "::1", "100.72.204.126"):
+            self.assertTrue(is_trusted_client(remote), remote)
+        for remote in ("192.168.1.42", "82.67.150.147", None, "garbage"):
+            self.assertFalse(is_trusted_client(remote), remote)
 
 
 if __name__ == "__main__":

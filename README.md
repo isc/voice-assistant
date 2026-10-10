@@ -40,6 +40,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 - Automatic ESP reconnection; hot reload of Home Assistant entities via SIGHUP
 - Time zone taken from Home Assistant, so the server itself may run in UTC
 - Web debug UI with exchange log, timings and text input; `/health` endpoint
+- Voice requests recorded (WAV + transcript, reply, tool calls) for 90 days, to hear failures and replay them through another STT
 
 ## Architecture
 

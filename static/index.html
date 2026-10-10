@@ -119,6 +119,7 @@ function renderExchange(e, i, isFirst) {
     <div class="input-line">${esc(e.input)}</div>
     <div class="response-line">${esc(e.response)}</div>
     <div class="actions">
+      ${e.audio ? '<button onclick="playAudio(\'/recordings/' + e.audio + '\')">Ecouter la demande</button>' : ''}
       ${e.tts_url ? '<button onclick="playAudio(\'' + e.tts_url + '\')">Ecouter</button>' : ''}
       ${hasDebug ? '<button onclick="toggleDebug(' + i + ')">Debug</button>' : ''}
     </div>
