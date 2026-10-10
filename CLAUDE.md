@@ -10,7 +10,8 @@ ESP (wake word) → audio stream → voice_server.py
                                    ├─ llm.py (OpenAI API / llama.cpp) → tool calls or text
                                    │    ├─ ha_client.py → Home Assistant REST API
                                    │    ├─ weather.py → Open-Meteo API (free, no key)
-                                   │    └─ calendar_client.py → Google Calendar API (OAuth2)
+                                   │    ├─ calendar_client.py → Google Calendar API (OAuth2)
+                                   │    └─ spotify.py → go-librespot (playback) + Spotify Web API (search)
                                    ├─ tts.py (Kokoro-82M) → WAV file
                                    └─ web_ui.py → debug UI on :8888
 ```
@@ -28,6 +29,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
 | `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, prompt summary |
 | `setup_calendar.py` | One-time OAuth setup script for Google Calendar (requires browser) |
+| `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
 | `web_ui.py` | Web UI (HTML + routes), exchange log with persistence (`exchanges.json`) |
 | `run.sh` | Launcher: reads secrets from macOS Keychain, selects cloud/local LLM mode |
 | `ctl.sh` | Service control: start/stop/restart/reload/status/logs via launchd |
@@ -55,6 +57,7 @@ ESP (wake word) → audio stream → voice_server.py
 - **DateTime injection**: current date/time injected into system prompt so the LLM can answer time/date questions.
 - **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
 - **Text fallback parser**: catches when local LLM outputs tool calls as plain text instead of structured JSON (4 patterns: JSON args, quoted string, Python kwargs, French verbs).
+- **Spotify as a radio station**: go-librespot (separate service) plays into a FIFO; `spotify.py` paces it at real time, pads gaps with silence, encodes MP3 and serves `/spotify/stream.mp3` next to `/tts/`. Speakers (ESP or HA) play that URL; one stream, so one speaker at a time.
 - **Secrets**: stored in macOS Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`), read by `run.sh` and exported as env vars.
 
 ## Configuration (env vars)
@@ -76,6 +79,9 @@ ESP (wake word) → audio stream → voice_server.py
 | `TTS_BASE_URL` | `http://<LAN IP>:<HTTP_PORT>/tts/` | URL the ESP fetches TTS files from, ending in `/`. Set it when the ESP reaches `/tts/` through a relay on another network |
 | `CALENDAR_CREDENTIALS` | `client_secret.json` | Google OAuth credentials file path |
 | `CALENDAR_TOKEN` | `token.json` | Google OAuth token file path |
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | (empty) | Spotify developer app, for search (client credentials). Music is enabled when go-librespot answers |
+| `SPOTIFY_LIBRESPOT_URL` | `http://127.0.0.1:3678` | go-librespot API |
+| `SPOTIFY_PCM_FIFO` | `/run/go-librespot/pcm` | FIFO go-librespot writes its PCM into |
 
 ## Service management
 

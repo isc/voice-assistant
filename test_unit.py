@@ -528,6 +528,49 @@ class TestResolveStation(unittest.TestCase):
             self.assertIsNone(_resolve_station(name), name)
 
 
+class TestMatchPlaylist(unittest.TestCase):
+    PLAYLISTS = [{"name": n, "uri": n} for n in ("Matin tranquille ☀️", "Soirée", "Endormissement Zoé et Charlie")]
+
+    def test_spoken_names(self):
+        from spotify import match_playlist
+
+        self.assertEqual(match_playlist(self.PLAYLISTS, "ma playlist du matin")["name"], "Matin tranquille ☀️")
+        self.assertEqual(match_playlist(self.PLAYLISTS, "soirée")["name"], "Soirée")
+        self.assertEqual(match_playlist(self.PLAYLISTS, "endormissement")["name"], "Endormissement Zoé et Charlie")
+
+    def test_no_match(self):
+        from spotify import match_playlist
+
+        for query in ("", "ma playlist", "jazz"):
+            self.assertIsNone(match_playlist(self.PLAYLISTS, query), query)
+
+
+class TestSpotifyStreamRead(unittest.TestCase):
+    """The FIFO is read in whole stereo frames: a split frame would garble the rest of the stream."""
+
+    def test_whole_frames_only(self):
+        import os
+        import tempfile
+
+        from spotify import SpotifyStream
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "pcm")
+            os.mkfifo(path)
+            stream = SpotifyStream(path)
+            self.assertEqual(stream._read(), b"")  # no writer yet
+            writer = os.open(path, os.O_WRONLY)
+            try:
+                os.write(writer, bytes(range(10)))
+                self.assertEqual(stream._read(), bytes(range(8)))
+                os.write(writer, bytes(range(10, 12)))
+                self.assertEqual(stream._read(), bytes(range(8, 12)))
+                self.assertEqual(stream._read(), b"")  # writer attached, nothing to read
+            finally:
+                os.close(writer)
+                os.close(stream._fd)
+
+
 class TestFormatState(unittest.TestCase):
     def setUp(self):
         self.client = make_client()
