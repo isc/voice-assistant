@@ -576,9 +576,13 @@ class VoiceAssistantServer:
         try:
             timings = {}
 
-            # 1. STT
+            # 1. STT, skipped if the VAD heard no speech (AD-036)
             t0 = time.time()
-            transcript = await self.stt.transcribe(audio_bytes)
+            if self.vad_has_speech:
+                transcript = await self.stt.transcribe(audio_bytes)
+            else:
+                logger.info("STT skipped: the VAD heard no speech")
+                transcript = ""
             timings["stt"] = round(time.time() - t0, 2)
             if not transcript:
                 if self.is_followup:
