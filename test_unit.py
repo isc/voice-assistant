@@ -12,6 +12,7 @@ Usage:
 
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from ha_client import HAClient, cover_kind, normalize
 from images import is_about
@@ -193,8 +194,18 @@ class TestResolveEntity(unittest.TestCase):
 
 
 class TestResolveAllEntities(unittest.TestCase):
+    # Room groups come from the gitignored config.local.json: the tests bring their own,
+    # over the fake areas, so that they pass on any machine
+    ROOM_GROUPS = {
+        "enfants": ["Chambre Charlie", "Chambre Zoé"],
+        "partout": ["Chambre Charlie", "Chambre Zoé", "Chambre parents", "Chambre invités", "Living Room"],
+    }
+
     def setUp(self):
         self.client = make_client()
+        groups = patch.dict("ha_client.ROOM_GROUPS", self.ROOM_GROUPS, clear=True)
+        groups.start()
+        self.addCleanup(groups.stop)
 
     def test_room_group_enfants(self):
         eids = self.client.resolve_all_entities("volet", room="enfants", domain_hints=["cover"])
