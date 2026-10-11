@@ -1658,6 +1658,21 @@ class TestDucking(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.volumes, {"media_player.google_home": 0.42})
 
 
+class TestVADFrames(unittest.IsolatedAsyncioTestCase):
+    async def test_a_frame_may_span_chunks(self):
+        """ESPHome 2026.6 sends chunks of no fixed size: a 32 ms frame may arrive in two."""
+        server = make_server()
+        server.is_recording, server.skip_audio_until, server.audio_buffer = True, 0, bytearray()
+        server.vad_offset = server.vad_speech_frames = server.vad_silence_frames = 0
+        server.vad_has_speech = False
+        server.vad = MagicMock()
+        server.vad.process.return_value = 0.9
+        for _ in range(3):
+            await server.handle_voice_assistant_audio(server.site, bytes(700))
+        self.assertEqual(server.vad.process.call_count, 2)  # 2100 bytes: two frames of 1024
+        self.assertTrue(server.vad_has_speech)
+
+
 class TestTimers(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_the_only_timer_without_its_name(self):
         from timer import TimerManager

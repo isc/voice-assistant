@@ -639,6 +639,7 @@ class VoiceAssistantServer:
 
         self.audio_buffer = bytearray()
         self.is_recording = True
+        self.vad_offset = 0  # bytes of the recording the VAD has read
         self.vad_speech_frames = 0
         self.vad_silence_frames = 0
         self.vad_has_speech = False
@@ -787,15 +788,18 @@ class VoiceAssistantServer:
             self.audio_buffer.extend(audio_bytes)
             self.last_audio_time = time.time()
 
-            await self.analyze_audio_vad(audio_bytes)
+            await self.analyze_audio_vad()
 
             if len(self.audio_buffer) % 10240 == 0 or len(self.audio_buffer) < 10240:
                 logger.debug(f"Audio: {len(self.audio_buffer)} bytes")
         else:
             logger.debug("Audio received after recording stopped (normal)")
 
-    async def analyze_audio_vad(self, audio_bytes: bytes):
-        """Analyze audio with Silero VAD to detect end of speech"""
+    async def analyze_audio_vad(self):
+        """Run Silero VAD over the recording's new frames, to detect the end of speech.
+
+        Frames are cut from the whole recording, not from each chunk: the satellite's chunks have no
+        fixed size since ESPHome 2026.6, and a chunk's leftover would be lost."""
         import array
 
         from silero_vad_lite import SileroVAD
@@ -803,13 +807,11 @@ class VoiceAssistantServer:
         if not hasattr(self, "vad"):
             self.vad = SileroVAD(16000)
 
-        frame_samples = 512  # 32ms at 16kHz
-        frame_size = frame_samples * 2  # 1024 bytes as int16
+        frame_size = 512 * 2  # 32 ms at 16 kHz, int16
 
-        for i in range(0, len(audio_bytes), frame_size):
-            frame = audio_bytes[i : i + frame_size]
-            if len(frame) != frame_size:
-                continue
+        while self.vad_offset + frame_size <= len(self.audio_buffer):
+            frame = self.audio_buffer[self.vad_offset : self.vad_offset + frame_size]
+            self.vad_offset += frame_size
 
             try:
                 int16_samples = array.array("h")
