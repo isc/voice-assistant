@@ -3,7 +3,7 @@
 // requests or api/* so the live debug UI keeps working against the network.
 // URLs are relative to this script: the app lives at / on the tailnet, at
 // /assistant/ through Funnel.
-const CACHE = "va-shell-v2";
+const CACHE = "va-shell-v3";
 const SHELL = [
   "./",
   "manifest.webmanifest",

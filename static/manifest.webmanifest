@@ -3,6 +3,7 @@
   "short_name": "Voice",
   "description": "Assistant vocal pour la maison connectée",
   "lang": "fr",
+  "id": "./voice",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
