@@ -169,7 +169,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             {
                 "name": "query_calendar",
                 "description": (
-                    "Consulter l'agenda. Chercher des événements par date ou mot-clé. "
+                    "Consulter l'agenda : rendez-vous, trajets en train ou en avion réservés, vacances. "
+                    "Chercher des événements par date ou mot-clé. "
                     "Dès que la demande couvre une période (« cette semaine », « ce week-end », "
                     "« en août », « dans les prochains jours »), renseigne OBLIGATOIREMENT end_date : "
                     "sans elle la recherche ne couvre que la seule journée start_date."

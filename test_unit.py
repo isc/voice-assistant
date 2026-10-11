@@ -1245,6 +1245,26 @@ class TestCalendarQueryValidation(unittest.IsolatedAsyncioTestCase):
         data = json.loads(result)
         self.assertEqual(data["error"], "Agenda non disponible")
 
+    def calendar(self):
+        """« l'horaire du train des enfants samedi » searched « enfants »; the train is « PARIS EST - STRASBOURG »."""
+        from calendar_client import CalendarClient
+
+        client = CalendarClient.__new__(CalendarClient)
+        client._service = object()
+        client._lock = asyncio.Lock()
+        train = {"summary": "PARIS EST - STRASBOURG", "start": {"dateTime": "2026-10-17T10:25:00+02:00"}}
+        client._list_events = lambda _min, _max, search: {"items": [] if search else [train]}
+        return client
+
+    async def test_a_day_picked_is_read_whole(self):
+        data = json.loads(await self.calendar().query_events("2026-10-17", search="enfants"))
+        self.assertEqual([e["title"] for e in data["events"]], ["PARIS EST - STRASBOURG"])
+
+    async def test_a_period_searched_in_vain_is_read_whole(self):
+        data = json.loads(await self.calendar().query_events("2026-10-17", "2026-10-18", search="train"))
+        self.assertEqual([e["title"] for e in data["events"]], ["PARIS EST - STRASBOURG"])
+        self.assertIn("train", data["note"])
+
 
 # ---------------------------------------------------------------------------
 # Tests: several sites from one server

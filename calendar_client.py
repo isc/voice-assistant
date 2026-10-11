@@ -129,6 +129,12 @@ class CalendarClient:
         except ValueError:
             return _error(f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)")
 
+        # A day picked (« le train des enfants samedi »), not a question of when (« c'est quand le
+        # dentiste ? », from today): the whole day. Titles seldom hold the request's words (the train
+        # is « PARIS EST - STRASBOURG »), and a year-long search would answer with another train
+        if search and not end_date and start_dt.date() != datetime.now(start_dt.tzinfo).date():
+            search = None
+        day_end = start_dt + timedelta(days=1)
         if end_date:
             try:
                 end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(_time_zone()))
@@ -140,23 +146,20 @@ class CalendarClient:
             # « c'est quand le dentiste ? » comes with today only: search the year ahead
             end_dt = start_dt + timedelta(days=365)
         else:
-            end_dt = start_dt + timedelta(days=1)
-
-        time_min = start_dt.isoformat()
-        time_max = end_dt.isoformat()
+            end_dt = day_end
 
         try:
-            async with self._lock:
-                result = await asyncio.to_thread(self._list_events, time_min, time_max, search)
+            events = await self._events(start_dt, end_dt, search)
+            note = None
+            # Nothing found in a period (« le train ce week-end »): its events, for the LLM to recognise
+            # the one asked. A week at most: a month of events would fill the 8K-token context
+            period_end = end_dt if end_date else day_end
+            if search and not events and period_end - start_dt <= timedelta(days=7):
+                events = await self._events(start_dt, period_end, None)
+                note = f"Aucun événement ne contient « {search} » : voici tous ceux de la période"
         except Exception as e:
             logger.error(f"Calendar query failed: {e}")
             return _error("Erreur lors de la consultation de l'agenda")
-
-        events = []
-        for item in result.get("items", []):
-            if item.get("status") == "cancelled":
-                continue
-            events.append(_format_event(item))
 
         # Build period description in French
         if end_date and end_date != start_date:
@@ -164,10 +167,15 @@ class CalendarClient:
         else:
             period = _format_date_fr(start_dt)
 
-        return json.dumps(
-            {"events": events, "period": period, "count": len(events)},
-            ensure_ascii=False,
-        )
+        result = {"events": events, "period": period, "count": len(events)}
+        if note:
+            result["note"] = note
+        return json.dumps(result, ensure_ascii=False)
+
+    async def _events(self, start_dt: datetime, end_dt: datetime, search: str | None) -> list[dict]:
+        async with self._lock:
+            result = await asyncio.to_thread(self._list_events, start_dt.isoformat(), end_dt.isoformat(), search)
+        return [_format_event(item) for item in result.get("items", []) if item.get("status") != "cancelled"]
 
     def _list_events(self, time_min: str, time_max: str, search: str | None) -> dict:
         """Execute the events.list API call (runs in thread)."""
