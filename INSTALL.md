@@ -165,3 +165,17 @@ Music is enabled when go-librespot answers at startup. Speakers fetch the stream
 ## Web UI
 
 Open `http://localhost:8888/` for the debug interface (exchange log, timings, text input).
+From a phone, without Tailscale: Tailscale Funnel publishes it at a path of its own, behind a key
+given once per device (AD-048).
+
+```bash
+# once: the key, in the service's environment
+echo "WEB_UI_KEY=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')" | sudo tee -a /etc/voice-assistant.env >/dev/null
+sudo systemctl restart voice-assistant
+# funnel, never serve: on charras `serve` turns Funnel off for the whole node (home-infra SETUP §10)
+sudo tailscale funnel --bg --set-path=/assistant http://127.0.0.1:8888
+# the link to open on the phone, then « Installer l'application »
+echo "https://charras-server.tailcef78d.ts.net/assistant/?k=$(sudo sed -n 's/^WEB_UI_KEY=//p' /etc/voice-assistant.env)"
+```
+
+A new key (edit the line, restart) locks out every device until it opens the new link.

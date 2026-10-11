@@ -67,7 +67,7 @@ ESP (wake word) → audio stream → voice_server.py
 - **Text fallback parser**: catches when the LLM outputs tool calls as plain text instead of structured JSON (3 patterns: JSON args, quoted string, Python kwargs; never in dry runs).
 - **Spotify as a radio station**: go-librespot (separate service) plays into a FIFO; `spotify.py` paces it at real time, pads gaps with silence, encodes MP3 and serves `/spotify/stream.mp3` next to `/tts/`. Speakers (ESP or HA) play that URL; one stream, so one speaker at a time.
 - **Locks lock, never unlock**: a `lock` tool and state reads, no unlock tool. Only the tools offered this turn run, and `HAClient.call_service` refuses `lock.unlock` and `lock.open` (AD-041).
-- **Web UI on Tailscale only**: port 8888 also answers on the LAN, where speakers fetch `/tts/` and `/spotify/stream.mp3`; everything else (UI, API, recordings) answers only localhost and the tailnet (`web_ui.lan_sees_only_speaker_paths`).
+- **Web UI on the tailnet, or the internet with a key**: port 8888 also answers on the LAN, where speakers fetch `/tts/` and `/spotify/stream.mp3`; everything else (UI, API, recordings) answers localhost and the tailnet. Tailscale Funnel publishes it at `https://charras-server.tailcef78d.ts.net/assistant/`, where a request (told apart by the proxy's headers) needs the `WEB_UI_KEY` cookie, dropped by `?k=<key>` (`web_ui.access_control`, AD-048). Hence relative URLs in `static/`: the app lives at `/` and at `/assistant/`.
 - **Secrets**: the server only reads env vars: `/etc/voice-assistant.env` on the server, the Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`) through `run.sh` on a Mac.
 
 ## Configuration (env vars)
@@ -93,6 +93,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | (empty) | Spotify developer app, for search (client credentials). Music is enabled when go-librespot answers |
 | `SPOTIFY_LIBRESPOT_URL` | `http://127.0.0.1:3678` | go-librespot API |
 | `SPOTIFY_PCM_FIFO` | `/run/go-librespot/pcm` | FIFO go-librespot writes its PCM into |
+| `WEB_UI_KEY` | (empty) | Key of the web UI's link through Tailscale Funnel (`/assistant/?k=<key>`); empty, Funnel gets 401 everywhere |
 | `RECORDINGS_DAYS` | `90` | Days voice requests are kept in `recordings/` (one folder per day, mode 700); `0` turns recording off |
 
 ## Deployment and service management

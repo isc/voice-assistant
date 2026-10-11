@@ -21,6 +21,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
+from aiohttp import web
+from aiohttp.test_utils import make_mocked_request
 from opening_hours import ParserError
 
 from ha_client import HAClient, cover_kind, normalize
@@ -29,7 +31,7 @@ from llm import claims_completed_action, get_tool_definitions, parse_text_tool_c
 from places import week
 from recordings import Recordings
 from sites import load_sites
-from web_ui import is_trusted_client
+from web_ui import KEY_COOKIE, access_control, is_trusted_client
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -1537,6 +1539,43 @@ class TestWebUIAccess(unittest.TestCase):
             self.assertTrue(is_trusted_client(remote), remote)
         for remote in ("192.168.1.42", "82.67.150.147", None, "garbage"):
             self.assertFalse(is_trusted_client(remote), remote)
+
+
+class TestWebUIThroughFunnel(unittest.IsolatedAsyncioTestCase):
+    """Funnel's proxy forwards the internet from loopback: only the key lets it in."""
+
+    async def call(self, path, headers=None, remote="127.0.0.1", key="s3cret"):
+        async def handler(request):
+            return web.Response(text="ok")
+
+        request = make_mocked_request("GET", path, headers=headers or {}).clone(remote=remote)
+        try:
+            return await access_control(key)(request, handler)
+        except web.HTTPException as e:
+            return e
+
+    async def test_direct_requests_as_before(self):
+        self.assertEqual((await self.call("/api/exchanges")).status, 200)
+        self.assertEqual((await self.call("/api/exchanges", remote="192.168.1.42")).status, 403)
+        self.assertEqual((await self.call("/tts/reply.wav", remote="192.168.1.42")).status, 200)
+
+    async def test_funnel_needs_the_key(self):
+        funnel = {"X-Forwarded-For": "82.67.150.147", "Tailscale-Funnel-Request": "?1"}
+        for path in ("/", "/api/exchanges", "/tts/reply.wav", "/health"):
+            self.assertEqual((await self.call(path, funnel)).status, 401, path)
+        self.assertEqual((await self.call("/?k=wrong", funnel)).status, 401)
+        self.assertEqual((await self.call("/?k=s3cret", funnel, key="")).status, 401)
+        self.assertEqual((await self.call("/manifest.webmanifest", funnel)).status, 200)
+        self.assertEqual((await self.call("/", {**funnel, "Cookie": f"{KEY_COOKIE}=s3cret"})).status, 200)
+
+    async def test_key_link_drops_a_cookie_scoped_by_the_browser(self):
+        response = await self.call("/?k=s3cret", {"X-Forwarded-For": "82.67.150.147"})
+        self.assertEqual(response.status, 302)
+        self.assertEqual(response.headers["Location"], "./")
+        cookie = response.cookies[KEY_COOKIE]
+        self.assertEqual(cookie.value, "s3cret")
+        self.assertTrue(cookie["secure"] and cookie["httponly"])
+        self.assertNotIn("Path=", cookie.OutputString())
 
 
 if __name__ == "__main__":

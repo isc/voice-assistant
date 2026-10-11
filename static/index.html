@@ -7,8 +7,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Voice">
 <meta name="theme-color" content="#0a84ff">
-<link rel="manifest" href="/manifest.webmanifest">
-<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="static/apple-touch-icon.png">
 <title>Voice Assistant</title>
 <style>
   :root {
@@ -80,7 +80,7 @@ const ex = document.getElementById('exchanges');
 const cmd = document.getElementById('cmd');
 const siteSel = document.getElementById('site');
 // Several homes: a typed command goes to the one chosen here, never silently to the other
-fetch('/health').then(r => r.json()).then(h => {
+fetch('health').then(r => r.json()).then(h => {
   const names = Object.keys(h.sites || {});
   if (names.length < 2) return;
   siteSel.innerHTML = names.map(n => '<option>' + esc(n) + '</option>').join('');
@@ -128,8 +128,8 @@ function renderExchange(e, i, isFirst) {
     <div class="input-line">${esc(e.input)}</div>
     <div class="response-line">${esc(e.response)}</div>
     <div class="actions">
-      ${e.audio ? '<button onclick="playAudio(\'/recordings/' + e.audio + '\')">Ecouter la demande</button>' : ''}
-      ${e.tts_url ? '<button onclick="playAudio(\'' + e.tts_url + '\')">Ecouter</button>' : ''}
+      ${e.audio ? '<button onclick="playAudio(\'recordings/' + e.audio + '\')">Ecouter la demande</button>' : ''}
+      ${e.tts_url ? '<button onclick="playAudio(\'tts/' + e.tts_url.split('/').pop() + '\')">Ecouter</button>' : ''}
       ${hasDebug ? '<button onclick="toggleDebug(' + i + ')">Debug</button>' : ''}
     </div>
     ${hasDebug ? '<div class="debug" id="dbg-' + i + '">' + fmtDebug(e) + '</div>' : ''}
@@ -170,7 +170,7 @@ function playAudio(url) {
 
 async function refresh() {
   try {
-    const r = await fetch('/api/exchanges');
+    const r = await fetch('api/exchanges');
     const data = await r.json();
     const hash = JSON.stringify(data.map(e => e.timestamp));
     if (hash !== lastHash) { lastHash = hash; render(data); }
@@ -183,7 +183,7 @@ async function send() {
   cmd.value = '';
   btn.disabled = true;
   try {
-    await fetch('/api/send', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(siteSel.hidden ? {text} : {text, site: siteSel.value}) });
+    await fetch('api/send', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(siteSel.hidden ? {text} : {text, site: siteSel.value}) });
     await refresh();
   } catch(e) { alert('Erreur: ' + e.message); }
   btn.disabled = false;
@@ -199,7 +199,7 @@ cmd.focus();
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('sw.js').catch(() => {});
   });
 }
 </script>

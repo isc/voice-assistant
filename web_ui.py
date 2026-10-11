@@ -1,5 +1,6 @@
 """Web UI and HTTP routes for the voice assistant."""
 
+import hmac
 import ipaddress
 import json
 import logging
@@ -16,6 +17,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 _TAILNET = ipaddress.ip_network("100.64.0.0/10")
 # What speakers fetch from the LAN: TTS replies and the Spotify stream (and /health, for checks)
 _LAN_PATHS = ("/tts/", "/spotify/", "/health")
+# Tailscale Funnel's proxy runs on this machine: the internet arrives from loopback, told apart by these
+_PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-Funnel-Request")
+# Fetched without the cookie when Chrome installs the app; the icons by Google's WebAPK server
+_INSTALL_PATHS = ("/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png")
+KEY_COOKIE = "assistant_key"
 
 
 def is_trusted_client(remote: str | None) -> bool:
@@ -27,15 +33,37 @@ def is_trusted_client(remote: str | None) -> bool:
     return address.is_loopback or address in _TAILNET
 
 
+def _is_key(given: str | None, key: str) -> bool:
+    return bool(key and given) and hmac.compare_digest(given.encode(), key.encode())
+
+
+def access_control(key: str):
+    """The LAN sees what speakers fetch; this machine and the tailnet see everything; the internet,
+    through Funnel at /assistant/, sees everything with the key: `?k=<key>` once, then a cookie."""
+
+    @web.middleware
+    async def middleware(request, handler):
+        if not any(header in request.headers for header in _PROXY_HEADERS):
+            if request.path.startswith(_LAN_PATHS) or is_trusted_client(request.remote):
+                return await handler(request)
+            raise web.HTTPForbidden(text="Only speaker files are served on the LAN")
+        if request.path in _INSTALL_PATHS or _is_key(request.cookies.get(KEY_COOKIE), key):
+            return await handler(request)
+        if _is_key(request.query.get("k"), key):
+            # The same page without the key in its address. Relative, as is the cookie (no Path: the
+            # browser scopes it to /assistant), since Funnel strips that prefix before we see the request
+            response = web.HTTPFound(request.rel_url.name or "./")
+            response.set_cookie(
+                KEY_COOKIE, key, path="", max_age=365 * 86400, secure=True, httponly=True, samesite="Lax"
+            )
+            raise response
+        raise web.HTTPUnauthorized(text="Ouvrez le lien avec la clé")
+
+    return middleware
+
+
 def _json_error(error: type[web.HTTPException], message: str) -> web.HTTPException:
     return error(text=json.dumps({"error": message}), content_type="application/json")
-
-
-@web.middleware
-async def lan_sees_only_speaker_paths(request, handler):
-    if request.path.startswith(_LAN_PATHS) or is_trusted_client(request.remote):
-        return await handler(request)
-    raise web.HTTPForbidden(text="The web UI is reachable through Tailscale only")
 
 
 class ExchangeLog:
@@ -100,7 +128,8 @@ class ExchangeLog:
 
 def setup_routes(app, server):
     """Register web UI routes on an aiohttp app."""
-    app.middlewares.append(lan_sees_only_speaker_paths)
+    # Empty: nothing answers through Funnel
+    app.middlewares.append(access_control(os.environ.get("WEB_UI_KEY", "")))
 
     async def read_text(request) -> str:
         """The prompt of a text request; the request then serves the site it names, if any.
@@ -136,12 +165,12 @@ def setup_routes(app, server):
         )
 
     async def handle_service_worker(request):
-        # Served from root so its scope covers "/" (a /static/sw.js could only
-        # control /static/*). Sent no-cache so SW updates propagate promptly.
+        # Beside the page, so its scope is the app's folder (a /static/sw.js could only control
+        # /static/*): / on the tailnet, /assistant/ through Funnel. No-cache so updates propagate.
         return web.Response(
             text=(STATIC_DIR / "sw.js").read_text(),
             content_type="application/javascript",
-            headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"},
+            headers={"Cache-Control": "no-cache"},
         )
 
     async def handle_get_exchanges(request):
