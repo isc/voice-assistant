@@ -23,7 +23,7 @@ python3 -m venv ../esphome-venv && ../esphome-venv/bin/pip install esphome==2026
 
 `home-assistant-voice.factory.yaml` is the variant the device came with (device name
 `home-assistant-voice-…`, 16 MB flash); `home-assistant-voice.8mb.yaml` is for 8 MB units. The
-first compile downloads ESP-IDF and took about three hours on charras-server; later ones reuse
+first compile, ESP-IDF download included, took about three minutes on charras-server; later ones reuse
 `~/.cache/esphome`.
 
 ## Flash
