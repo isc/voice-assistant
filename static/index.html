@@ -32,6 +32,7 @@
   header { padding: 14px 20px; padding-top: calc(14px + env(safe-area-inset-top, 0px)); background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
   header h1 { font-size: 17px; font-weight: 600; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); }
+  #install { margin-left: auto; background: var(--accent); color: #fff; border: none; padding: 6px 14px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
   #exchanges { flex: 1; overflow-y: auto; padding: 12px 20px; display: flex; flex-direction: column; gap: 16px; }
   .conversation { display: flex; flex-direction: column; gap: 2px; }
   .conversation .exchange:first-child { border-radius: 10px 10px 4px 4px; }
@@ -67,6 +68,7 @@
 <header>
   <div class="dot"></div>
   <h1>Voice Assistant</h1>
+  <button id="install" hidden>Installer</button>
 </header>
 <div id="exchanges"><div class="empty">Aucun echange pour le moment</div></div>
 <div id="input-bar">
@@ -197,6 +199,14 @@ cmd.addEventListener('keydown', e => { if (e.key === 'Enter' && !btn.disabled &&
 refresh();
 setInterval(refresh, 3000);
 cmd.focus();
+
+// Chrome's menu answers « already installed » for any app of the origin, and kiné, Par chœur and Web ERG
+// share charras-server's; its prompt, offered here, looks at this app's own scope
+const installBtn = document.getElementById('install');
+let installPrompt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; installBtn.hidden = false; });
+installBtn.addEventListener('click', () => { installBtn.hidden = true; installPrompt.prompt(); });
+addEventListener('appinstalled', () => { installBtn.hidden = true; });
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
