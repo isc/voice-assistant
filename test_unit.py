@@ -13,6 +13,7 @@ Usage:
 import asyncio
 import json
 import os
+import socket
 import tempfile
 import unittest
 import wave
@@ -32,7 +33,7 @@ from llm import claims_completed_action, get_tool_definitions, parse_text_tool_c
 from places import week
 from recordings import Recordings
 from sites import load_sites, site_at_address
-from web_ui import KEY_COOKIE, access_control, is_trusted_client, setup_routes
+from web_ui import KEY_COOKIE, access_control, cross_site_guard, is_trusted_client, setup_routes
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -1792,18 +1793,24 @@ class TestWebUIAccess(unittest.TestCase):
             self.assertFalse(is_trusted_client(remote), remote)
 
 
+async def run_middleware(middleware, request):
+    """The response a middleware gives, or the HTTP error it raises, in front of a handler saying ok."""
+
+    async def handler(request):
+        return web.Response(text="ok")
+
+    try:
+        return await middleware(request, handler)
+    except web.HTTPException as e:
+        return e
+
+
 class TestWebUIThroughFunnel(unittest.IsolatedAsyncioTestCase):
     """Funnel's proxy forwards the internet from loopback: only the key lets it in."""
 
     async def call(self, path, headers=None, remote="127.0.0.1", key="s3cret"):
-        async def handler(request):
-            return web.Response(text="ok")
-
         request = make_mocked_request("GET", path, headers=headers).clone(remote=remote)
-        try:
-            return await access_control(key)(request, handler)
-        except web.HTTPException as e:
-            return e
+        return await run_middleware(access_control(key), request)
 
     async def test_direct_requests_as_before(self):
         self.assertEqual((await self.call("/api/exchanges")).status, 200)
@@ -1828,6 +1835,46 @@ class TestWebUIThroughFunnel(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cookie.value, "s3cret")
         self.assertTrue(cookie["secure"] and cookie["httponly"])
         self.assertNotIn("Path=", cookie.OutputString())
+
+
+class TestWebUICrossSite(unittest.IsolatedAsyncioTestCase):
+    """Pages of other sites in a browser on the tailnet: no simple POSTs, no rebound names (AD-056)."""
+
+    async def call(self, path, headers=None, method="GET"):
+        return await run_middleware(cross_site_guard, make_mocked_request(method, path, headers=headers))
+
+    async def test_our_names_only(self):
+        for host in (
+            "localhost:8888",
+            "127.0.0.1:8888",
+            "[::1]:8888",
+            "100.72.204.126:8888",
+            f"{socket.gethostname().split('.')[0]}:8888",
+            "charras-server.tailcef78d.ts.net",
+        ):
+            self.assertEqual((await self.call("/api/exchanges", {"Host": host})).status, 200, host)
+        self.assertEqual((await self.call("/api/exchanges")).status, 200)  # no Host: no browser
+        for host in ("evil.example:8888", "charras-server.evil.example", "x:y:z"):
+            self.assertEqual((await self.call("/api/exchanges", {"Host": host})).status, 421, host)
+        self.assertEqual((await self.call("/tts/reply.flac", {"Host": "relay.example:8889"})).status, 200)
+        self.assertEqual((await self.call("/health", {"Host": "evil.example:8888"})).status, 421)
+
+    async def test_posts_take_json_only(self):
+        for content_type in ("text/plain", "application/x-www-form-urlencoded", "multipart/form-data", None):
+            headers = {"Content-Type": content_type} if content_type else {}
+            self.assertEqual((await self.call("/api/send", headers, "POST")).status, 415, content_type)
+        json_utf8 = {"Content-Type": "application/json; charset=utf-8"}
+        self.assertEqual((await self.call("/api/send", json_utf8, "POST")).status, 200)
+
+    async def test_through_the_routes(self):
+        app = web.Application()
+        setup_routes(app, make_server())
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post("/api/dry-run", data='{"text": "ouvre le portail"}')
+            self.assertEqual(response.status, 415)
+            response = await client.post("/api/dry-run", data="{", headers={"Content-Type": "application/json"})
+            self.assertEqual((response.status, await response.json()), (400, {"error": "invalid JSON"}))
+            self.assertEqual((await client.post("/api/reset-conversation", json={})).status, 200)
 
 
 class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):

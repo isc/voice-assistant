@@ -21,25 +21,22 @@ import urllib.request
 SERVER = "http://localhost:8888"
 
 
+def post(path: str, body: dict, timeout: float) -> dict:
+    """POST JSON, the only body the API takes (AD-056)."""
+    req = urllib.request.Request(
+        f"{SERVER}{path}", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}
+    )
+    return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+
+
 def send(text: str) -> dict:
     """Send a text command via dry-run (no HA execution)."""
-    req = urllib.request.Request(
-        f"{SERVER}/api/dry-run",
-        data=json.dumps({"text": text}).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    resp = urllib.request.urlopen(req, timeout=30)
-    return json.loads(resp.read())
+    return post("/api/dry-run", {"text": text}, 30)
 
 
 def reset():
     """Clear the dry-run conversation between independent tests (the live one is left alone)."""
-    req = urllib.request.Request(
-        f"{SERVER}/api/reset-conversation",
-        data=b"",
-        method="POST",
-    )
-    urllib.request.urlopen(req, timeout=5)
+    post("/api/reset-conversation", {}, 5)
 
 
 def tool_names(data: dict) -> list[str]:

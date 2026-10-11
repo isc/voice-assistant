@@ -495,9 +495,8 @@ class VoiceAssistantServer:
             s.close()
 
         logger.info(f"HTTP TTS server started on http://{local_ip}:{HTTP_PORT}/tts/")
-        logger.info(
-            f'Test endpoint: curl -X POST http://{local_ip}:{HTTP_PORT}/test -d \'{{"text": "allume la lumière"}}\''
-        )
+        # From this machine: the LAN gets only the speaker paths (AD-042)
+        logger.info(f'Test endpoint: curl --json \'{{"text": "allume la lumière"}}\' http://localhost:{HTTP_PORT}/test')
         for home in self.sites:
             # A site whose satellite cannot reach this host's LAN address names a relay
             home.http_base_url = home.tts_base_url or f"http://{local_ip}:{HTTP_PORT}/tts/"

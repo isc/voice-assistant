@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import socket
 import time
 from pathlib import Path
 
@@ -18,14 +19,18 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 # Tailscale's address range: the web UI is reached through it, while :8888 also answers on the LAN
 _TAILNET = ipaddress.ip_network("100.64.0.0/10")
-# What speakers fetch from the LAN: TTS replies and the Spotify stream (and /health, for checks)
-_LAN_PATHS = ("/tts/", "/spotify/", "/health")
+# What speakers fetch, from the LAN or through the Paris relay: TTS replies and the Spotify stream
+_SPEAKER_PATHS = ("/tts/", "/spotify/")
+# What the LAN may fetch: the speakers' files, and /health for checks
+_LAN_PATHS = (*_SPEAKER_PATHS, "/health")
 # Tailscale Funnel's proxy runs on this machine: the internet arrives from loopback, told apart by these
 _PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-Funnel-Request")
 # Fetched without the cookie when Chrome installs the app, the icons by Google's WebAPK server. static/
 # holds only the shell and its icons: data stays behind api/, tts/, recordings/ and health
 _INSTALL_PATHS = ("/manifest.webmanifest", "/static/")
 KEY_COOKIE = "assistant_key"
+# The names browsers reach this server by, besides IP addresses and MagicDNS's (*.ts.net, Funnel's too)
+_OUR_NAMES = {"localhost", socket.gethostname().split(".")[0].lower()}
 
 
 def is_trusted_client(remote: str | None) -> bool:
@@ -66,8 +71,46 @@ def access_control(key: str):
     return middleware
 
 
+def _is_our_host(request) -> bool:
+    """The Host header names this server: an IP address, or one of its names. No header: no browser."""
+    if "Host" not in request.headers:
+        return True
+    try:
+        name = (request.url.host or "").rstrip(".")
+    except ValueError:  # malformed
+        return False
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return name in _OUR_NAMES or name.endswith(".ts.net")
+
+
+@web.middleware
+async def cross_site_guard(request, handler):
+    """Pages of other sites, open in a browser on this machine or the tailnet, cannot use it (AD-056): a
+    POST that is not JSON crosses sites without a CORS preflight, and DNS rebinding leaves the page's
+    own name in Host. Speakers and the Paris relay are no browsers: their paths pass."""
+    if request.path.startswith(_SPEAKER_PATHS):
+        return await handler(request)
+    if not _is_our_host(request):
+        raise web.HTTPMisdirectedRequest(text="Unknown host")
+    if request.method not in ("GET", "HEAD") and request.content_type != "application/json":
+        raise _json_error(web.HTTPUnsupportedMediaType, "JSON body only (Content-Type: application/json)")
+    return await handler(request)
+
+
 def _json_error(error: type[web.HTTPException], message: str) -> web.HTTPException:
     return error(text=json.dumps({"error": message}), content_type="application/json")
+
+
+async def _read_body(request) -> dict:
+    """The JSON object a POST carries (cross_site_guard has checked its type)."""
+    try:
+        body = await request.json()
+    except ValueError:
+        raise _json_error(web.HTTPBadRequest, "invalid JSON") from None
+    return body if isinstance(body, dict) else {}
 
 
 class ExchangeLog:
@@ -133,18 +176,13 @@ class ExchangeLog:
 def setup_routes(app, server):
     """Register web UI routes on an aiohttp app."""
     # Empty: nothing answers through Funnel
-    app.middlewares.append(access_control(os.environ.get("WEB_UI_KEY", "")))
+    app.middlewares.extend([cross_site_guard, access_control(os.environ.get("WEB_UI_KEY", ""))])
 
     async def read_text(request) -> str:
         """The prompt of a text request; the request then serves the site it names, if any.
 
         {"text": …, "site": "charras"}"""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {"text": (await request.text()).strip()}
-        if not isinstance(body, dict):
-            body = {}
+        body = await _read_body(request)
         text = body.get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise _json_error(web.HTTPBadRequest, "missing 'text' field")
@@ -283,11 +321,7 @@ def setup_routes(app, server):
 
     async def handle_reset_conversation(request):
         """Clear a site's dry-run conversation ({"site": …}, else the default), for tests (AD-047)."""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        await use_site(request, body if isinstance(body, dict) else {})
+        await use_site(request, await _read_body(request))
         server.site.dry_run.history = []
         return web.json_response({"status": "ok"})
 

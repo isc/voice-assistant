@@ -75,7 +75,6 @@ Written for Qwen 3 4B. The French-verb text fallback went on 2026-10-11 (never f
 - **Duplicate device names**: Paris has three « Plafonnier » and three « Volet »; with no room, the first in HA's order wins and the reply does not say which. Ask, or prefer the satellite's room, and name the room in the reply.
 - **Sensor search in French**: « chlore », « sel », « consommation », « batterie » miss the English sensor names (« Free Chlorine », « Salinity »…); « eau » matches « Bureau ». Word prefixes and a small French→English map.
 - **VAD minimum speech**: one 32 ms frame above 0.5 counts as speech for the whole recording; Silero's own default asks for 250 ms.
-- **Web API hardening**: POSTs accept text/plain and any Host, so a page open on a tailnet device could send commands; require JSON and check the Host header.
 
 ### STT through the LLM
 Gemma 4 12B, now the LLM, takes audio input natively. It could absorb the STT stage, so that `audio → Gemma → tool calls` replaces `audio → Parakeet → transcript → LLM`. The LLM would hear the request instead of reasoning on a possibly misheard transcript, which also unlocks voice ID Phase 1. Parakeet is not slow (0.07–0.35 s on the GPU), so the case rests on understanding, not latency; it would also free part of the ~4 GB the STT/TTS models hold. It would not have saved the 2026-10-10 request drowned by the Sonos: that is an acoustic problem (see "Duck the music while listening").
