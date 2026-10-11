@@ -28,7 +28,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `ha_client.py` | Home Assistant client: entity discovery, fuzzy name resolution, room groups, service calls |
 | `llm.py` | LLM integration: chat completion, tool definitions, text-to-tool-call fallback parser |
 | `timer.py` | Timer manager: in-memory timers with asyncio scheduling, ESP native timer events |
-| `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 24kHz→16kHz resampling, FLAC through ffmpeg (the Voice PE decodes no WAV) |
+| `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 48 kHz mono FLAC through ffmpeg (the Voice PE decodes no WAV) |
 | `stt.py` | Parakeet TDT 0.6B v3: onnx-asr on Linux/CUDA (server) or parakeet-mlx on Apple Silicon (Mac dev), picked by `STT_BACKEND` |
 | `onnx_gpu.py` | ONNX Runtime on the GPU shared with Ollama: one thread for STT and TTS runs, CUDA arenas that give their memory back after each run (AD-053) |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |

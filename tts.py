@@ -85,7 +85,7 @@ class KokoroTTS:
         return kokoro_onnx.Kokoro.from_session(onnx_gpu.shrinking(session), str(voices_path))
 
     async def synthesize_to_file(self, text: str, output_dir: Path, base_url: str) -> str:
-        """Generate a 16kHz FLAC file and return its URL."""
+        """Generate a 48 kHz FLAC file and return its URL."""
         filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.flac"
         output_path = output_dir / filename
         # Older replies: the speaker fetched them long ago, and they kept every answer since boot
@@ -116,23 +116,17 @@ class KokoroTTS:
 
         logger.info(f"Kokoro output: {len(audio_24k)} samples at {sr}Hz")
 
-        # Resample 24kHz -> 16kHz (ESP expects 16kHz)
-        target_sr = 16000
-        # Band-limited (FFT): linear interpolation folded Kokoro's 8-12 kHz back into the audible
-        # band (a 10 kHz tone came out at 6 kHz, -5 dB)
-        num_samples_16k = int(len(audio_24k) * target_sr / sr)
-        spectrum = np.fft.rfft(audio_24k)[: num_samples_16k // 2 + 1]
-        audio_16k = (np.fft.irfft(spectrum, num_samples_16k) * num_samples_16k / len(audio_24k)).astype(np.float32)
-
         # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
-        audio_int16 = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16)
+        audio_int16 = (np.clip(audio_24k, -1.0, 1.0) * 32767).astype(np.int16)
 
         # FLAC: the Voice PE's firmware decodes FLAC and MP3 since 26.x (ESPHome 2026.6), no longer WAV.
-        # ffmpeg writes to a file so that STREAMINFO holds the length (flac_seconds); ~35 ms.
+        # 48 kHz mono, its announcement format: ffmpeg resamples here, so the satellite runs no resampler
+        # beside its wake word models (a 16 kHz reply stuttered). ffmpeg writes to a file so that
+        # STREAMINFO holds the length (flac_seconds); ~35 ms.
         ffmpeg = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "s16le", "-ar", str(target_sr), "-ac", "1", "-i", "pipe:0",
-            "-c:a", "flac", str(output_path),
+            "-f", "s16le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
+            "-ar", "48000", "-c:a", "flac", str(output_path),
             stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )  # fmt: skip
         _, error = await ffmpeg.communicate(audio_int16.tobytes())
