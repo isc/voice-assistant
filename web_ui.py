@@ -161,7 +161,7 @@ def setup_routes(app, server):
                 text,
                 "[Erreur LLM: pas de réponse]",
                 timings=timings,
-                conversation_id=server.conversation_id,
+                conversation_id=server.conversation.id,
                 site=server.site.name,
             )
             return web.json_response({"error": "LLM returned no response"}, status=500)
@@ -180,7 +180,7 @@ def setup_routes(app, server):
             tts_url,
             timings=timings,
             tool_calls=tool_calls,
-            conversation_id=server.conversation_id,
+            conversation_id=server.conversation.id,
             site=server.site.name,
         )
         return web.json_response(
@@ -204,7 +204,7 @@ def setup_routes(app, server):
                 text,
                 text,
                 "[Erreur LLM: pas de réponse]",
-                conversation_id=server.conversation_id,
+                conversation_id=server.conversation.id,
                 site=server.site.name,
             )
             return web.json_response({"error": "LLM returned no response"}, status=500)
@@ -213,7 +213,7 @@ def setup_routes(app, server):
         result = {"input": text, "response": response_text, "tts_url": tts_url}
         logger.info(f"[TEST] Result: {json.dumps(result, ensure_ascii=False)}")
         server.exchange_log.add(
-            "web", text, text, response_text, tts_url, conversation_id=server.conversation_id, site=server.site.name
+            "web", text, text, response_text, tts_url, conversation_id=server.conversation.id, site=server.site.name
         )
         return web.json_response(result)
 
@@ -232,15 +232,13 @@ def setup_routes(app, server):
         )
 
     async def handle_reset_conversation(request):
-        """Clear a site's conversation history ({"site": …}, else the default). Used by tests for isolation."""
+        """Clear a site's dry-run conversation ({"site": …}, else the default), for tests (AD-047)."""
         try:
             body = await request.json()
         except Exception:
             body = {}
         use_site(body if isinstance(body, dict) else {})
-        server.conversation_history = []
-        server.site.dry_run_history = []
-        server.conversation_id = None
+        server.site.dry_run.history = []
         return web.json_response({"status": "ok"})
 
     async def handle_recording(request):

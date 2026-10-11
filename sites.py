@@ -16,6 +16,16 @@ from timer import TimerManager
 _SHARED_KEYS = {"ESP_PORT", "ESP_PASSWORD", "ESP_NOISE_PSK"}
 
 
+@dataclass(eq=False)
+class Conversation:
+    """What the model hears again of a conversation, forgotten after a silence (CONVERSATION_TIMEOUT)."""
+
+    history: list = field(default_factory=list)
+    id: Optional[int] = None
+    last_time: float = 0
+    shown_images: set = field(default_factory=set)  # pictures not to show twice
+
+
 # Compared by identity: a site is a home with live state, not a value
 @dataclass(eq=False)
 class Site:
@@ -32,14 +42,11 @@ class Site:
     ha_client: Optional[Any] = None  # ha_client.HAClient
     http_base_url: str = ""  # TTS URL announced to this site's speakers
     timer_manager: TimerManager = field(default_factory=TimerManager)
-    conversation_history: list = field(default_factory=list)
-    # Dry runs (tests) keep a conversation of their own: a multi-turn test needs one, the family's
-    # must not see it
-    dry_run_history: list = field(default_factory=list)
-    conversation_id: Optional[int] = None
-    last_interaction_time: float = 0
+    conversation: Conversation = field(default_factory=Conversation)
+    # Dry runs (tests) have one of their own: a multi-turn test needs one, and the family's must
+    # neither see it nor be kept alive by it (AD-047)
+    dry_run: Conversation = field(default_factory=Conversation)
     last_media_target: Optional[tuple[str, str]] = None
-    shown_images: set = field(default_factory=set)
 
     @property
     def label(self) -> str:

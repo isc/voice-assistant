@@ -1291,12 +1291,12 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
 
     def test_state_is_per_site(self):
         server = self.server
-        server.conversation_history.append({"role": "user", "content": "allume le salon"})
-        server._shown_images.add("https://example.org/a.jpg")
+        server.conversation.history.append({"role": "user", "content": "allume le salon"})
+        server.conversation.shown_images.add("https://example.org/a.jpg")
         server.site = self.charras
-        self.assertEqual((server.conversation_history, server._shown_images), ([], set()))
+        self.assertEqual((server.conversation.history, server.conversation.shown_images), ([], set()))
         server.site = self.paris
-        self.assertEqual(len(server.conversation_history), 1)
+        self.assertEqual(len(server.conversation.history), 1)
 
     def test_one_conversation_at_a_time(self):
         self.server.is_recording = True
@@ -1383,20 +1383,26 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
         ]
 
     async def ask(self, dry_run=False):
-        with patch("llm.chat_completion", AsyncMock(side_effect=self.replies)):
+        with patch("llm.chat_completion", AsyncMock(side_effect=self.replies)) as self.completion:
             return await self.server.process_with_llm(None, "quel temps fait-il ?", dry_run=dry_run)
 
     async def test_history_keeps_the_calls(self):
         """With only « request → C'est fait », gemma answered repeats from history, calling nothing."""
         self.assertEqual(await self.ask(), "18 degrés.")
-        roles = [m["role"] for m in self.server.conversation_history]
+        roles = [m["role"] for m in self.server.conversation.history]
         self.assertEqual(roles, ["user", "assistant", "tool", "assistant"])
-        self.assertIn("tool_calls", self.server.conversation_history[1])
+        self.assertIn("tool_calls", self.server.conversation.history[1])
 
     async def test_dry_run_leaves_the_conversation_alone(self):
+        """A test's « C'est fait » (never run) in the family's history made a real request call nothing (AD-047)."""
+        live = self.server.conversation
+        request = {"role": "user", "content": "allume le salon"}
+        live.history, live.id, live.last_time, live.shown_images = [request], 1000, 1.0, {"a.jpg"}
         await self.ask(dry_run=True)
-        self.assertEqual(self.server.conversation_history, [])
-        self.assertEqual(len(self.server.site.dry_run_history), 4)  # a conversation of its own, for tests
+        # Neither read, nor kept alive, expired or renumbered
+        self.assertNotIn(request, self.completion.await_args_list[0].args[3])
+        self.assertEqual((live.history, live.id, live.last_time, live.shown_images), ([request], 1000, 1.0, {"a.jpg"}))
+        self.assertEqual(len(self.server.site.dry_run.history), 4)  # a conversation of its own, for tests
         self.server.execute_function.assert_not_awaited()
 
     async def test_malformed_arguments_do_not_fail_the_request(self):

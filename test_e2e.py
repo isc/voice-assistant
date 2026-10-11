@@ -33,7 +33,7 @@ def send(text: str) -> dict:
 
 
 def reset():
-    """Clear conversation history between independent tests."""
+    """Clear the dry-run conversation between independent tests (the live one is left alone)."""
     req = urllib.request.Request(
         f"{SERVER}/api/reset-conversation",
         data=b"",

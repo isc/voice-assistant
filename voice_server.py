@@ -215,11 +215,8 @@ class VoiceAssistantServer:
     # Per home, read from the active site (sites.py)
     ha_client = _site_attribute("ha_client")
     timer_manager = _site_attribute("timer_manager")
-    conversation_history = _site_attribute("conversation_history")
-    conversation_id = _site_attribute("conversation_id")
-    last_interaction_time = _site_attribute("last_interaction_time")
+    conversation = _site_attribute("conversation")
     _last_media_target = _site_attribute("last_media_target")
-    _shown_images = _site_attribute("shown_images")
     # Per request (_Request)
     _last_tool_calls = _request_attribute("tool_calls")
     _end_conversation = _request_attribute("end_conversation")
@@ -602,7 +599,7 @@ class VoiceAssistantServer:
         # Only overwrite conversation_id for new conversations (wake word detected).
         # Follow-ups keep the server-assigned ID so exchanges group correctly.
         if not self.is_followup:
-            self.conversation_id = None
+            self.conversation.id = None
 
         # Cancel any previous recording timeout
         if self.recording_task and not self.recording_task.done():
@@ -837,7 +834,7 @@ class VoiceAssistantServer:
             entry.update(
                 response=response_text or "[Erreur LLM: pas de réponse]",
                 tool_calls=self._last_tool_calls,
-                conversation_id=self.conversation_id,
+                conversation_id=self.conversation.id,
             )
             if not response_text:
                 await self.send_error_to_device(api, "LLM processing failed")
@@ -1322,10 +1319,10 @@ class VoiceAssistantServer:
             return "Aucun écran disponible"
         if not (screens := await self.ha_client.reachable(self.ha_client.screens)):
             return self.ha_client.offline_reply(self.ha_client.screens)
-        picture = await find_image(query, exclude=self._shown_images)
+        picture = await find_image(query, exclude=self.conversation.shown_images)
         if not picture:
             return f"Aucune image trouvée pour {query}"
-        self._shown_images.add(picture.url)
+        self.conversation.shown_images.add(picture.url)
         screen = screens[0]
         await self._media_play_url(("ha", screen), picture.url, picture.content_type)
         return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {picture.caption}"
@@ -1432,24 +1429,26 @@ class VoiceAssistantServer:
         # Only these run: a name the model made up (« unlock ») or a tool this house lacks does not
         offered = {tool["name"] for tool in tools}
 
+        # A dry run reads and writes only its own conversation (AD-047)
+        conversation = self.site.dry_run if dry_run else self.conversation
+
         # Expire old conversation history
         now = time.time()
-        if now - self.last_interaction_time > self.CONVERSATION_TIMEOUT:
-            if self.conversation_history:
+        if now - conversation.last_time > self.CONVERSATION_TIMEOUT:
+            if conversation.history:
                 logger.info("Conversation history expired, starting fresh")
-            self.conversation_history = []
-            self.conversation_id = None
-        self.last_interaction_time = now
+            conversation.history = []
+            conversation.id = None
+        conversation.last_time = now
 
         # Assign conversation ID for first exchange in a conversation
-        if not self.conversation_id:
-            self.conversation_id = int(now)
-            self._shown_images.clear()
+        if not conversation.id:
+            conversation.id = int(now)
+            conversation.shown_images.clear()
 
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]
-        history_attr = "dry_run_history" if dry_run else "conversation_history"  # tests stay apart
-        messages.extend(getattr(self.site, history_attr))
+        messages.extend(conversation.history)
         messages.append({"role": "system", "content": "\n".join(context)})
         messages.append({"role": "user", "content": text})
 
@@ -1469,10 +1468,10 @@ class VoiceAssistantServer:
         turn = [{"role": "user", "content": text}]
 
         def save_to_history(response_text):
-            history = getattr(self.site, history_attr) + turn + [{"role": "assistant", "content": response_text}]
+            history = conversation.history + turn + [{"role": "assistant", "content": response_text}]
             # The last 5 exchanges, cut at a request
             starts = [i for i, m in enumerate(history) if m["role"] == "user"]
-            setattr(self.site, history_attr, history[starts[-5] :] if len(starts) > 5 else history)
+            conversation.history = history[starts[-5] :] if len(starts) > 5 else history
 
         # Tool call loop: keep calling LLM until it returns text (max 3 rounds)
         import json
@@ -1717,8 +1716,8 @@ class VoiceAssistantServer:
 
                 await self._announce(api, current_url, follow_up=is_last and follow_up)
                 if is_last and self._end_conversation:
-                    self.conversation_history = []
-                    self.conversation_id = None
+                    self.conversation.history = []
+                    self.conversation.id = None
                     logger.info("Conversation ended, history cleared")
 
                 play_time += time.time() - t_play

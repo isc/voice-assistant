@@ -77,9 +77,6 @@ Written for Qwen 3 4B. The French-verb text fallback went on 2026-10-11 (never f
 - **VAD minimum speech**: one 32 ms frame above 0.5 counts as speech for the whole recording; Silero's own default asks for 250 ms.
 - **Web API hardening**: POSTs accept text/plain and any Host, so a page open on a tailnet device could send commands; require JSON and check the Host header.
 
-### Isolated test server instance
-E2e tests (`test_e2e.py`) run against the live server through `/api/dry-run`: tool calls are not executed, but conversation state is shared, so a test run clears the conversation of someone using the assistant. Launch a lightweight instance for tests (LLM and entity list only, no STT/TTS/ESP) on another port.
-
 ### STT through the LLM
 Gemma 4 12B, now the LLM, takes audio input natively. It could absorb the STT stage, so that `audio → Gemma → tool calls` replaces `audio → Parakeet → transcript → LLM`. The LLM would hear the request instead of reasoning on a possibly misheard transcript, which also unlocks voice ID Phase 1. Parakeet is not slow (0.07–0.35 s on the GPU), so the case rests on understanding, not latency; it would also free part of the ~4 GB the STT/TTS models hold. It would not have saved the 2026-10-10 request drowned by the Sonos: that is an acoustic problem (see "Duck the music while listening").
 
