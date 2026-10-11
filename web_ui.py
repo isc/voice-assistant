@@ -115,13 +115,16 @@ def setup_routes(app, server):
         text = body.get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise _json_error(web.HTTPBadRequest, "missing 'text' field")
-        if body.get("site"):
-            site = server.site_named(body["site"])
-            if not site:
-                raise _json_error(web.HTTPNotFound, f"unknown site {body['site']}")
-            server.site = site  # for this request only: a conversation at another site goes on undisturbed
+        use_site(body)
         server.new_request()
         return text
+
+    def use_site(body: dict) -> None:
+        """Serve the site the request names, for this request only: a conversation at another site goes on."""
+        if name := body.get("site"):
+            if not (site := server.site_named(name)):
+                raise _json_error(web.HTTPNotFound, f"unknown site {name}")
+            server.site = site
 
     async def handle_web_ui(request):
         return web.Response(text=(STATIC_DIR / "index.html").read_text(), content_type="text/html")
@@ -149,7 +152,6 @@ def setup_routes(app, server):
 
         timings = {}
         t0 = time.time()
-        server._last_tool_calls = []
         response_text = await server.process_with_llm(None, text)
         timings["llm"] = round(time.time() - t0, 2)
         if not response_text:
@@ -170,7 +172,6 @@ def setup_routes(app, server):
         timings["total"] = round(sum(timings.values()), 2)
 
         tool_calls = server._last_tool_calls
-        server._last_tool_calls = []
         server.exchange_log.add(
             "web",
             text,
@@ -220,10 +221,8 @@ def setup_routes(app, server):
         """LLM-only endpoint: produces tool calls without executing them."""
         text = await read_text(request)
 
-        server._last_tool_calls = []
         response_text = await server.process_with_llm(None, text, dry_run=True)
         tool_calls = server._last_tool_calls
-        server._last_tool_calls = []
         return web.json_response(
             {
                 "input": text,
@@ -235,13 +234,10 @@ def setup_routes(app, server):
     async def handle_reset_conversation(request):
         """Clear a site's conversation history ({"site": …}, else the default). Used by tests for isolation."""
         try:
-            name = (await request.json()).get("site")
+            body = await request.json()
         except Exception:
-            name = None
-        if name:
-            if not (site := server.site_named(name)):
-                raise _json_error(web.HTTPNotFound, f"unknown site {name}")
-            server.site = site
+            body = {}
+        use_site(body if isinstance(body, dict) else {})
         server.conversation_history = []
         server.site.dry_run_history = []
         server.conversation_id = None

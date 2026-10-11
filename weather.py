@@ -8,6 +8,12 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+
+def _error(message: str) -> str:
+    """A tool result the LLM reads as a failure, accents kept."""
+    return json.dumps({"error": message}, ensure_ascii=False)
+
+
 # WMO weather codes → French descriptions
 _WMO_CODES = {
     0: "ciel dégagé",
@@ -67,12 +73,12 @@ async def get_weather(location: str = "", home: Optional[dict] = None) -> str:
     if city:
         geo = await _geocode(city)
         if not geo:
-            return json.dumps({"error": f"Ville {city} introuvable"}, ensure_ascii=False)
+            return _error(f"Ville {city} introuvable")
         lat, lon, display_name = geo
     elif home and home.get("latitude") is not None:
         lat, lon, display_name = home["latitude"], home["longitude"], "la maison"
     else:
-        return json.dumps({"error": "Ville non précisée"}, ensure_ascii=False)
+        return _error("Ville non précisée")
 
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
@@ -86,11 +92,11 @@ async def get_weather(location: str = "", home: Optional[dict] = None) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
                 if r.status != 200:
-                    return json.dumps({"error": "API météo indisponible"}, ensure_ascii=False)
+                    return _error("API météo indisponible")
                 data = await r.json()
     except Exception as e:
         logger.error(f"Weather API error: {e}")
-        return json.dumps({"error": "API météo indisponible"}, ensure_ascii=False)
+        return _error("API météo indisponible")
 
     current = data.get("current", {})
     daily = data.get("daily", {})

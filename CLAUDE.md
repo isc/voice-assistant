@@ -47,7 +47,7 @@ ESP (wake word) → audio stream → voice_server.py
 3. STT: Parakeet transcribes audio to French text
 4. LLM: sends a static system prompt (instructions, family, entity list) + tool definitions + conversation history + a short context message (date/time, timers, music) + the transcript
 5. If tool_calls → execute each, loop back to LLM with results + tools (up to 3 rounds) until text response
-6. If text response → check fallback parser for French action verbs (local LLM workaround)
+6. If text response → check the fallback parser for a tool call written as text (`fn({...})`)
 7. Final LLM round formulates natural spoken response from tool results
 8. TTS: Kokoro generates WAV, played via announcement API with `start_conversation=True`
 9. ESP automatically starts listening for follow-up (no wake word needed)

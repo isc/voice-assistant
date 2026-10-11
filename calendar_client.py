@@ -20,6 +20,12 @@ except locale.Error:
 
 logger = logging.getLogger(__name__)
 
+
+def _error(message: str) -> str:
+    """A tool result the LLM reads as a failure, accents kept."""
+    return json.dumps({"error": message}, ensure_ascii=False)
+
+
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
 
@@ -116,14 +122,12 @@ class CalendarClient:
             JSON string with events list for the LLM.
         """
         if not self._service:
-            return json.dumps({"error": "Agenda non disponible"}, ensure_ascii=False)
+            return _error("Agenda non disponible")
 
         try:
             start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
-            return json.dumps(
-                {"error": f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False
-            )
+            return _error(f"Date invalide: {start_date} (format attendu: AAAA-MM-JJ)")
 
         if end_date:
             try:
@@ -131,9 +135,7 @@ class CalendarClient:
                 # Include the full end day
                 end_dt = end_dt + timedelta(days=1)
             except ValueError:
-                return json.dumps(
-                    {"error": f"Date invalide: {end_date} (format attendu: AAAA-MM-JJ)"}, ensure_ascii=False
-                )
+                return _error(f"Date invalide: {end_date} (format attendu: AAAA-MM-JJ)")
         elif search:
             # « c'est quand le dentiste ? » comes with today only: search the year ahead
             end_dt = start_dt + timedelta(days=365)
@@ -148,7 +150,7 @@ class CalendarClient:
                 result = await asyncio.to_thread(self._list_events, time_min, time_max, search)
         except Exception as e:
             logger.error(f"Calendar query failed: {e}")
-            return json.dumps({"error": "Erreur lors de la consultation de l'agenda"}, ensure_ascii=False)
+            return _error("Erreur lors de la consultation de l'agenda")
 
         events = []
         for item in result.get("items", []):
@@ -201,15 +203,12 @@ class CalendarClient:
             JSON string with confirmation for the LLM.
         """
         if not self._service:
-            return json.dumps({"error": "Agenda non disponible"}, ensure_ascii=False)
+            return _error("Agenda non disponible")
 
         try:
             start_dt = datetime.strptime(start_datetime, "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo(_time_zone()))
         except ValueError:
-            return json.dumps(
-                {"error": f"Date/heure invalide: {start_datetime} (format attendu: AAAA-MM-JJ HH:MM)"},
-                ensure_ascii=False,
-            )
+            return _error(f"Date/heure invalide: {start_datetime} (format attendu: AAAA-MM-JJ HH:MM)")
 
         end_dt = start_dt + timedelta(minutes=duration_minutes)
 
@@ -224,7 +223,7 @@ class CalendarClient:
                 created = await asyncio.to_thread(self._insert_event, event_body)
         except Exception as e:
             logger.error(f"Calendar event creation failed: {e}")
-            return json.dumps({"error": "Erreur lors de la création de l'événement"}, ensure_ascii=False)
+            return _error("Erreur lors de la création de l'événement")
 
         # Format duration for display
         if duration_minutes >= 60:

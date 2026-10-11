@@ -672,7 +672,7 @@ async def chat_completion(
                     hit_budget = (usage.get("completion_tokens") or 0) >= payload[max_tokens_key] * 0.9
                     if finish_reason == "length" and not hit_budget:
                         logger.error(f"LLM context full: prompt {usage.get('prompt_tokens')} tokens")
-                    elif finish_reason == "length" and payload[max_tokens_key] < MAX_TOKEN_CEILING:
+                    elif finish_reason == "length" and payload[max_tokens_key] < MAX_TOKEN_CEILING:  # budget hit
                         if attempt < MAX_LENGTH_RETRIES:
                             new_limit = min(payload[max_tokens_key] * 2, MAX_TOKEN_CEILING)
                             logger.warning(

@@ -73,8 +73,8 @@ def _area_matches(norm_area: str, norm_room: str) -> bool:
 # Sub-kinds inside the `cover` domain. A house can have roller shutters and roof
 # windows side by side — both are HA covers, but they are not interchangeable
 # (opening a skylight when asked for a shutter lets the rain in).
-# HA's device_class is authoritative; the name is only consulted for integrations
-# that leave it unset (HomeKit Controller exposes Velux shutters with no class).
+# The name's word comes first (« Volet salon » reported as window by Z-Wave JS); device_class
+# for names that say nothing (HomeKit Controller exposes Velux shutters with no class).
 COVER_KIND_BY_DEVICE_CLASS = {
     "window": "fenetre",
     "shutter": "volet",
@@ -222,10 +222,9 @@ class HAClient:
 
         await self._fetch_areas()
         # A failed call keeps the rooms already known, rather than placing every device nowhere
-        entity_to_area = await self._fetch_entity_areas()
-        if entity_to_area is None:
-            entity_to_area = self.entity_areas
-        self.entity_areas = entity_to_area
+        if (fetched := await self._fetch_entity_areas()) is not None:
+            self.entity_areas = fetched
+        entity_to_area = self.entity_areas
         hidden = await self._fetch_hidden()
         known = set(self.entities)
 
@@ -279,9 +278,10 @@ class HAClient:
                 logger.info(f"  {area}: {', '.join(items)}")
             logger.info(f"Total: {len(self.entities)} entities in {len(by_area)} areas")
 
-        self.screens = await self._fetch_screens()
-        if self.screens:
-            logger.info(f"Screens: {', '.join(self.screens)}")
+        screens = await self._fetch_screens()
+        if screens != self.screens:
+            self.screens = screens
+            logger.info(f"Screens: {', '.join(screens) or 'none'}")
 
     def get_entity_list_for_prompt(self) -> str:
         """Return entity names grouped by room for the system prompt."""
@@ -389,10 +389,13 @@ class HAClient:
                     is_group = True
                     break
 
-        # A group or the whole house sweeps, even under a specific name: for « ferme les volets des
-        # enfants », gemma4:12b names the shutters of one room (« Petit volet », « Grand volet »,
-        # 6 times out of 6) and never Charlie's « Volet ». Only the kind the name says is kept.
-        sweep = is_group or whole_house
+        # A group sweeps under a name that says a kind of cover: for « ferme les volets des enfants »,
+        # gemma4:12b names the shutters of one room (« Petit volet », « Grand volet », 6 times out of
+        # 6) and never Charlie's « Volet ». Any other name is that device in each of the group's
+        # rooms: « la lampe de chevet des enfants » is not every light there.
+        name_kind = cover_kind({"friendly_name": name})
+        named_device = is_group and not (target_domain or name_kind or is_whole_house(name))
+        sweep = (is_group or whole_house) and not named_device
 
         # ALL entities in scope, for a room group, the whole house, or a generic name in a room
         # ("les volets des enfants" -> all covers in all children's rooms)
@@ -418,7 +421,7 @@ class HAClient:
             entity_ids = [eid for eid, info in self.entities.items() if info["domain"] in domains and in_scope(info)]
             # The kind the name says (« Fenêtre… », « Volet… »); a sweep naming none leaves the
             # roof windows shut, only the shutters move
-            kind = generic_kind or cover_kind({"friendly_name": name}) or ("volet" if sweep else None)
+            kind = generic_kind or name_kind or ("volet" if sweep else None)
             entity_ids = self._filter_by_cover_kind(entity_ids, kind)
             if entity_ids:
                 logger.info(f"Resolve all: '{name}' (room={room}) -> {entity_ids}")
@@ -481,16 +484,15 @@ class HAClient:
             return None
 
         if norm_input:
-            # The device named exactly; else the closest name containing the request; else the
-            # longest name the request contains (« lumière du salon » holds « salon »)
-            exact = [eid for eid, n in candidates.items() if n == norm_input]
+            # The closest name containing the request (the exact name first: it is the shortest);
+            # else the longest name the request contains (« lumière du salon » holds « salon »)
             containing = sorted(
                 (eid for eid, n in candidates.items() if norm_input in n), key=lambda e: len(candidates[e])
             )
             contained = sorted(
                 (eid for eid, n in candidates.items() if n and n in norm_input), key=lambda e: -len(candidates[e])
             )
-            for how, found in (("exact", exact), ("substring", containing), ("substring", contained)):
+            for how, found in (("containing", containing), ("contained", contained)):
                 if found:
                     logger.info(f"Entity match: '{name}' (room='{room}') -> {found[0]} ({how})")
                     return found[0]

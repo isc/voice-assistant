@@ -142,6 +142,14 @@ def _format_duration(total_seconds: int) -> str:
     return f"{total_seconds} seconde{'s' if total_seconds > 1 else ''}"
 
 
+def _describe_timer(timer) -> str:
+    if timer.is_alarm and timer.target_time:
+        return f"l'alarme de {timer.target_time}"
+    if timer.name:
+        return f'le timer "{timer.name}"'
+    return f"le timer de {_format_duration(timer.total_seconds)}"
+
+
 def _format_family_for_prompt(family: list) -> str:
     """Format family member list with ages for injection into system prompt."""
     today = datetime.date.today()
@@ -266,6 +274,7 @@ class VoiceAssistantServer:
         # Actuation service calls are fired here and drain in the background — held
         # so the tasks aren't garbage-collected mid-flight, discarded on completion.
         self._pending_service_calls: set = set()
+        self._background_tasks: set = set()  # held until done, not awaited at shutdown
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -535,9 +544,9 @@ class VoiceAssistantServer:
             if state.state != MediaPlayerState.ANNOUNCING:
                 self.device_media_states[site.name] = state.state
 
-    def _satellite_plays(self) -> bool:
-        """Whether this site's satellite plays music or a radio itself."""
-        return self.device_media_states.get(self.site.name) == MediaPlayerState.PLAYING
+    def _satellite_plays(self, site: Optional[Site] = None) -> bool:
+        """Whether this site's (or `site`'s) satellite plays music or a radio itself."""
+        return self.device_media_states.get((site or self.site).name) == MediaPlayerState.PLAYING
 
     async def _discover_device_entities(self, api: APIClient, site: Site):
         """List the satellite's entities and remember its media_player key (for direct radio playback)."""
@@ -830,7 +839,6 @@ class VoiceAssistantServer:
                 tool_calls=self._last_tool_calls,
                 conversation_id=self.conversation_id,
             )
-            self._last_tool_calls = []
             if not response_text:
                 await self.send_error_to_device(api, "LLM processing failed")
                 return
@@ -911,17 +919,9 @@ class VoiceAssistantServer:
 
                 cancelled = VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED
                 await self._handle_timer_event(self.site, cancelled, timer)
-                if timer.is_alarm and timer.target_time:
-                    desc = f"l'alarme pour {timer.target_time}"
-                elif timer.name:
-                    desc = f'le timer "{timer.name}"'
-                else:
-                    desc = f"le timer de {_format_duration(timer.total_seconds)}"
-                return f"Annulé: {desc}"
+                return f"Annulé: {_describe_timer(timer)}"
             if running := self.timer_manager.get_timers():
-                names = ", ".join(
-                    t.target_time if t.is_alarm else (t.name or _format_duration(t.total_seconds)) for t in running
-                )
+                names = ", ".join(map(_describe_timer, running))
                 return f"Plusieurs timers en cours ({names}) : lequel annuler ?"
             return "Aucun timer actif"
 
@@ -1166,19 +1166,18 @@ class VoiceAssistantServer:
             target = target or self._resolve_media_target(room)
             if not target:
                 return _no_speaker(room)
+            found = None
             if function_name == "play_music":
                 query = arguments.get("query", "")
-                found = await self.spotify.find(query, arguments.get("kind"))
-                if not found:
+                if not (found := await self.spotify.find(query, arguments.get("kind"))):
                     return f"Rien trouvé sur Spotify pour {query}"
+            if not await self._point_at_spotify(target):
+                return f"{self._speaker_name(target)} ne répond pas"
+            if found:
                 uri, description = found
-                if not await self._point_at_spotify(target):
-                    return f"{self._speaker_name(target)} ne répond pas"
                 await self.spotify.play(uri, shuffle=bool(arguments.get("shuffle")))
                 result = f"Lecture sur Spotify : {description}"
             else:
-                if not await self._point_at_spotify(target):
-                    return f"{self._speaker_name(target)} ne répond pas"
                 result = await self.spotify.control("resume")
             self._after_media_change(target)
             return result
@@ -1198,11 +1197,8 @@ class VoiceAssistantServer:
             return None
         if not track:
             return None
-        site, (kind, ident) = self._spotify_at
-        if kind == "ha" and site.ha_client:
-            where = site.ha_client.entities.get(ident, {}).get("friendly_name", ident)
-        else:
-            where = "l'enceinte de l'appareil vocal"
+        site, target = self._spotify_at
+        where = self._speaker_name(target, site)
         if site is not self.site and site.name:
             where += f", à {site.name.capitalize()}"
         return (
@@ -1210,11 +1206,12 @@ class VoiceAssistantServer:
             "music_control resume avec room : elle continue sans changer."
         )
 
-    def _speaker_name(self, target: tuple[str, str]) -> str:
+    def _speaker_name(self, target: tuple[str, str], site: Optional[Site] = None) -> str:
         kind, ident = target
-        if kind == "ha" and self.ha_client:
-            return self.ha_client.entities.get(ident, {}).get("friendly_name", ident)
-        return "L'enceinte de l'appareil vocal"
+        ha_client = (site or self.site).ha_client
+        if kind == "ha" and ha_client:
+            return ha_client.entities.get(ident, {}).get("friendly_name", ident)
+        return "l'enceinte de l'appareil vocal"
 
     async def _stop_silent_spotify(self) -> None:
         """Paused music kept sending silence to its speaker: stop the speaker after a while."""
@@ -1349,8 +1346,7 @@ class VoiceAssistantServer:
         try:
             audio_url = await self.text_to_speech_file(text, site)
             logger.info(f"Timer finished announcement: {text}")
-            # The timer's task serves its site (the context it was created in)
-            await self._announce(api, audio_url, follow_up=not self._satellite_plays())
+            await self._announce(api, audio_url, follow_up=not self._satellite_plays(site))
         except Exception:
             logger.exception("Timer announcement error")
 
@@ -1433,7 +1429,8 @@ class VoiceAssistantServer:
 
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(self.site.dry_run_history if dry_run else self.conversation_history)
+        history_attr = "dry_run_history" if dry_run else "conversation_history"  # tests stay apart
+        messages.extend(getattr(self.site, history_attr))
         messages.append({"role": "system", "content": "\n".join(context)})
         messages.append({"role": "user", "content": text})
 
@@ -1453,11 +1450,10 @@ class VoiceAssistantServer:
         turn = [{"role": "user", "content": text}]
 
         def save_to_history(response_text):
-            attribute = "dry_run_history" if dry_run else "conversation_history"  # tests stay apart
-            history = getattr(self.site, attribute) + turn + [{"role": "assistant", "content": response_text}]
+            history = getattr(self.site, history_attr) + turn + [{"role": "assistant", "content": response_text}]
             # The last 5 exchanges, cut at a request
             starts = [i for i, m in enumerate(history) if m["role"] == "user"]
-            setattr(self.site, attribute, history[starts[-5] :] if len(starts) > 5 else history)
+            setattr(self.site, history_attr, history[starts[-5] :] if len(starts) > 5 else history)
 
         # Tool call loop: keep calling LLM until it returns text (max 3 rounds)
         import json
@@ -1620,7 +1616,7 @@ class VoiceAssistantServer:
         """Ask Ollama to keep the model loaded: it unloads after 5 idle minutes, and the next request
         then waited ~7 s (median of 10 cold requests, against 2.3 s warm). Sent with each request
         rather than on a timer, so that a job that unloads it to free the GPU (beast) can."""
-        if LLM_API_KEY or not LLM_URL.endswith("/v1/chat/completions"):
+        if LLM_API_KEY or not LLM_MODEL or not LLM_URL.endswith("/v1/chat/completions"):
             return
         url = LLM_URL.removesuffix("/v1/chat/completions") + "/api/generate"
 
@@ -1633,9 +1629,10 @@ class VoiceAssistantServer:
             except Exception as e:
                 logger.debug(f"Ollama keep-alive failed: {e}")
 
+        # Not with the service calls drained at shutdown: a ping must not hold a restart 30 s
         task = asyncio.ensure_future(ping())
-        self._pending_service_calls.add(task)
-        task.add_done_callback(self._pending_service_calls.discard)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     # === TTS ===
 

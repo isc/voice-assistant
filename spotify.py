@@ -87,7 +87,7 @@ class SpotifyStream:
                     alone = unheard = 0.0
                     silent = 0.0 if pcm else silent + _TICK
                     if silent >= _SILENCE_STOP and self.on_silence:
-                        logger.info("Spotify: silence for 10 minutes, stopping its speaker")
+                        logger.info(f"Spotify: silence for {_SILENCE_STOP:.0f} s, stopping its speaker")
                         silent = 0.0
                         self._spawn(self.on_silence())
                     await self._encode(pcm.ljust(_CHUNK, b"\0"))
@@ -109,10 +109,12 @@ class SpotifyStream:
         """Run a callback in the background, kept referenced and its failure logged."""
         task = asyncio.ensure_future(coroutine)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        task.add_done_callback(
-            lambda t: t.cancelled() or not t.exception() or logger.error(f"Spotify: {t.exception()}")
-        )
+        task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and task.exception():
+            logger.error(f"Spotify: {task.exception()}")
 
     def _read(self) -> bytes:
         """Read up to one tick of whole frames from the FIFO, without blocking."""

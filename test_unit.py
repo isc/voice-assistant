@@ -289,6 +289,12 @@ class TestResolveAllEntities(unittest.TestCase):
         eids = self.client.resolve_all_entities("Grand volet", room="enfants", domain_hints=["cover"])
         self.assertEqual(sorted(eids), ["cover.grand_volet_zoe", "cover.volet_charlie", "cover.volet_zoe"])
 
+    def test_a_named_light_in_a_group_is_that_light(self):
+        """The group sweep is for covers named by kind; « la lampe de chevet des enfants » is one lamp."""
+        self.add("light.chevet_zoe", "Lampe de chevet", "chambre_zoe")
+        eids = self.client.resolve_all_entities("Lampe de chevet", room="enfants", domain_hints=self.TURN_OFF)
+        self.assertEqual(eids, ["light.chevet_zoe"])
+
     def test_group_said_with_more_words(self):
         eids = self.client.resolve_all_entities("volets", room="les chambres des enfants", domain_hints=["cover"])
         self.assertEqual(sorted(eids), ["cover.volet_charlie", "cover.volet_zoe"])
