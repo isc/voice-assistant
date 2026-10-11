@@ -598,7 +598,7 @@ class VoiceAssistantServer:
             logger.warning(f"Site {site.label}: unknown wake words {unknown}, the satellite has {list(available)}")
         wanted = [w for w in site.wake_words if w in available]
         if wanted and set(wanted) != set(config.active_wake_words):
-            api.set_voice_assistant_configuration(wanted)
+            await api.set_voice_assistant_configuration(wanted)
         active = wanted or config.active_wake_words
         logger.info(f"Site {site.label}: wake words {[available.get(w, w) for w in active]}")
 

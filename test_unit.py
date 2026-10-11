@@ -1331,17 +1331,18 @@ class TestWakeWords(unittest.IsolatedAsyncioTestCase):
                 max_active_wake_words=1,  # what ESPHome always reports
             )
         )
+        api.set_voice_assistant_configuration = AsyncMock()
         await server._set_wake_words(api, server.site)
         return api.set_voice_assistant_configuration
 
     async def test_activates_the_known_ones(self):
         set_config = await self.set_wake_words("okay_nabu,hey_mycroft,hey_jarvis", ["hey_jarvis"])
-        set_config.assert_called_once_with(["okay_nabu", "hey_jarvis"])
+        set_config.assert_awaited_once_with(["okay_nabu", "hey_jarvis"])
 
     async def test_leaves_the_satellite_alone_when_already_active_or_unset(self):
         for wanted in ("hey_jarvis,okay_nabu", ""):
             set_config = await self.set_wake_words(wanted, ["okay_nabu", "hey_jarvis"])
-            set_config.assert_not_called()
+            set_config.assert_not_awaited()
 
 
 class TestSiteAtAddress(unittest.IsolatedAsyncioTestCase):
