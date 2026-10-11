@@ -1739,79 +1739,39 @@ class VoiceAssistantServer:
         """Generate a TTS WAV file and return its URL, as the active site's (or `site`'s) speakers reach it."""
         return await self.tts.synthesize_to_file(text, self.tts_dir, (site or self.site).http_base_url)
 
-    @staticmethod
-    def _split_sentences(text: str) -> list[str]:
-        """Split text into sentences for chunked TTS generation."""
-        import re
-
-        # Split on sentence-ending punctuation followed by space
-        parts = re.split(r"(?<=[.!?;])\s+", text)
-        sentences = [s.strip() for s in parts if s.strip()]
-        # Don't split very short texts
-        if len(sentences) <= 1:
-            return [text]
-        return sentences
-
     async def text_to_speech(self, api: APIClient, text: str) -> dict:
-        """Generate TTS sentence-by-sentence with pipelined playback.
-        Each sentence is played as soon as generated while the next one
-        generates in parallel, reducing perceived latency.
+        """Speak a reply on the satellite, in one announcement.
         Returns timing dict with 'gen' (generation) and 'play' (playback) durations.
+
+        One file for the whole reply: Kokoro takes ~0.1 s a sentence on the GPU, and the Voice PE
+        (ESPHome 2026.6) stops its mixer 0.4-0.8 s after an announcement ends, under the next one
+        if it starts by then: a second sentence after a short first hung, unheard (AD-053).
         """
         logger.info(f'TTS: generating audio for "{text}"')
 
         api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_TTS_START, {"text": text})
 
-        gen_time = 0.0
-        play_time = 0.0
-
         try:
             # No follow-up after a goodbye or a media command, nor while the satellite plays music
             # itself: a reply with follow-up over its own player went unconfirmed and the Voice PE
-            # rebooted (2026-10-10, 23:13). Without follow-up, one announcement: several with
-            # start_conversation=False made the ESP miss AnnounceFinished.
+            # rebooted (2026-10-10, 23:13).
             follow_up = not (self._end_conversation or self._no_followup or self._satellite_plays())
-            sentences = self._split_sentences(text) if follow_up else [text]
-            logger.info(f"TTS: {len(sentences)} sentence(s) to generate")
 
-            # Generate first sentence
             t0 = time.time()
-            next_url = await self.text_to_speech_file(sentences[0])
-            gen_time += time.time() - t0
+            url = await self.text_to_speech_file(text)
+            gen_time = time.time() - t0
 
             # End pipeline before playing announcements
             api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
             self._clear_announcements(api)
 
-            for i in range(len(sentences)):
-                current_url = next_url
-                is_last = i == len(sentences) - 1
-
-                # Pipeline: start generating next sentence while playing current
-                gen_task = None
-                if not is_last:
-                    gen_task = asyncio.create_task(self.text_to_speech_file(sentences[i + 1]))
-
-                # Play current sentence
-                logger.info(f"TTS: playing sentence {i + 1}/{len(sentences)}")
-                t_play = time.time()
-
-                await self._announce(api, current_url, follow_up=is_last and follow_up)
-                if is_last and self._end_conversation:
-                    self.conversation.history = []
-                    self.conversation.id = None
-                    logger.info("Conversation ended, history cleared")
-
-                play_time += time.time() - t_play
-
-                # Await next sentence generation (should already be done during playback)
-                if gen_task:
-                    t0 = time.time()
-                    next_url = await gen_task
-                    extra_gen = time.time() - t0
-                    gen_time += extra_gen
-                    if extra_gen > 0.05:
-                        logger.info(f"TTS: waited {extra_gen:.2f}s for next sentence generation")
+            t0 = time.time()
+            await self._announce(api, url, follow_up=follow_up)
+            play_time = time.time() - t0
+            if self._end_conversation:
+                self.conversation.history = []
+                self.conversation.id = None
+                logger.info("Conversation ended, history cleared")
 
             timings = {"gen": round(gen_time, 2), "play": round(play_time, 2)}
             logger.info(f"TTS done: gen={timings['gen']}s play={timings['play']}s")

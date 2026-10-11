@@ -1447,6 +1447,16 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         server._announce.assert_awaited_once()  # one announcement, not split
         self.assertFalse(server._announce.await_args.kwargs["follow_up"])
 
+    async def test_a_reply_is_one_announcement(self):
+        """ESPHome 2026.6 stopped its mixer under a second sentence that began right after a short first."""
+        server = self.server
+        server._end_conversation = server._no_followup = False
+        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        server._announce = AsyncMock()
+        await server.text_to_speech(MagicMock(), "C'était bien la tour Eiffel ! C'est un monument de Paris.")
+        server._announce.assert_awaited_once()
+        self.assertTrue(server._announce.await_args.kwargs["follow_up"])
+
     async def test_a_reply_first_clears_the_announcement_queue(self):
         """ESPHome 2026.6: an announcement that failed to play stays first in the queue, the next wait."""
         server = self.server

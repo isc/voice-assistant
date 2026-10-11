@@ -7,7 +7,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 ### Voice pipeline
 - Wake word detection via ESPHome, automatic end-of-speech detection (Silero VAD); no transcription when nobody spoke
 - Local STT: Parakeet TDT 0.6B v3, via onnx-asr on Linux/CUDA or MLX on Apple Silicon
-- Local TTS: Kokoro-82M with French phonemization (misaki/espeak), sentence by sentence
+- Local TTS: Kokoro-82M with French phonemization (misaki/espeak), one announcement per reply
 - Continuous conversation: follow-ups without the wake word, closed cleanly on "merci", "bonne nuit"; context kept 10 minutes
 
 ### Home automation
