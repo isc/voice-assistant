@@ -718,6 +718,10 @@ class TestIsAbout(unittest.TestCase):
         self.assertFalse(is_about("coucher de soleil sur la mer", "Le Coucher du soleil"))
         self.assertFalse(is_about("Daft Punk", "Discovery (album)"))
 
+    def test_a_redirect_counts_as_a_title(self):
+        self.assertTrue(is_about("Mont Everest", "Everest", "Mont Everest", "Chomolungma"))
+        self.assertFalse(is_about("Mont Everest", "Everest", "Chomolungma"))
+
     def test_empty_query(self):
         self.assertFalse(is_about("", "Tour Eiffel"))
 

@@ -27,6 +27,7 @@ class Picture(NamedTuple):
     url: str
     content_type: str
     caption: str
+    from_article: bool  # a Wikipedia article's image, rather than a photo matched on words
 
 
 def _words(text: str) -> set[str]:
@@ -34,27 +35,30 @@ def _words(text: str) -> set[str]:
     return set(re.findall(r"\w+", normalize(text)))
 
 
-def is_about(query: str, title: str) -> bool:
-    """Whether a Wikipedia article is about what was asked: every word of the query is in its title.
+def is_about(query: str, *titles: str) -> bool:
+    """Whether a Wikipedia article is about what was asked: every word of the query is in one of its titles.
 
     "Arc de Triomphe" → "Arc de triomphe de l'Étoile" is; "coucher de soleil sur la mer" →
     "Le Coucher du soleil", a painting, is not — a photo search does better there.
     """
     words = _words(query)
-    return bool(words) and words <= _words(title)
+    return bool(words) and any(words <= _words(title) for title in titles)
 
 
 async def _wikipedia(session: aiohttp.ClientSession, query: str) -> list[tuple[str, str]]:
-    """Lead image of the French Wikipedia article that best matches the query, if it is about it."""
+    """Lead image of the French Wikipedia article that best matches the query, if it is about it:
+    by its title or one of its redirects (« Mont Everest » → Everest, « Mona Lisa » → La Joconde)."""
     params = {
         "action": "query",
         "format": "json",
         "generator": "search",
         "gsrsearch": query,
         "gsrlimit": 1,
-        "prop": "pageimages",
+        "prop": "pageimages|redirects",
         "piprop": "thumbnail",
         "pithumbsize": _SIZE,
+        "rdlimit": "max",
+        "rdnamespace": 0,
     }
     async with session.get("https://fr.wikipedia.org/w/api.php", params=params) as r:
         r.raise_for_status()
@@ -62,7 +66,7 @@ async def _wikipedia(session: aiohttp.ClientSession, query: str) -> list[tuple[s
     return [
         (page["thumbnail"]["source"], page["title"])
         for page in data.get("query", {}).get("pages", {}).values()
-        if "thumbnail" in page and is_about(query, page["title"])
+        if "thumbnail" in page and is_about(query, page["title"], *(rd["title"] for rd in page.get("redirects", [])))
     ]
 
 
@@ -108,7 +112,7 @@ async def find_image(query: str, exclude: Collection[str] = ()) -> Optional[Pict
                 for url, caption in candidates:
                     if url not in exclude and (content_type := await _image_type(session, url)):
                         logger.info(f"Image for {query!r} from {source}: {caption}")
-                        return Picture(url, content_type, caption)
+                        return Picture(url, content_type, caption, from_article=search is _wikipedia)
     except TimeoutError:
         logger.warning(f"Image search for {query!r} gave up after {_DEADLINE} s")
     return None

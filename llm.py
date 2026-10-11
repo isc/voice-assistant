@@ -396,10 +396,20 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
                     "type": "object",
                     "properties": {
                         "query": {
+                            # The name alone finds the Wikipedia article and its picture; with the
+                            # request's description around it (« La Joconde au Louvre », « l'Everest,
+                            # la plus haute montagne du monde »), the photo search showed a Monet, or nothing
                             "type": "string",
                             "description": (
-                                "Ce qu'il faut montrer, en quelques mots "
-                                "(ex: « tour Eiffel », « okapi », « chat roux »)"
+                                "Le nom de ce qu'il faut montrer, seul, comme le titre de son article "
+                                "Wikipédia : « tour Eiffel », « okapi », « Burj Khalifa » (pas « Burj "
+                                "Khalifa, le plus haut bâtiment du monde »). Une demande qui désigne une chose "
+                                "précise sans la nommer (un superlatif : « le plus haut bâtiment du monde », "
+                                "« le plus grand lac ») prend le nom de cette chose (« Burj Khalifa », "
+                                "« mer Caspienne ») ; si plusieurs conviennent, en choisir une et la nommer "
+                                "dans la réponse. "
+                                "Un mot de plus si le nom seul désigne autre chose (« Mercure planète »). "
+                                "Sans nom propre, quelques mots (« chat roux »)."
                             ),
                         },
                     },

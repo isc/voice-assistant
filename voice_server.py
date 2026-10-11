@@ -1325,7 +1325,13 @@ class VoiceAssistantServer:
         self.conversation.shown_images.add(picture.url)
         screen = screens[0]
         await self._media_play_url(("ha", screen), picture.url, picture.content_type)
-        return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {picture.caption}"
+        if picture.from_article:
+            shown = f"l'image de l'article Wikipédia « {picture.caption} »"
+        else:
+            # Matched on words, maybe not what was asked: the reply said « le plus grand arbre du
+            # monde » over a photo titled « Nepal (11) - 26Sep10, Bardia (Nepal) », a field
+            shown = f"une photo trouvée par mots-clés, titrée « {picture.caption} »"
+        return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {shown}"
 
     # === TIMER EVENTS ===
 
