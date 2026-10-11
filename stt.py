@@ -13,6 +13,8 @@ import tempfile
 import wave
 from typing import Optional
 
+import numpy as np
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,34 +58,29 @@ class ParakeetSTT:
             raise ValueError(f"Unknown STT_BACKEND '{self.backend}' (expected mlx|onnx|auto)")
         logger.info("Parakeet STT model loaded")
 
-    def _transcribe_sync(self, wav_path: str) -> str:
-        if self.backend == "mlx":
-            return self.model.transcribe(wav_path).text
-        return self.model.recognize(wav_path)  # onnx-asr
-
-    async def transcribe(self, audio_bytes: bytes) -> Optional[str]:
-        """Transcribe raw 16kHz 16-bit PCM audio to text."""
-        logger.info(f"STT Parakeet ({self.backend}): {len(audio_bytes)} bytes...")
-
+    def _transcribe_sync(self, audio_bytes: bytes) -> str:
+        if self.backend != "mlx":
+            # onnx-asr takes the samples: no temporary WAV of the family's voice in /tmp (left
+            # behind when recognition failed), no disk write per request
+            return self.model.recognize(np.frombuffer(audio_bytes, np.int16).astype(np.float32) / 32768)
+        temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         try:
-            temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             with wave.open(temp_wav.name, "wb") as wav_file:
                 wav_file.setnchannels(1)
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(16000)
                 wav_file.writeframes(audio_bytes)
-
-            loop = asyncio.get_event_loop()
-            transcript = (await loop.run_in_executor(None, self._transcribe_sync, temp_wav.name)).strip()
-
+            return self.model.transcribe(temp_wav.name).text
+        finally:
             os.unlink(temp_wav.name)
 
-            logger.info(f'Transcript: "{transcript}"')
-            return transcript if transcript else None
+    async def transcribe(self, audio_bytes: bytes) -> Optional[str]:
+        """Transcribe raw 16kHz 16-bit PCM audio to text.
 
-        except Exception as e:
-            logger.error(f"STT error: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return None
+        Errors are raised, not turned into « nothing heard »: the pipeline logs them with the
+        recording, where a CUDA failure used to look like silence."""
+        logger.info(f"STT Parakeet ({self.backend}): {len(audio_bytes)} bytes...")
+        loop = asyncio.get_running_loop()
+        transcript = (await loop.run_in_executor(None, self._transcribe_sync, audio_bytes)).strip()
+        logger.info(f'Transcript: "{transcript}"')
+        return transcript or None
