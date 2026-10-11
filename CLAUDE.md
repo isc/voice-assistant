@@ -42,6 +42,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `requirements-linux.txt` / `requirements-mac.txt` | Base deps (`requirements.txt`) plus the STT backend: onnx-asr (server) or parakeet-mlx (Mac) |
 | `run.sh` | Mac dev launcher: sources `.env`, reads secrets from the macOS Keychain, starts llama-server unless a cloud key is set |
 | `ctl.sh` | Mac dev service control via launchd; `./ctl.sh install` generates the (gitignored) plist |
+| `firmware/README.md` | How the Voice PE firmware is built and flashed (our build of 26.9.0 with ESPHome 2026.9.1, AD-054) |
 
 ## Pipeline flow (voice)
 
