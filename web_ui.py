@@ -19,8 +19,9 @@ _TAILNET = ipaddress.ip_network("100.64.0.0/10")
 _LAN_PATHS = ("/tts/", "/spotify/", "/health")
 # Tailscale Funnel's proxy runs on this machine: the internet arrives from loopback, told apart by these
 _PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-Funnel-Request")
-# Fetched without the cookie when Chrome installs the app; the icons by Google's WebAPK server
-_INSTALL_PATHS = ("/manifest.webmanifest", "/static/icon-192.png", "/static/icon-512.png")
+# Fetched without the cookie when Chrome installs the app, the icons by Google's WebAPK server. static/
+# holds only the shell and its icons: data stays behind api/, tts/, recordings/ and health
+_INSTALL_PATHS = ("/manifest.webmanifest", "/static/")
 KEY_COOKIE = "assistant_key"
 
 
@@ -47,7 +48,7 @@ def access_control(key: str):
             if request.path.startswith(_LAN_PATHS) or is_trusted_client(request.remote):
                 return await handler(request)
             raise web.HTTPForbidden(text="Only speaker files are served on the LAN")
-        if request.path in _INSTALL_PATHS or _is_key(request.cookies.get(KEY_COOKIE), key):
+        if request.path.startswith(_INSTALL_PATHS) or _is_key(request.cookies.get(KEY_COOKIE), key):
             return await handler(request)
         if _is_key(request.query.get("k"), key):
             # The same page without the key in its address. Relative, as is the cookie (no Path: the
@@ -166,7 +167,7 @@ def setup_routes(app, server):
 
     async def handle_service_worker(request):
         # Beside the page, so its scope is the app's folder (a /static/sw.js could only control
-        # /static/*): / on the tailnet, /assistant/ through Funnel. No-cache so updates propagate.
+        # /static/*). No-cache so updates propagate.
         return web.Response(
             text=(STATIC_DIR / "sw.js").read_text(),
             content_type="application/javascript",

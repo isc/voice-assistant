@@ -1552,7 +1552,7 @@ class TestWebUIThroughFunnel(unittest.IsolatedAsyncioTestCase):
         async def handler(request):
             return web.Response(text="ok")
 
-        request = make_mocked_request("GET", path, headers=headers or {}).clone(remote=remote)
+        request = make_mocked_request("GET", path, headers=headers).clone(remote=remote)
         try:
             return await access_control(key)(request, handler)
         except web.HTTPException as e:
@@ -1570,6 +1570,7 @@ class TestWebUIThroughFunnel(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("/?k=wrong", funnel)).status, 401)
         self.assertEqual((await self.call("/?k=s3cret", funnel, key="")).status, 401)
         self.assertEqual((await self.call("/manifest.webmanifest", funnel)).status, 200)
+        self.assertEqual((await self.call("/static/icon-512.png", funnel)).status, 200)
         self.assertEqual((await self.call("/", {**funnel, "Cookie": f"{KEY_COOKIE}=s3cret"})).status, 200)
 
     async def test_key_link_drops_a_cookie_scoped_by_the_browser(self):
