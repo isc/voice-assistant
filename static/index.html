@@ -39,7 +39,7 @@
   .conversation .exchange:last-child { border-radius: 4px 4px 10px 10px; }
   .conversation .exchange:only-child { border-radius: 10px; }
   .conversation .exchange:not(:first-child):not(:last-child) { border-radius: 4px; }
-  .exchange { background: var(--card); border: 1px solid var(--card-border); padding: 12px 14px; }
+  .exchange { background: var(--card); border: 1px solid var(--card-border); padding: 12px 14px; overflow-wrap: anywhere; }
   .meta { font-size: 11px; color: var(--fg2); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
   .badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
   .badge.voice { background: var(--accent); color: #fff; }
@@ -47,7 +47,7 @@
   .timings { margin-left: auto; font-family: SF Mono, Menlo, monospace; font-size: 10px; color: var(--fg3); }
   .input-line { color: var(--fg2); margin-bottom: 4px; font-size: 14px; }
   .response-line { color: var(--fg); font-weight: 500; font-size: 15px; }
-  .actions { margin-top: 8px; display: flex; gap: 6px; }
+  .actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
   .actions button { background: var(--bg2); border: 1px solid var(--border); color: var(--fg2); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; min-height: 36px; }
   .actions button:hover { border-color: var(--accent); color: var(--accent); }
   .debug { display: none; margin-top: 8px; padding: 8px 10px; background: var(--bg2); border-radius: 6px; font-family: SF Mono, Menlo, monospace; font-size: 11px; color: var(--fg2); line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
@@ -57,7 +57,7 @@
   .debug .tc { margin-top: 4px; padding: 4px 6px; background: var(--bg3); border-radius: 4px; }
   .empty { color: var(--fg3); text-align: center; margin-top: 40px; font-size: 14px; }
   #input-bar { padding: 10px 20px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); background: var(--bg2); border-top: 1px solid var(--border); display: flex; gap: 8px; }
-  #input-bar input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--fg); padding: 10px 14px; border-radius: 10px; font-size: 16px; outline: none; }
+  #input-bar input { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border); color: var(--fg); padding: 10px 14px; border-radius: 10px; font-size: 16px; outline: none; }
   #input-bar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
   #input-bar button { background: var(--accent); color: #fff; border: none; padding: 10px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 16px; min-height: 44px; }
   #input-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
