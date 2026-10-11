@@ -79,11 +79,12 @@
 const ex = document.getElementById('exchanges');
 const cmd = document.getElementById('cmd');
 const siteSel = document.getElementById('site');
-// Several homes: a typed command goes to the one chosen here, never silently to the other
-fetch('health').then(r => r.json()).then(h => {
-  const names = Object.keys(h.sites || {});
-  if (names.length < 2) return;
-  siteSel.innerHTML = names.map(n => '<option>' + esc(n) + '</option>').join('');
+// Several homes: a typed command goes to the one chosen here, never silently to the other. On one
+// home's Wi-Fi the server knows which (from its internet address) and sends commands there itself
+fetch('api/sites').then(r => r.json()).then(({sites, here}) => {
+  if (here) document.querySelector('h1').textContent += ' · ' + here;
+  if (here || sites.length < 2) return;
+  siteSel.innerHTML = sites.map(n => '<option>' + esc(n) + '</option>').join('');
   siteSel.hidden = false;
 }).catch(() => {});
 const btn = document.getElementById('send-btn');

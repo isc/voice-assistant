@@ -57,7 +57,7 @@ ESP (wake word) → audio stream → voice_server.py
 
 ## Key design patterns
 
-- **Sites** (`sites.py`): one server for several homes, each with its satellite, Home Assistant, TTS URL, conversation, timers and last speaker. The ESP handlers are bound to their site, and a voice request activates it; the other state (`ha_client`, `conversation`…) is read from the active site. One conversation at a time: a satellite that wakes while another site is mid-conversation gets an error. Text requests take an optional `"site"`.
+- **Sites** (`sites.py`): one server for several homes, each with its satellite, Home Assistant, TTS URL, conversation, timers and last speaker. The ESP handlers are bound to their site, and a voice request activates it; the other state (`ha_client`, `conversation`…) is read from the active site. One conversation at a time: a satellite that wakes while another site is mid-conversation gets an error. Text requests take an optional `"site"`; without one, a request through Funnel from a home's internet address (`PUBLIC_HOST`) serves that home.
 - **Room groups**: `room_groups` in `config.local.json`, shared by all sites (matched loosely: « Chambre Zoé » finds « Chambre de Zoé »), maps group names ("enfants") to lists of HA areas; "tout", "toute la maison" and "partout" are built in and mean every room. For a group, all entities of the matching domain are returned (only the named one for a generic name like "lumières").
 - **Entity resolution**: fuzzy matching on normalized friendly_name (accents stripped, stopwords removed), scoped by room/area.
 - **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls; a call already run this turn reuses its result, and a round whose only call is `end_conversation` gets no second round. Tool calls and follow-up flags of a request live in a per-request object (`_Request`, ContextVar), so concurrent requests stay apart.
@@ -89,6 +89,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `HA_TOKEN` | (empty) | HA long-lived access token |
 | `HTTP_PORT` | `8888` | HTTP server port (TTS files + web UI) |
 | `TTS_BASE_URL` | `http://<LAN IP>:<HTTP_PORT>/tts/` | URL the ESP fetches TTS files from, ending in `/`. Set it when the ESP reaches `/tts/` through a relay on another network |
+| `PUBLIC_HOST` | (empty) | Per site: a name resolving to the home's internet address (its Freebox's `….fbxos.fr`). Through Funnel, a phone on that home's Wi-Fi gets it without choosing (its IPv4, or its IPv6 /64) |
 | `CALENDAR_CREDENTIALS` | `client_secret.json` | Google OAuth credentials file path |
 | `CALENDAR_TOKEN` | `token.json` | Google OAuth token file path |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | (empty) | Spotify developer app, for search (client credentials). Music is enabled when go-librespot answers |

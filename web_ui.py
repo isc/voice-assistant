@@ -10,6 +10,8 @@ from pathlib import Path
 
 from aiohttp import web
 
+from sites import Site, site_at_address
+
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -145,16 +147,33 @@ def setup_routes(app, server):
         text = body.get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise _json_error(web.HTTPBadRequest, "missing 'text' field")
-        use_site(body)
+        await use_site(request, body)
         server.new_request()
         return text
 
-    def use_site(body: dict) -> None:
-        """Serve the site the request names, for this request only: a conversation at another site goes on."""
+    async def use_site(request, body: dict) -> None:
+        """Serve the site the request names, else the one it comes from, for this request only: a
+        conversation at another site goes on."""
         if name := body.get("site"):
             if not (site := server.site_named(name)):
                 raise _json_error(web.HTTPNotFound, f"unknown site {name}")
             server.site = site
+        elif site := await here(request):
+            server.site = site
+
+    async def here(request) -> Site | None:
+        """The home a request came from through Funnel, by its internet address: a phone on its Wi-Fi."""
+        if not (forwarded := request.headers.get("X-Forwarded-For")):
+            return None
+        # The last address is the one Funnel's proxy added; any before it, the client wrote
+        return await site_at_address(server.sites, forwarded.rsplit(",", 1)[-1].strip())
+
+    async def handle_sites(request):
+        """The homes for the UI's selector, and the one the request comes from, which needs none."""
+        site = await here(request)
+        return web.json_response(
+            {"sites": [s.name for s in server.sites if s.name], "here": site.name if site else None}
+        )
 
     async def handle_web_ui(request):
         return web.Response(text=(STATIC_DIR / "index.html").read_text(), content_type="text/html")
@@ -267,7 +286,7 @@ def setup_routes(app, server):
             body = await request.json()
         except Exception:
             body = {}
-        use_site(body if isinstance(body, dict) else {})
+        await use_site(request, body if isinstance(body, dict) else {})
         server.site.dry_run.history = []
         return web.json_response({"status": "ok"})
 
@@ -341,6 +360,7 @@ def setup_routes(app, server):
     app.router.add_get("/sw.js", handle_service_worker)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/api/exchanges", handle_get_exchanges)
+    app.router.add_get("/api/sites", handle_sites)
     # The patterns keep the path inside the recordings folder
     app.router.add_get(r"/recordings/{recording:[\d-]+/[\d_]+\.wav}", handle_recording)
     app.router.add_post("/api/send", handle_web_send)

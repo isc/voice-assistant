@@ -5,6 +5,8 @@
 Without `SITES`, the unprefixed variables describe a single site, as before.
 """
 
+import asyncio
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -12,6 +14,7 @@ from typing import Any, Mapping, Optional
 
 from timer import TimerManager
 
+_Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 # Read as NAME_KEY for a named site; these may also be set once, unprefixed, for all sites
 _SHARED_KEYS = {"ESP_PORT", "ESP_PASSWORD", "ESP_NOISE_PSK"}
 
@@ -37,6 +40,7 @@ class Site:
     ha_url: str = ""
     ha_token: str = ""
     tts_base_url: str = ""  # "" for this host's LAN address
+    public_host: str = ""  # name of the home's internet address (its box): a phone on its Wi-Fi comes from it
 
     # Runtime state, per home: a request at one site must not see the other's
     ha_client: Optional[Any] = None  # ha_client.HAClient
@@ -78,6 +82,36 @@ def load_sites(env: Mapping[str, str] = os.environ) -> list[Site]:
             ha_url=setting(name, "HA_URL"),
             ha_token=setting(name, "HA_TOKEN"),
             tts_base_url=setting(name, "TTS_BASE_URL"),
+            public_host=setting(name, "PUBLIC_HOST"),
         )
         for name in names
     ]
+
+
+def _same_connection(client: _Address, home: _Address) -> bool:
+    """IPv4: the box's address, shared by the whole home. IPv6: each device has its own, in the box's /64."""
+    if client.version != home.version:
+        return False
+    if client.version == 4:
+        return client == home
+    return ipaddress.ip_network(f"{home}/64", strict=False) == ipaddress.ip_network(f"{client}/64", strict=False)
+
+
+async def site_at_address(sites: list[Site], address: str) -> Optional[Site]:
+    """The site whose internet connection a client's public address belongs to, if any."""
+    try:
+        client = ipaddress.ip_address(address)
+    except ValueError:
+        return None
+    client = getattr(client, "ipv4_mapped", None) or client
+    loop = asyncio.get_running_loop()
+    for site in sites:
+        if not site.public_host:
+            continue
+        try:
+            found = await loop.getaddrinfo(site.public_host, None)
+        except OSError:
+            continue
+        if any(_same_connection(client, ipaddress.ip_address(sockaddr[0])) for *_, sockaddr in found):
+            return site
+    return None

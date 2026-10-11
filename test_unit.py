@@ -30,7 +30,7 @@ from images import is_about
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
 from recordings import Recordings
-from sites import load_sites
+from sites import load_sites, site_at_address
 from web_ui import KEY_COOKIE, access_control, is_trusted_client
 
 # ---------------------------------------------------------------------------
@@ -1291,6 +1291,43 @@ class TestSiteNames(unittest.TestCase):
     def test_empty_port_is_the_default(self):
         (site,) = load_sites({"ESP_PORT": ""})
         self.assertEqual(site.esp_port, 6053)
+
+
+class TestSiteAtAddress(unittest.IsolatedAsyncioTestCase):
+    """A phone on a home's Wi-Fi reaches Funnel from that home's internet address."""
+
+    async def asyncSetUp(self):
+        self.paris, self.charras = load_sites(
+            {"SITES": "paris,charras", "PARIS_PUBLIC_HOST": "paris.box", "CHARRAS_PUBLIC_HOST": "charras.box"}
+        )
+        boxes = {
+            "paris.box": ["82.67.150.147", "2a01:e0a:906:cc70::1"],
+            "charras.box": ["88.172.28.24", "2a01:e0a:b07:610::1"],
+        }
+
+        async def getaddrinfo(host, port):
+            return [(None, None, None, "", (address, 0)) for address in boxes[host]]
+
+        patcher = patch.object(asyncio.get_running_loop(), "getaddrinfo", getaddrinfo)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_the_box_address_or_its_ipv6_network(self):
+        sites = [self.paris, self.charras]
+        for address, site in (
+            ("82.67.150.147", self.paris),
+            ("::ffff:88.172.28.24", self.charras),
+            ("2a01:e0a:b07:610:5c1e:2ff:fe00:1", self.charras),
+            ("2a01:e0a:906:cc70:1234::9", self.paris),
+            ("2a01:e0a:906:cc71::9", None),
+            ("176.58.90.1", None),
+            ("not an address", None),
+        ):
+            self.assertIs(await site_at_address(sites, address), site, address)
+
+    async def test_no_public_host_never_matches(self):
+        (site,) = load_sites({})
+        self.assertIsNone(await site_at_address([site], "88.172.28.24"))
 
 
 class TestServerSites(unittest.IsolatedAsyncioTestCase):
