@@ -919,6 +919,60 @@ class TestMatchPlaylist(unittest.TestCase):
             self.assertIsNone(match_playlist(self.PLAYLISTS, query), query)
 
 
+class TestSpotifySearchRanking(unittest.TestCase):
+    """Paris, 2026-10-11: « le prélude n° 2 de Bach en do mineur » played the prelude in C
+    major three times, Spotify's first result."""
+
+    @staticmethod
+    def track(name, artist, album=""):
+        return {"name": name, "artists": [{"name": artist}], "album": {"name": album}}
+
+    def test_number_and_key_pick_the_piece(self):
+        from spotify import best_match
+
+        results = [
+            self.track("Prélude en Do Majeur (BWV 846)", "Johann Sebastian Bach"),
+            self.track("Sur un prélude de Bach", "Maurane"),
+            self.track("Prelude In C Minor, BWV 999", "Johann Sebastian Bach"),
+            self.track(
+                "Prelude & Fugue in C Minor (Well-Tempered Clavier, Book I, No. 2), BWV 847: I. Prelude",
+                "Johann Sebastian Bach",
+            ),
+        ]
+        for query in ("Prélude numéro 2 de Bach en Do mineur (C minor)", "prélude n°2 de Bach en do mineur"):
+            self.assertIn("BWV 847", best_match(query, results)["name"], query)
+
+    def test_spotify_order_among_equals(self):
+        from spotify import best_match
+
+        results = [
+            self.track("Get Lucky (feat. Pharrell Williams and Nile Rodgers)", "Daft Punk"),
+            self.track("Get Lucky", "L.E.J"),
+        ]
+        self.assertEqual(best_match("Get Lucky", results)["artists"][0]["name"], "Daft Punk")
+
+    def test_keys_in_three_languages(self):
+        from ha_client import fold
+        from spotify import _keys
+
+        for text, key in (
+            ("en do mineur", "c minor"), ("C Minor", "c minor"), ("c-Moll", "c minor"),
+            ("fa dièse mineur", "f# minor"), ("F-sharp minor", "f# minor"), ("fis-Moll", "f# minor"),
+            ("si bémol majeur", "bb major"), ("B flat major", "bb major"), ("B-Dur", "bb major"),
+            ("h-Moll", "b minor"), ("Es-Dur", "eb major"),
+        ):  # fmt: skip
+            self.assertEqual(_keys(fold(text)), [key], text)
+        self.assertEqual(_keys(fold("la majeure partie")), [])
+
+    def test_search_variant(self):
+        from spotify import search_variant
+
+        self.assertEqual(search_variant("Prélude numéro 2 de Bach en Do mineur (C minor)"), "prelude 2 bach c minor")
+        self.assertEqual(search_variant("Prélude numéro 2 de Bach"), "prelude 2 bach")
+        for query in ("Get Lucky Daft Punk", "Get Lucky de Daft Punk", "Symphony 5 Beethoven"):
+            self.assertIsNone(search_variant(query), query)
+
+
 class TestSpotifyStreamRead(unittest.TestCase):
     """The FIFO is read in whole stereo frames: a split frame would garble the rest of the stream."""
 
@@ -1551,8 +1605,10 @@ class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
     async def test_a_speaker_that_never_joins_is_not_said_playing(self):
         server = make_server()
         server.ha_client = make_client()
+        from spotify import Music
+
         server.spotify = MagicMock()
-        server.spotify.find = AsyncMock(return_value=("spotify:artist:x", "Daft Punk"))
+        server.spotify.find = AsyncMock(return_value=Music("spotify:artist:x", "Daft Punk", {}))
         server.spotify.play = AsyncMock()
         server._resolve_media_target = lambda room: ("ha", "media_player.google_home")
         server._point_at_spotify = AsyncMock(return_value=False)
@@ -1561,8 +1617,8 @@ class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
         server.spotify.play.assert_not_awaited()
 
 
-class TestSpotifyMoves(unittest.IsolatedAsyncioTestCase):
-    """Paris: the music moved from the satellite to the Sonos went on, on the satellite too."""
+class SpotifySpeakers:
+    """A Paris server with its satellite, the Sonos and the Google Home, and a stream they all join."""
 
     SATELLITE = ("esp", "")
     SONOS = ("ha", "media_player.sonos_paris")
@@ -1577,13 +1633,17 @@ class TestSpotifyMoves(unittest.IsolatedAsyncioTestCase):
         self.server.device_media_keys = {"": 1}
         # Joined, and no listener counted: the Sonos's first connection already closed
         stream = MagicMock(listeners=set(), wait_for_join=AsyncMock(return_value=True))
-        self.server.spotify = MagicMock(stream=stream)
+        self.server.spotify = MagicMock(stream=stream, now_metadata=AsyncMock(return_value={"title": "Get Lucky"}))
 
     async def stops(self):
         await asyncio.gather(*self.server._pending_service_calls)
         satellite = [c for c in self.satellite.media_player_command.call_args_list if "command" in c.kwargs]
         ha = [c.args[2] for c in self.server.site.ha_client.call_service.call_args_list if c.args[1] == "media_stop"]
         return len(satellite), ha
+
+
+class TestSpotifyMoves(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """Paris: the music moved from the satellite to the Sonos went on, on the satellite too."""
 
     async def test_the_previous_speaker_stops(self):
         await self.server._point_at_spotify(self.SATELLITE)
@@ -1596,6 +1656,36 @@ class TestSpotifyMoves(unittest.IsolatedAsyncioTestCase):
         await self.server._media_play_url(self.SONOS, "https://icecast.radiofrance.fr/fip-midfi.mp3")
         await self.server._point_at_spotify(self.GOOGLE_HOME)
         self.assertEqual(await self.stops(), (0, []))
+
+
+class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """The Nest Hub showed « Default Media Receiver » and « Live » over the music."""
+
+    METADATA = {"metadataType": 3, "title": "Prelude No. 2 in C minor, BWV 847"}
+
+    def setUp(self):
+        super().setUp()
+        self.server.site.ha_client.screens = ["media_player.google_home"]
+        self.server.spotify.stream.listeners = {object()}
+
+    def loads(self):
+        calls = self.server.site.ha_client.call_service.call_args_list
+        return [(c.args[2], c.kwargs.get("extra")) for c in calls if c.args[1] == "play_media"]
+
+    async def test_new_music_shows_on_the_screen_already_playing_the_stream(self):
+        await self.server._point_at_spotify(self.GOOGLE_HOME, self.METADATA)
+        await self.server._point_at_spotify(self.GOOGLE_HOME, self.METADATA)
+        extra = {"metadata": self.METADATA}
+        self.assertEqual(self.loads(), [("media_player.google_home", extra)] * 2)
+
+    async def test_music_moved_to_the_screen_shows_the_track_playing(self):
+        await self.server._point_at_spotify(self.GOOGLE_HOME)
+        self.assertEqual(self.loads(), [("media_player.google_home", {"metadata": {"title": "Get Lucky"}})])
+
+    async def test_a_speaker_without_screen_gets_no_metadata_nor_reload(self):
+        await self.server._point_at_spotify(self.SONOS, self.METADATA)
+        await self.server._point_at_spotify(self.SONOS, self.METADATA)
+        self.assertEqual(self.loads(), [("media_player.sonos_paris", None)])
 
 
 class TestOfflineDevices(unittest.IsolatedAsyncioTestCase):

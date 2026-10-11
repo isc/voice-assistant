@@ -41,6 +41,9 @@ Parakeet v3 already transcribes 25 European languages with automatic detection: 
 ### Spotify started from a phone
 "Assistant vocal" is in the account's Spotify Connect device list, but music started from a phone plays to nobody until a speaker listens to the stream. Watch go-librespot's `/events` websocket and point the default speaker at the stream when playback starts from elsewhere.
 
+### The track playing on the screen
+The Nest Hub shows the title and cover of what was asked (AD-057), not of the following tracks: the Default Media Receiver shows new metadata only by loading the stream again. Two ways: load it again at each track change from go-librespot's `/events`, holding the FIFO meanwhile so that no music is lost, for a gap of a few seconds between tracks on screens; or a Cast receiver of our own (Google Cast developer account, US$5), which plays the stream and reads the track from the server, with no gap.
+
 ### Two rooms, two musics
 A single go-librespot is a single queue. Different music in two rooms needs a second player and a second Spotify account, as Spotify allows one stream per account.
 

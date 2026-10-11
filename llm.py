@@ -4,10 +4,11 @@ import json
 import logging
 import os
 import re
-import unicodedata
 from typing import Optional
 
 import aiohttp
+
+from ha_client import fold
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,7 @@ def claims_completed_action(text: str) -> bool:
     out: « souhaitez-vous que je lance de la musique ? » offers an action, and
     challenging it once pushed the model into playing music nobody asked for.
     """
-    flat = "".join(c for c in unicodedata.normalize("NFD", (text or "").lower()) if unicodedata.category(c) != "Mn")
+    flat = fold(text or "")
     return bool(_ACTION_CLAIM.search(re.sub(r"[^.!?]*\?", "", flat)))
 
 

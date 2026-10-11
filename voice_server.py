@@ -1270,12 +1270,11 @@ class VoiceAssistantServer:
                 query = arguments.get("query", "")
                 if not (found := await self.spotify.find(query, arguments.get("kind"))):
                     return f"Rien trouvé sur Spotify pour {query}"
-            if not await self._point_at_spotify(target):
+            if not await self._point_at_spotify(target, found.metadata if found else None):
                 return f"{self._speaker_name(target)} ne répond pas"
             if found:
-                uri, description = found
-                await self.spotify.play(uri, shuffle=bool(arguments.get("shuffle")))
-                result = f"Lecture sur Spotify : {description}"
+                await self.spotify.play(found.uri, shuffle=bool(arguments.get("shuffle")))
+                result = f"Lecture sur Spotify : {found.description}"
             else:
                 result = await self.spotify.control("resume")
             self._after_media_change(target)
@@ -1318,19 +1317,26 @@ class VoiceAssistantServer:
             site, target = self._spotify_at
             await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop", site=site)
 
-    async def _point_at_spotify(self, target: tuple[str, str]) -> bool:
+    async def _point_at_spotify(self, target: tuple[str, str], metadata: Optional[dict] = None) -> bool:
         """Make the target speaker play the Spotify stream, and move it off the previous one.
         False if it never connected: nothing changed, the music must not start nor be said playing.
+
+        metadata: what a screen shows of new music. A screen already on the stream loads it
+        again to show it; music moved to a screen shows the track playing.
 
         A speaker since given a radio or a picture is no longer _spotify_at, so that it is not
         stopped here; once the music plays to nobody, the stream pauses go-librespot."""
         stream = self.spotify.stream
         previous, new = self._spotify_at, (self.site, target)
-        if previous == new and stream.listeners:
+        screen = target[0] == "ha" and target[1] in self.ha_client.screens
+        metadata = metadata if screen else None
+        if previous == new and stream.listeners and not metadata:
             return True
+        if screen and not metadata:
+            metadata = await self.spotify.now_metadata()
         url = self._spotify_url(self.site)
         joins = stream.joins
-        await self._media_play_url(target, url)
+        await self._media_play_url(target, url, metadata=metadata)
         # Start the music once the speaker listens, so that the first seconds play
         if not await stream.wait_for_join(joins, timeout=8):
             logger.warning(f"Spotify: {target} did not connect to {url}")
@@ -1345,8 +1351,12 @@ class VoiceAssistantServer:
             self._in_background(self._media_command(previous_target, stop, ha_service="media_stop", site=previous_site))
         return True
 
-    async def _media_play_url(self, target: tuple[str, str], url: str, content_type: str = "music") -> None:
-        """Start playback of an arbitrary media URL on the target speaker (or show it, for a picture)."""
+    async def _media_play_url(
+        self, target: tuple[str, str], url: str, content_type: str = "music", metadata: Optional[dict] = None
+    ) -> None:
+        """Start playback of an arbitrary media URL on the target speaker (or show it, for a picture).
+
+        metadata: Cast's media metadata, what a screen shows (HA's cast integration passes it on)."""
         if self._spotify_here == target:
             self._spotify_at = None  # a radio or a picture takes it off the stream (the stream, once it joins, back)
         kind, ident = target
@@ -1357,12 +1367,14 @@ class VoiceAssistantServer:
                 logger.info(f"ESP media_player_command: play {url} on {ident} (key={key})")
                 api.media_player_command(key, media_url=url, announcement=False)
             return
+        extra = {"extra": {"metadata": metadata}} if metadata else {}
         await self.ha_client.call_service(
             "media_player",
             "play_media",
             ident,
             media_content_id=url,
             media_content_type=content_type,
+            **extra,
         )
 
     async def _media_command(

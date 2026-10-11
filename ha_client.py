@@ -33,12 +33,14 @@ except FileNotFoundError:
     LOCAL_CONFIG = {}
 
 
+def fold(text: str) -> str:
+    """Lowercase, accents stripped."""
+    return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
+
+
 def normalize(text: str) -> str:
     """Normalize text for fuzzy matching: lowercase, strip accents and stopwords."""
-    text = text.lower().strip()
-    text = "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
-    words = [w for w in text.split() if w not in STOPWORDS]
-    return " ".join(words)
+    return " ".join(w for w in fold(text).split() if w not in STOPWORDS)
 
 
 def compact(text: str) -> str:

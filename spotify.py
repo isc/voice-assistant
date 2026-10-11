@@ -10,19 +10,25 @@ Search goes through the public Web API with an app token of our own (client
 credentials): go-librespot's session token belongs to Spotify's shared desktop client
 ID, which the Web API answers with a standing 429. The user's playlists and Liked
 Songs come from go-librespot itself.
+
+Spotify ranks results by popularity more than by the words asked: « prélude n° 2 de Bach
+en do mineur » came first as the prelude in C major. The results are ranked again here on
+the words of the request, its numbers and its key, said in French or written in English
+or German (« do mineur », « C minor », « c-Moll »).
 """
 
 import asyncio
 import functools
 import logging
 import os
+import re
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional, Sequence
 
 import aiohttp
 from aiohttp import web
 
-from ha_client import compact, normalize
+from ha_client import STOPWORDS, compact, fold, normalize
 
 logger = logging.getLogger(__name__)
 
@@ -219,8 +225,12 @@ class SpotifyStream:
         return response
 
 
-def _artists(names: list[str]) -> str:
+def _artists(names: Sequence[str]) -> str:
     return ", ".join(names[:2])
+
+
+def _artist_names(item: dict) -> list[str]:
+    return [a["name"] for a in item.get("artists", [])]
 
 
 def _track(status: dict) -> Optional[str]:
@@ -235,12 +245,129 @@ def _describe(kind: str, item: dict) -> str:
     """How the LLM is told what is playing."""
     if kind == "artist":
         return item["name"]
-    artists = _artists([a["name"] for a in item.get("artists", [])])
+    artists = _artists(_artist_names(item))
     if kind == "track":
         return f"« {item['name']} » de {artists}"
     if kind == "album":
         return f"l'album « {item['name']} » de {artists}"
     return f"la playlist « {item['name']} »"
+
+
+def screen_metadata(title: str, artists: Sequence[str] = (), album: str = "", image: str = "") -> dict:
+    """What a Cast screen shows beside the stream: Cast's music track metadata (metadataType 3).
+
+    Without it, a Nest Hub showed « Default Media Receiver » and « Live »."""
+    metadata = {"metadataType": 3, "title": title}
+    if artists:
+        metadata["artist"] = _artists(artists)
+    if album:
+        metadata["albumName"] = album
+    if image:
+        metadata["images"] = [{"url": image}]
+    return metadata
+
+
+class Music(NamedTuple):
+    """What play_music found: the context to play, what the LLM is told, what a screen shows."""
+
+    uri: str
+    description: str
+    metadata: dict
+
+
+def _music(kind: str, item: dict) -> Music:
+    """A search result as Music."""
+    images = (item.get("album") or item).get("images") or []  # largest first
+    image = images[0]["url"] if images else ""
+    if kind in ("artist", "playlist"):
+        metadata = screen_metadata(item["name"], image=image)
+    else:
+        album = item["album"]["name"] if kind == "track" else ""
+        metadata = screen_metadata(item["name"], _artist_names(item), album, image)
+    return Music(item["uri"], _describe(kind, item), metadata)
+
+
+# A key, as said in French or written in English or German, and how its words are written in English
+_KEYS = (
+    # do mineur, fa dièse mineur, si bémol majeur
+    (
+        re.compile(r"\b(do|re|mi|fa|sol|la|si)(?: (diese|bemol))? (majeur|mineur)\b"),
+        dict(zip(("do", "re", "mi", "fa", "sol", "la", "si"), "cdefgab"))
+        | {"diese": "#", "bemol": "b", "majeur": "major", "mineur": "minor"},
+    ),
+    # C minor, F-sharp minor, E flat major, C# minor
+    (
+        re.compile(r"\b([a-g])(?:[ -]?(sharp|flat|#|♯|♭))?[ -](major|minor)\b"),
+        {"sharp": "#", "flat": "b", "♯": "#", "♭": "b"},
+    ),
+    # c-Moll, fis-Moll, Es-Dur, B-Dur (B flat), h-Moll (B)
+    (
+        re.compile(r"\b([a-h])(is|es|s)?-(dur|moll)\b"),
+        {"b": "bb", "h": "b", "is": "#", "es": "b", "s": "b", "dur": "major", "moll": "minor"},
+    ),
+)
+# Words that tell no piece from another. « (version classique) » found « Prelude No. 1 in C
+# major (version n.2) » by The Piano Girls before Bach's second prelude
+_FILLER = STOPWORDS | {
+    "en", "et", "a", "au", "aux", "par", "pour", "the", "of", "in", "and", "by", "an", "for",
+    "numero", "no", "n", "nr", "num", "number", "version", "musique", "music", "classique", "classical",
+}  # fmt: skip
+_TOKEN = re.compile(r"[a-z]+|\d+")
+
+
+def _keys(text: str) -> list[str]:
+    """The keys named in a folded text, in order (« en do mineur (C minor) » → c minor, c minor)."""
+    found = []
+    for pattern, english in _KEYS:
+        for match in pattern.finditer(text):
+            note, accidental, mode = (english.get(part, part) if part else "" for part in match.groups())
+            found.append((match.start(), f"{note}{accidental} {mode}"))
+    return [key for _, key in sorted(found)]
+
+
+def _words(text: str) -> list[str]:
+    """A folded text's words and numbers, keys and filler left out: « BWV847 » → bwv, 847."""
+    for pattern, _ in _KEYS:
+        text = pattern.sub(" ", text)
+    return [w for w in _TOKEN.findall(text) if w not in _FILLER]
+
+
+def _same_word(asked: str, word: str) -> bool:
+    # « symphonie » is « Symphony », « sonate » « Sonata », « préludes » « prélude »
+    return asked == word or (len(asked) >= 5 and len(word) >= 5 and asked[:5] == word[:5])
+
+
+def _score(asked: list[str], keys: set[str], item: dict) -> int:
+    """How well a search result fits the request: its words found, and its key."""
+    name = fold(item["name"])
+    album = fold(item.get("album", {}).get("name", ""))
+    words = _words(" ".join([name, album, *map(fold, _artist_names(item))]))
+    score = sum(any(_same_word(w, word) for word in words) for w in asked)
+    found = _keys(name) or _keys(album)
+    if keys and found:
+        score += 1 if found[0] in keys else -1  # « en do mineur » is not « en do majeur »
+    return score
+
+
+def best_match(query: str, items: list[dict]) -> dict:
+    """The search result that fits the request best, Spotify's order among equals.
+
+    Not an exact name first: « Get Lucky » was L.E.J's cover, « Sonate au clair de lune
+    Beethoven » a nursery version titled so."""
+    plain = fold(query)
+    asked, keys = _words(plain), set(_keys(plain))
+    return max(items, key=lambda item: _score(asked, keys, item))  # max keeps the first of equals
+
+
+def search_variant(query: str) -> Optional[str]:
+    """The request as Spotify's catalog writes it, for a piece told by its number or key:
+    « Prélude numéro 2 de Bach en Do mineur » → « prelude 2 bach c minor »."""
+    plain = fold(query)
+    words, keys = _words(plain), list(dict.fromkeys(_keys(plain)))
+    if not keys and not any(w.isdigit() for w in words):
+        return None  # « Get Lucky de Daft Punk » needs one search
+    variant = " ".join(words + keys)
+    return variant if variant != " ".join(_TOKEN.findall(plain)) else None
 
 
 _PLAYLIST_FILLER = {"playlist", "ma", "mon", "mes", "notre", "nos"}
@@ -360,32 +487,42 @@ class Spotify:
         return self._app_token
 
     async def _search(self, query: str, kind: str) -> list[dict]:
-        # An app token has no user to take the market from
-        params = {"q": query, "type": kind, "limit": 5, "market": "FR"}
+        # An app token has no user to take the market from. 10 is the most Spotify gives (400 above)
+        params = {"q": query, "type": kind, "limit": 10, "market": "FR"}
         headers = {"Authorization": f"Bearer {await self._search_token()}"}
         status, body = await self._request("GET", f"{WEB_API}/search", params=params, headers=headers)
         if status != 200:
             raise SpotifyError(f"search: HTTP {status}")
         return [item for item in body[f"{kind}s"]["items"] if item]  # playlist results hold nulls
 
-    async def find(self, query: str, kind: Optional[str]) -> Optional[tuple[str, str]]:
-        """Resolve a spoken request to (context URI, description), or None if nothing matches.
+    async def find(self, query: str, kind: Optional[str]) -> Optional[Music]:
+        """Resolve a spoken request to what to play, or None if nothing matches.
 
         kind: artist, track, album, playlist (the user's own first, then search) or liked."""
         if kind == "liked":
             status = await self.status()
-            return (f"spotify:user:{status['username']}:collection", "vos titres likés")
+            liked = f"spotify:user:{status['username']}:collection"
+            return Music(liked, "vos titres likés", screen_metadata("Titres likés"))
         if kind == "playlist":
             library = await self._api("GET", "/library/playlists", params={"limit": 500})
             own = match_playlist(library["items"], query)
             if own:
-                return own["uri"], _describe("playlist", own)
+                metadata = screen_metadata(own["name"], image=own.get("image_url") or "")
+                return Music(own["uri"], _describe("playlist", own), metadata)
         if kind not in ("artist", "track", "album", "playlist"):
             kind = "track"
-        items = await self._search(query, kind)
-        if not items:
+        # Spotify's search, ten results at most, is fuzzy: the request as said, and as its catalog writes it
+        variant = search_variant(query)
+        await self._search_token()  # once, not by each search
+        results = await asyncio.gather(*(self._search(q, kind) for q in filter(None, (query, variant))))
+        items = list({item["uri"]: item for item in sum(results, [])}.values())  # in order, once each
+        return _music(kind, best_match(query, items)) if items else None
+
+    async def now_metadata(self) -> Optional[dict]:
+        """What a screen shows for the track go-librespot plays, None when there is none."""
+        status = await self.status()
+        track = status.get("track")
+        if not track or status.get("stopped"):
             return None
-        # Spotify ranks by popularity: prefer an exact name match among the top results
-        key = compact(query)
-        item = next((i for i in items if compact(i["name"]) == key), items[0])
-        return item["uri"], _describe(kind, item)
+        cover = track["album_cover_url"] or ""
+        return screen_metadata(track["name"], track["artist_names"], track["album_name"], cover)
