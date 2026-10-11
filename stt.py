@@ -6,7 +6,6 @@ Backend selectable via the STT_BACKEND env var:
   - 'auto' (default): MLX if importable, else onnx-asr.
 """
 
-import asyncio
 import logging
 import os
 import tempfile
@@ -14,6 +13,8 @@ import wave
 from typing import Optional
 
 import numpy as np
+
+import onnx_gpu
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +46,14 @@ class ParakeetSTT:
             self.model = parakeet_mlx.from_pretrained(self.MODEL_MLX)
         elif self.backend == "onnx":
             import onnx_asr
-            import onnxruntime
 
-            # Use the GPU (CUDA EP) when onnxruntime-gpu is installed, else CPU.
-            # Generic: same code on a CPU-only box and a CUDA server.
-            providers = ["CPUExecutionProvider"]
-            if "CUDAExecutionProvider" in onnxruntime.get_available_providers():
-                providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            providers = onnx_gpu.providers()
             logger.info(f"ONNX STT execution providers: {providers}")
-            self.model = onnx_asr.load_model(self.MODEL_ONNX, providers=providers)
+            self.model = onnx_asr.load_model(
+                self.MODEL_ONNX, providers=providers, sess_options=onnx_gpu.session_options()
+            )
+            # The encoder's activations follow the recording's length (onnx-asr has no run options)
+            onnx_gpu.shrinking(self.model.asr._encoder)
         else:
             raise ValueError(f"Unknown STT_BACKEND '{self.backend}' (expected mlx|onnx|auto)")
         logger.info("Parakeet STT model loaded")
@@ -80,7 +80,6 @@ class ParakeetSTT:
         Errors are raised, not turned into « nothing heard »: the pipeline logs them with the
         recording, where a CUDA failure used to look like silence."""
         logger.info(f"STT Parakeet ({self.backend}): {len(audio_bytes)} bytes...")
-        loop = asyncio.get_running_loop()
-        transcript = (await loop.run_in_executor(None, self._transcribe_sync, audio_bytes)).strip()
+        transcript = (await onnx_gpu.run(self._transcribe_sync, audio_bytes)).strip()
         logger.info(f'Transcript: "{transcript}"')
         return transcript or None

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
+import onnx_gpu
+
 logger = logging.getLogger(__name__)
 
 # Next to the code, not in /tmp: /tmp is emptied at boot, and the server could not start without GitHub
@@ -76,11 +78,11 @@ class KokoroTTS:
         name find_spec never finds, and ran on the CPU (0.18 x real time)."""
         import onnxruntime
 
-        wanted = ("CUDAExecutionProvider", "CPUExecutionProvider")
-        providers = [p for p in wanted if p in onnxruntime.get_available_providers()]
-        session = onnxruntime.InferenceSession(str(model_path), providers=providers)
+        session = onnxruntime.InferenceSession(
+            str(model_path), onnx_gpu.session_options(), providers=onnx_gpu.providers()
+        )
         logger.info(f"Kokoro providers: {session.get_providers()}")
-        return kokoro_onnx.Kokoro.from_session(session, str(voices_path))
+        return kokoro_onnx.Kokoro.from_session(onnx_gpu.shrinking(session), str(voices_path))
 
     async def synthesize_to_file(self, text: str, output_dir: Path, base_url: str) -> str:
         """Generate a 16kHz FLAC file and return its URL."""
@@ -107,11 +109,9 @@ class KokoroTTS:
             phonemes = phonemes[0]
         logger.info(f"Phonemes: {phonemes}")
 
-        # Generate audio with Kokoro (runs sync, use executor)
-        loop = asyncio.get_running_loop()
-        audio_24k, sr = await loop.run_in_executor(
-            None,
-            lambda: self.engine.create(phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True),
+        # Generate audio with Kokoro (runs sync, on the models' thread)
+        audio_24k, sr = await onnx_gpu.run(
+            lambda: self.engine.create(phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True)
         )
 
         logger.info(f"Kokoro output: {len(audio_24k)} samples at {sr}Hz")
