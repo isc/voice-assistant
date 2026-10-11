@@ -735,16 +735,17 @@ class TestScreenTool(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 PARIS = (48.8477, 2.2964)
+PARIS_TZ = ZoneInfo("Europe/Paris")
 
 
 def paris_time(*args):
-    return datetime(*args, tzinfo=ZoneInfo("Europe/Paris"))
+    return datetime(*args, tzinfo=PARIS_TZ)
 
 
 class TestOpeningHours(unittest.TestCase):
     def test_closed_on_sunday(self):
         """The request that asked for it: Altermundi, rue du Commerce, on Sunday 2026-10-11 at 09:07."""
-        place = week("Mo-Sa 10:00-19:30", PARIS, paris_time(2026, 10, 11, 9, 7))
+        place = week("Mo-Sa 10:00-19:30", PARIS, PARIS_TZ, "FR", paris_time(2026, 10, 11, 9, 7))
         self.assertEqual(place["maintenant"], "fermé, ouvre demain à 10:00")
         self.assertEqual(
             list(place["horaires"].items())[:3],
@@ -757,39 +758,43 @@ class TestOpeningHours(unittest.TestCase):
         self.assertEqual(len(place["horaires"]), 7)
 
     def test_open_now(self):
-        place = week("Mo-Sa 10:00-19:30", PARIS, paris_time(2026, 10, 12, 12, 0))
+        place = week("Mo-Sa 10:00-19:30", PARIS, PARIS_TZ, "FR", paris_time(2026, 10, 12, 12, 0))
         self.assertEqual(place["maintenant"], "ouvert jusqu'à 19:30")
 
     def test_lunch_break(self):
-        place = week("Mo-Fr 09:00-12:00,14:00-18:00", PARIS, paris_time(2026, 10, 12, 12, 30))
+        place = week("Mo-Fr 09:00-12:00,14:00-18:00", PARIS, PARIS_TZ, "FR", paris_time(2026, 10, 12, 12, 30))
         self.assertEqual(place["horaires"]["aujourd'hui (lundi 12 octobre)"], "09:00-12:00, 14:00-18:00")
         self.assertEqual(place["maintenant"], "fermé, ouvre à 14:00")
 
     def test_always_open(self):
-        place = week("24/7", PARIS, paris_time(2026, 10, 11, 3, 0))
+        place = week("24/7", PARIS, PARIS_TZ, "FR", paris_time(2026, 10, 11, 3, 0))
         self.assertEqual(place["maintenant"], "ouvert")
         self.assertEqual(set(place["horaires"].values()), {"ouvert toute la journée"})
 
     def test_past_midnight(self):
-        place = week("Fr 18:00-02:00", PARIS, paris_time(2026, 10, 16, 23, 0))
+        place = week("Fr 18:00-02:00", PARIS, PARIS_TZ, "FR", paris_time(2026, 10, 16, 23, 0))
         self.assertEqual(place["maintenant"], "ouvert jusqu'à demain 02:00")
         self.assertEqual(place["horaires"]["aujourd'hui (vendredi 16 octobre)"], "18:00-24:00")
         self.assertEqual(place["horaires"]["demain (samedi 17 octobre)"], "00:00-02:00")
 
     def test_public_holiday(self):
-        """11 November, from the place's coordinates: France."""
-        place = week("Mo-Sa 10:00-19:30; PH off", PARIS, paris_time(2026, 11, 10, 20, 0))
+        """11 November in France."""
+        place = week("Mo-Sa 10:00-19:30; PH off", PARIS, PARIS_TZ, "FR", paris_time(2026, 11, 10, 20, 0))
         self.assertEqual(place["horaires"]["demain (mercredi 11 novembre)"], "fermé")
         self.assertEqual(place["maintenant"], "fermé, ouvre jeudi 12 novembre à 10:00")
 
     def test_comment(self):
-        place = week('Mo-Fr 09:00-18:00 "sur rendez-vous"', PARIS, paris_time(2026, 10, 12, 10, 0))
+        place = week('Mo-Fr 09:00-18:00 "sur rendez-vous"', PARIS, PARIS_TZ, "FR", paris_time(2026, 10, 12, 10, 0))
         self.assertEqual(place["horaires"]["aujourd'hui (lundi 12 octobre)"], "09:00-18:00 (sur rendez-vous)")
         self.assertEqual(place["maintenant"], "ouvert jusqu'à 18:00 (sur rendez-vous)")
 
+    def test_country_without_holidays(self):
+        place = week("Mo-Sa 10:00-19:30; PH off", PARIS, PARIS_TZ, "RW", paris_time(2026, 11, 10, 20, 0))
+        self.assertEqual(place["horaires"]["demain (mercredi 11 novembre)"], "10:00-19:30")
+
     def test_unreadable(self):
         with self.assertRaises(ParserError):
-            week("sur rendez-vous", PARIS)
+            week("sur rendez-vous", PARIS, PARIS_TZ, "FR")
 
     def test_offered_without_home_assistant(self):
         self.assertIn("find_place", {t["name"] for t in get_tool_definitions(None)})

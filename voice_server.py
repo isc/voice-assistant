@@ -930,12 +930,10 @@ class VoiceAssistantServer:
         if function_name == "get_weather":
             from weather import get_weather
 
-            home = self.ha_client.home if self.ha_client else {}
-            return await get_weather(arguments.get("location", ""), home)
+            return await get_weather(arguments.get("location", ""), self.ha_client and self.ha_client.home)
 
         if function_name == "find_place":
-            home = self.ha_client.home if self.ha_client else {}
-            return await find_place(arguments.get("query", ""), home)
+            return await find_place(arguments.get("query", ""), self.ha_client and self.ha_client.home)
 
         # Calendar — standalone, no HA dependency
         if function_name == "query_calendar":

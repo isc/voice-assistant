@@ -363,8 +363,9 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             },
         ]
 
+    standalone_tools = [weather_tool, place_tool, *timer_tools, *calendar_tools, *media_tools]
     if not ha_client:
-        return [weather_tool, place_tool] + timer_tools + calendar_tools + media_tools
+        return standalone_tools
 
     room_param = {
         "type": "string",
@@ -571,11 +572,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
                 "required": ["query"],
             },
         },
-        weather_tool,
-        place_tool,
-        *timer_tools,
-        *calendar_tools,
-        *media_tools,
+        *standalone_tools,
         *screen_tools,
         *lock_tools,
         {
