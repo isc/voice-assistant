@@ -45,7 +45,7 @@ ESP (wake word) → audio stream → voice_server.py
 1. ESP detects wake word → sends audio stream
 2. Silero VAD detects end of speech (31 frames / ~1s silence)
 3. STT: Parakeet transcribes audio to French text
-4. LLM: sends transcript + system prompt (with datetime, entity list) + conversation history + tool definitions
+4. LLM: sends a static system prompt (instructions, family, entity list) + tool definitions + conversation history + a short context message (date/time, timers, music) + the transcript
 5. If tool_calls → execute each, loop back to LLM with results + tools (up to 3 rounds) until text response
 6. If text response → check fallback parser for French action verbs (local LLM workaround)
 7. Final LLM round formulates natural spoken response from tool results
@@ -58,11 +58,11 @@ ESP (wake word) → audio stream → voice_server.py
 - **Sites** (`sites.py`): one server for several homes, each with its satellite, Home Assistant, TTS URL, conversation, timers and last speaker. The ESP handlers are bound to their site, and a voice request activates it; the other state (`ha_client`, `conversation_history`…) is read from the active site. One conversation at a time: a satellite that wakes while another site is mid-conversation gets an error. Text requests take an optional `"site"`.
 - **Room groups**: `room_groups` in `config.local.json`, shared by all sites (matched loosely: « Chambre Zoé » finds « Chambre de Zoé »), maps group names ("enfants") to lists of HA areas; "tout", "toute la maison" and "partout" are built in and mean every room. For a group, all entities of the matching domain are returned (only the named one for a generic name like "lumières").
 - **Entity resolution**: fuzzy matching on normalized friendly_name (accents stripped, stopwords removed), scoped by room/area.
-- **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls. A system reminder lists already-called functions to encourage completeness.
-- **Conversation history**: last 5 exchanges (10 messages), expires after 10 min inactivity (`CONVERSATION_TIMEOUT`).
-- **DateTime injection**: current date/time injected into system prompt so the LLM can answer time/date questions.
+- **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls; a call already run this turn reuses its result, and a round whose only call is `end_conversation` gets no second round. Tool calls and follow-up flags of a request live in a per-request object (`_Request`, ContextVar), so concurrent requests stay apart.
+- **Conversation history**: per site, last 5 exchanges with their tool calls and results (capped), expires after 10 min inactivity (`CONVERSATION_TIMEOUT`). Dry runs keep a history of their own.
+- **Static system prompt**: date/time, timers and music go in a context message just before the request, not in the system prompt, so that Ollama reuses its prompt cache (a new minute re-read ~3.6K tokens, ~1.9 s). The server pins the model with a native `keep_alive: -1` after each request.
 - **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
-- **Text fallback parser**: catches when local LLM outputs tool calls as plain text instead of structured JSON (4 patterns: JSON args, quoted string, Python kwargs, French verbs).
+- **Text fallback parser**: catches when the LLM outputs tool calls as plain text instead of structured JSON (3 patterns: JSON args, quoted string, Python kwargs; never in dry runs).
 - **Spotify as a radio station**: go-librespot (separate service) plays into a FIFO; `spotify.py` paces it at real time, pads gaps with silence, encodes MP3 and serves `/spotify/stream.mp3` next to `/tts/`. Speakers (ESP or HA) play that URL; one stream, so one speaker at a time.
 - **Locks lock, never unlock**: a `lock` tool and state reads, no unlock tool. Only the tools offered this turn run, and `HAClient.call_service` refuses `lock.unlock` and `lock.open` (AD-041).
 - **Web UI on Tailscale only**: port 8888 also answers on the LAN, where speakers fetch `/tts/` and `/spotify/stream.mp3`; everything else (UI, API, recordings) answers only localhost and the tailnet (`web_ui.lan_sees_only_speaker_paths`).

@@ -281,3 +281,15 @@ This document tracks all architecture and technology decisions made for this pro
 - **Decision**: a derived model, `gemma4:12b-8k` (`FROM gemma4:12b`, `PARAMETER num_ctx 8192`), named in `LLM_MODEL`. It shares the weights; the OpenAI-compatible endpoint has no way to pass `num_ctx` per request, and `OLLAMA_CONTEXT_LENGTH` on the container would mean recreating it.
 - **Measured**: 8.4 GB of VRAM loaded, against 8.1 GB at 4096; the card at 12.6 of 16.3 GB with the voice server. Charras: 4 out of 4 correct after the change (prompts up to 4228 tokens), 0 out of 6 before.
 - **Trade-off**: The model name now carries a setting, so pulling a new gemma means recreating the derived model. A prompt can still outgrow 8192 with a much larger house or a long tool loop: the retry on `finish_reason: length` (raising `max_tokens`) cannot help when the prompt itself fills the context.
+
+## 2026-10-11: Code audit
+
+### AD-045: What the overnight audit changed, and why
+- **Context**: Much of the code was written with weaker models. Six read-only reviews (pipeline, LLM loop, Home Assistant, Spotify, calendar/timers/web, hygiene) replayed real requests on both houses' entity lists, ran ~60 dry runs and read the journal; each finding was checked before being fixed. The commits of 2026-10-11 carry the details and measurements.
+- **Decision**, the main lines:
+  - Entity resolution no longer actuates lookalikes (fuzzy cutoff 0.75, no lone candidate under another name, rooms said by name, no switch in a « tout » sweep, roof windows left out of shutter sweeps, cover kind by name before device_class). Devices are re-read every 5 minutes.
+  - LLM: a static system prompt (Ollama's cache: 0.6-0.9 s a round instead of 2.5 s at each new minute), the model pinned in memory, history with the tool calls, per-request state, no French-verb fallback, no « already called » reminder, no second round after a goodbye.
+  - Voice pipeline: no follow-up while the satellite plays its own media (the likely cause of the 2026-10-10 reboot), aioesphomeapi timeouts actually caught, Kokoro on the GPU with its models out of /tmp, alarms right across the clock change.
+  - Spotify: no false « playing », music kept through a restart, silence not streamed forever. Web UI on Tailscale with a site selector; exchange log 0600 and atomic. Lint clean, versions pinned.
+- **Measured**: test_e2e 19/19 in dry run after the changes; 133 unit tests.
+- **Left for later** (ROADMAP): timers lost on restart, alarms more than a day ahead, duplicate device names, sensor-search synonyms, a VAD minimum speech length, the web API without CSRF/Host checks.

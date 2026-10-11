@@ -4,10 +4,8 @@ What is still open. Shipped work is recorded in `DECISIONS.md` and the git histo
 
 ## Robustness
 
-### Voice PE stalls when it plays music and answers
-2026-10-10, 23:13 in Paris: the Voice PE was playing the Spotify stream itself when a spoken reply with follow-up arrived. It never sent `VoiceAssistantAnnounceFinished` (8 s timeout), then most likely rebooted: a solid warm-white ring is the firmware's init-without-Wi-Fi state, and the API reconnected right away while its stream connection dropped 7 s later. To try, in order:
-- Pause the ESP's own media before announcing a reply, and resume after; or skip the follow-up while the ESP itself plays media, as `_after_media_change` already does after a media command.
-- Add ESPHome's `debug:` component to the Voice PE firmware so the reset reason shows up, instead of inferring a reboot from the LED.
+### Know why the Voice PE restarts
+On 2026-10-10 the Voice PE most likely rebooted after a reply asked for follow-up while its own player was busy; since 2026-10-11 the server asks for no follow-up while the satellite plays (AD-045). The reboot was inferred from the LED (solid warm white is the firmware's init-without-Wi-Fi state). Adding ESPHome's `debug:` component to the Voice PE firmware would report the reset reason.
 
 ### Duck the music while listening
 The same evening, a request said next to the playing Sonos was recorded for 14 s (the VAD never heard silence) and transcribed into song lyrics. The Voice PE ducks only its own speaker. On wake word, lower the HA speakers playing in the satellite's room, and restore them once the request is transcribed. Needs the satellite's room (see "Room of the voice satellite").
@@ -67,7 +65,15 @@ Today Parakeet turns audio into text and every voice cue is lost there, so voice
 ## Infrastructure
 
 ### Re-evaluate the small-model workarounds
-The text tool-call fallback parser, the French-verb fallback and generic names were written for Qwen 3 4B. On charras with `gemma4:12b`, the text fallback never fired in the journal (32 voice requests in October, plus web tests). Once a few hundred requests have gone through with no `Function call (text fallback)` line, remove the parser. Generic names stay: they also drive group resolution and the shutter/roof-window split.
+Written for Qwen 3 4B. The French-verb text fallback went on 2026-10-11 (never fired in 223 requests, and it could take a reply for a command), and so did the « already called » reminder. The structured text fallback (`fn({...})` written as text) remains, harmless; it never fired either. Remove it after a few hundred more requests without a `Function call (text fallback)` line. Generic names stay: they drive group resolution and the shutter/roof-window split.
+
+### Left over from the 2026-10-11 audit
+- **Timers that survive a restart**: every deploy drops them, an evening deploy cancels the next morning's alarm without a word. Save alarms to a file and re-arm them at startup; when one fires with no satellite connected, wait for it or announce on an HA speaker.
+- **Alarms beyond 24 hours**: « réveille-moi lundi à 7h » sets the next 7:00. A `date` parameter, and the reply naming the day.
+- **Duplicate device names**: Paris has three « Plafonnier » and three « Volet »; with no room, the first in HA's order wins and the reply does not say which. Ask, or prefer the satellite's room, and name the room in the reply.
+- **Sensor search in French**: « chlore », « sel », « consommation », « batterie » miss the English sensor names (« Free Chlorine », « Salinity »…); « eau » matches « Bureau ». Word prefixes and a small French→English map.
+- **VAD minimum speech**: one 32 ms frame above 0.5 counts as speech for the whole recording; Silero's own default asks for 250 ms.
+- **Web API hardening**: POSTs accept text/plain and any Host, so a page open on a tailnet device could send commands; require JSON and check the Host header.
 
 ### Isolated test server instance
 E2e tests (`test_e2e.py`) run against the live server through `/api/dry-run`: tool calls are not executed, but conversation state is shared, so a test run clears the conversation of someone using the assistant. Launch a lightweight instance for tests (LLM and entity list only, no STT/TTS/ESP) on another port.
