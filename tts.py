@@ -5,7 +5,6 @@ import hashlib
 import logging
 import re
 import time
-import wave
 from pathlib import Path
 
 import numpy as np
@@ -84,11 +83,11 @@ class KokoroTTS:
         return kokoro_onnx.Kokoro.from_session(session, str(voices_path))
 
     async def synthesize_to_file(self, text: str, output_dir: Path, base_url: str) -> str:
-        """Generate a 16kHz WAV file and return its URL."""
-        filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.wav"
+        """Generate a 16kHz FLAC file and return its URL."""
+        filename = f"tts_{int(time.time())}_{hashlib.md5(text.encode()).hexdigest()[:8]}.flac"
         output_path = output_dir / filename
         # Older replies: the speaker fetched them long ago, and they kept every answer since boot
-        for old in output_dir.glob("tts_*.wav"):
+        for old in output_dir.glob("tts_*"):
             if time.time() - old.stat().st_mtime > _REPLY_MAX_AGE:
                 old.unlink(missing_ok=True)
 
@@ -128,12 +127,28 @@ class KokoroTTS:
         # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
         audio_int16 = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16)
 
-        # Save as WAV file
-        with wave.open(str(output_path), "wb") as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(target_sr)
-            wav_file.writeframes(audio_int16.tobytes())
+        # FLAC: the Voice PE's firmware decodes FLAC and MP3 since 26.x (ESPHome 2026.6), no longer WAV.
+        # ffmpeg writes to a file so that STREAMINFO holds the length (flac_seconds); ~35 ms.
+        ffmpeg = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "s16le", "-ar", str(target_sr), "-ac", "1", "-i", "pipe:0",
+            "-c:a", "flac", str(output_path),
+            stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )  # fmt: skip
+        _, error = await ffmpeg.communicate(audio_int16.tobytes())
+        if ffmpeg.returncode:
+            raise RuntimeError(f"ffmpeg: {error.decode().strip()}")
 
         logger.info(f"TTS generated: {output_path} ({output_path.stat().st_size} bytes)")
         return f"{base_url}{filename}"
+
+
+def flac_seconds(path: Path) -> float:
+    """A FLAC file's length, from its STREAMINFO: sample rate (20 bits), then after channels and
+    bits per sample (8), the total samples (36)."""
+    with open(path, "rb") as f:
+        head = f.read(26)  # "fLaC", the block header (4), STREAMINFO from its 11th byte
+    if len(head) < 26 or head[:4] != b"fLaC":
+        raise ValueError(f"not a FLAC file: {path}")
+    info = int.from_bytes(head[18:26], "big")
+    return (info & (1 << 36) - 1) / (info >> 44)

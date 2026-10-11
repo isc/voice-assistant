@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
-from aioesphomeapi import VoiceAssistantConfigurationResponse, VoiceAssistantWakeWord
+from aioesphomeapi import MediaPlayerCommand, VoiceAssistantConfigurationResponse, VoiceAssistantWakeWord
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from opening_hours import ParserError
@@ -131,6 +131,9 @@ def make_server(env=None):
     server._voice_site = server.sites[0]
     server.site = server.sites[0]
     server.devices = {}
+    server.device_media_keys = {}
+    server.device_media_states = {}
+    server._followup_by = {}
     server.is_recording = False
     server._pipeline_running = False
     server._pending_service_calls = set()
@@ -1438,11 +1441,27 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         server = self.server
         server.device_media_states = {"paris": 2}  # MediaPlayerState.PLAYING
         server._end_conversation = server._no_followup = False
-        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.wav")
+        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
         server._announce = AsyncMock()
         await server.text_to_speech(MagicMock(), "Première phrase. Deuxième phrase.")
         server._announce.assert_awaited_once()  # one announcement, not split
         self.assertFalse(server._announce.await_args.kwargs["follow_up"])
+
+    async def test_a_reply_first_clears_the_announcement_queue(self):
+        """ESPHome 2026.6: an announcement that failed to play stays first in the queue, the next wait."""
+        server = self.server
+        server.device_media_keys["paris"] = 7
+        server.tts_dir = Path("/nonexistent")
+        server._end_conversation = server._no_followup = False
+        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        api = MagicMock()
+        api.send_voice_assistant_announcement_await_response = AsyncMock(
+            side_effect=lambda **kwargs: api.media_player_command.assert_called_once_with(
+                7, command=MediaPlayerCommand.STOP, announcement=True
+            )
+        )
+        await server.text_to_speech(api, "Une phrase.")
+        api.send_voice_assistant_announcement_await_response.assert_awaited_once()
 
     async def test_announcement_timeout_is_caught(self):
         from aioesphomeapi.core import TimeoutAPIError
@@ -1450,7 +1469,7 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         api = MagicMock()
         api.send_voice_assistant_announcement_await_response = AsyncMock(side_effect=TimeoutAPIError("late"))
         self.server.tts_dir = Path("/nonexistent")
-        await self.server._announce(api, "http://x/tts/a.wav", follow_up=True)  # logged, not raised
+        await self.server._announce(api, "http://x/tts/a.flac", follow_up=True)  # logged, not raised
 
     async def test_timer_event_goes_to_its_sites_satellite(self):
         from aioesphomeapi import VoiceAssistantTimerEventType
@@ -1656,6 +1675,40 @@ class TestDucking(unittest.IsolatedAsyncioTestCase):
         self.server._end_recording()
         await self.settle()
         self.assertEqual(self.volumes, {"media_player.google_home": 0.42})
+
+
+class TestFollowUp(unittest.IsolatedAsyncioTestCase):
+    async def test_the_start_after_a_follow_up_reply_is_the_follow_up(self):
+        """ESPHome 2026.6 sends the last wake word again on a follow-up's START."""
+        server = make_server()
+        server.recording_task = None
+        api = server.devices[server.site.name] = MagicMock()
+        api.send_voice_assistant_announcement_await_response = AsyncMock()
+        server.tts_dir = Path("/nonexistent")
+        await server._announce(api, "http://x/tts/a.flac", follow_up=True)
+        await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
+        self.assertTrue(server.is_followup)
+        server._end_recording()
+        await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
+        self.assertFalse(server.is_followup)  # the next wake word, not a follow-up
+
+
+class TestFlacSeconds(unittest.TestCase):
+    def test_length_from_streaminfo(self):
+        from tts import flac_seconds
+
+        # 16 kHz, mono, 16 bits, 41984 samples: the fields after the frame sizes, as ffmpeg writes them
+        info = (16000 << 44) | (0 << 41) | (15 << 36) | 41984
+        head = b"fLaC" + bytes(4) + bytes(10) + info.to_bytes(8, "big")
+        with tempfile.NamedTemporaryFile(suffix=".flac") as f:
+            f.write(head)
+            f.flush()
+            self.assertAlmostEqual(flac_seconds(Path(f.name)), 2.624)
+            f.seek(0)
+            f.write(b"RIFF")
+            f.flush()
+            with self.assertRaises(ValueError):
+                flac_seconds(Path(f.name))
 
 
 class TestVADFrames(unittest.IsolatedAsyncioTestCase):

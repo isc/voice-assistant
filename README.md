@@ -56,9 +56,9 @@ ESP (wake word) → audio stream → voice_server.py
                                    │    ├─ calendar_client.py → Google Calendar API
                                    │    ├─ spotify.py → go-librespot + Spotify Web API
                                    │    └─ images.py → Wikipedia / Openverse, cast to a Nest Hub
-                                   ├─ tts.py (Kokoro-82M) → WAV audio
+                                   ├─ tts.py (Kokoro-82M) → FLAC audio
                                    └─ web_ui.py → debug UI on :8888
-Speakers fetch /tts/*.wav, radio streams and /spotify/stream.mp3 over HTTP.
+Speakers fetch /tts/*.flac, radio streams and /spotify/stream.mp3 over HTTP.
 ```
 
 ## Getting started

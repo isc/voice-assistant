@@ -14,7 +14,6 @@ import socket
 import sys
 import tempfile
 import time
-import wave
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
@@ -253,6 +252,8 @@ class VoiceAssistantServer:
 
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word
+        # Satellite client -> until when its next START is the follow-up a reply asked for
+        self._followup_by: dict[APIClient, float] = {}
 
         # Media playback state. Media targets are ("esp", site name) or ("ha", entity_id),
         # the last one per site for follow-ups (_last_media_target).
@@ -627,7 +628,9 @@ class VoiceAssistantServer:
         if site.ha_client:
             self._in_background(self._lower_speakers(site))
 
-        self.is_followup = wake_word_phrase is None
+        # ESPHome 2026.6 sends the last wake word again on a follow-up's START (2025.6 cleared it)
+        followup_by = self._followup_by.pop(self.devices.get(site.name), 0)
+        self.is_followup = wake_word_phrase is None or time.time() < followup_by
         # Only overwrite conversation_id for new conversations (wake word detected).
         # Follow-ups keep the server-assigned ID so exchanges group correctly.
         if not self.is_followup:
@@ -757,7 +760,7 @@ class VoiceAssistantServer:
         AnnounceFinished comes at the end of playback, the follow-up START 30-50 ms later
         (journal, 2026-10-10), so the wait is the audio's length plus a margin.
         """
-        timeout = self._wav_seconds(audio_url) + 5
+        timeout = self._audio_seconds(audio_url) + 5
         try:
             logger.info(f"Playing TTS (follow-up: {follow_up}): {audio_url}")
             await api.send_voice_assistant_announcement_await_response(
@@ -767,13 +770,22 @@ class VoiceAssistantServer:
             logger.warning(f"Announcement not confirmed within {timeout:.0f} s: {audio_url}")
         except APIConnectionError as e:
             logger.warning(f"Announcement failed: {e}")
+        if follow_up:
+            self._followup_by[api] = time.time() + 3
 
-    def _wav_seconds(self, audio_url: str) -> float:
+    def _audio_seconds(self, audio_url: str) -> float:
+        from tts import flac_seconds
+
         try:
-            with wave.open(str(self.tts_dir / audio_url.rsplit("/", 1)[-1])) as wav:
-                return wav.getnframes() / wav.getframerate()
-        except (OSError, wave.Error):
+            return flac_seconds(self.tts_dir / audio_url.rsplit("/", 1)[-1])
+        except (OSError, ValueError, ZeroDivisionError):
             return 30.0
+
+    def _clear_announcements(self, api: APIClient) -> None:
+        """Empty the satellite's announcement queue. Since ESPHome 2026.6 an announcement that fails
+        to play stays first in it, and every later one queues behind it, never played."""
+        if (key := self.device_media_keys.get(self.site.name)) is not None:
+            api.media_player_command(key, command=MediaPlayerCommand.STOP, announcement=True)
 
     async def handle_voice_assistant_audio(self, site: Site, audio_bytes: bytes, _data2: bytes | None = None):
         """Handle audio received from a site's ESP with VAD detection.
@@ -1769,6 +1781,7 @@ class VoiceAssistantServer:
 
             # End pipeline before playing announcements
             api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
+            self._clear_announcements(api)
 
             for i in range(len(sentences)):
                 current_url = next_url

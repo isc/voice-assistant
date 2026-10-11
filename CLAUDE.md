@@ -16,7 +16,7 @@ ESP (wake word) → audio stream → voice_server.py
                                    │    ├─ calendar_client.py → Google Calendar API (OAuth2)
                                    │    ├─ spotify.py → go-librespot (playback) + Spotify Web API (search)
                                    │    └─ images.py → Wikipedia / Openverse (free, no key) → cast to a Nest Hub
-                                   ├─ tts.py (Kokoro-82M) → WAV file
+                                   ├─ tts.py (Kokoro-82M) → FLAC file
                                    └─ web_ui.py → debug UI on :8888
 ```
 
@@ -28,7 +28,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `ha_client.py` | Home Assistant client: entity discovery, fuzzy name resolution, room groups, service calls |
 | `llm.py` | LLM integration: chat completion, tool definitions, text-to-tool-call fallback parser |
 | `timer.py` | Timer manager: in-memory timers with asyncio scheduling, ESP native timer events |
-| `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 24kHz→16kHz resampling |
+| `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 24kHz→16kHz resampling, FLAC through ffmpeg (the Voice PE decodes no WAV) |
 | `stt.py` | Parakeet TDT 0.6B v3: onnx-asr on Linux/CUDA (server) or parakeet-mlx on Apple Silicon (Mac dev), picked by `STT_BACKEND` |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
 | `places.py` | Shops and places from OpenStreetMap, nearest to the home first: address, phone, the week's opening hours read by opening-hours-py |
@@ -51,7 +51,7 @@ ESP (wake word) → audio stream → voice_server.py
 5. If tool_calls → execute each, loop back to LLM with results + tools (up to 3 rounds) until text response
 6. If text response → check the fallback parser for a tool call written as text (`fn({...})`)
 7. Final LLM round formulates natural spoken response from tool results
-8. TTS: Kokoro generates WAV, played via announcement API with `start_conversation=True`
+8. TTS: Kokoro generates FLAC (ffmpeg), played via announcement API with `start_conversation=True`
 9. ESP automatically starts listening for follow-up (no wake word needed)
 10. If no speech within 5s → conversation ends. If `end_conversation` tool was called → no follow-up.
 
