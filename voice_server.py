@@ -38,6 +38,7 @@ from aiohttp import web
 
 from ha_client import LOCAL_CONFIG, compact, is_whole_house, normalize
 from images import find_image
+from places import find_place
 from recordings import Recordings
 from sites import Site, load_sites
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
@@ -931,6 +932,10 @@ class VoiceAssistantServer:
 
             home = self.ha_client.home if self.ha_client else {}
             return await get_weather(arguments.get("location", ""), home)
+
+        if function_name == "find_place":
+            home = self.ha_client.home if self.ha_client else {}
+            return await find_place(arguments.get("query", ""), home)
 
         # Calendar — standalone, no HA dependency
         if function_name == "query_calendar":

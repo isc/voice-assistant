@@ -81,6 +81,33 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         },
     }
 
+    # Shops and places from OpenStreetMap, always available too. Without it, « est-ce que l'Altermundi
+    # de la rue du Commerce est ouvert le dimanche ? » got « je ne peux pas vérifier les horaires »
+    # (2026-10-11)
+    place_tool = {
+        "name": "find_place",
+        "description": (
+            "Chercher un commerce ou un lieu (magasin, pharmacie, boulangerie, restaurant, musée, "
+            "piscine, poste…), les plus proches de la maison d'abord : adresse, horaires de la semaine, "
+            "ouvert ou fermé maintenant, téléphone. Ex : « est-ce que l'Altermundi de la rue du Commerce "
+            "est ouvert le dimanche ? », « jusqu'à quelle heure la pharmacie est ouverte ? », "
+            "« le Monoprix ouvre à quelle heure demain ? »"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Nom ou type du lieu, avec la rue ou la ville si elles sont dites "
+                        "(ex : « Altermundi rue du Commerce », « pharmacie », « Monoprix », « Leclerc Angoulême »)"
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    }
+
     # Timer tools are always available (no HA dependency)
     timer_tools = [
         {
@@ -337,7 +364,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         ]
 
     if not ha_client:
-        return [weather_tool] + timer_tools + calendar_tools + media_tools
+        return [weather_tool, place_tool] + timer_tools + calendar_tools + media_tools
 
     room_param = {
         "type": "string",
@@ -545,6 +572,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             },
         },
         weather_tool,
+        place_tool,
         *timer_tools,
         *calendar_tools,
         *media_tools,

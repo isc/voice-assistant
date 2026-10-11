@@ -28,6 +28,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 - Timers and alarms with ESP native timer events (LED ring, sound) and a spoken announcement
 - Google Calendar: query events and create new ones
 - Weather and 5-day forecast via Open-Meteo (free, no API key), at home (location from Home Assistant) or in any city
+- Shops and places from OpenStreetMap ("est-ce que la pharmacie est ouverte ?", "le Monoprix ouvre à quelle heure demain ?"): the nearest first, with address, opening hours and phone (free, no API key)
 
 ### LLM
 - Any OpenAI-compatible endpoint: cloud (GPT-5.4 Nano tested) or local (Ollama / llama.cpp; Gemma 4 12B in use)
@@ -51,6 +52,7 @@ ESP (wake word) → audio stream → voice_server.py
                                    │    ├─ ha_client.py → Home Assistant REST API
                                    │    ├─ timer.py → in-memory timers with ESP events
                                    │    ├─ weather.py → Open-Meteo API
+                                   │    ├─ places.py → OpenStreetMap (Photon, Nominatim)
                                    │    ├─ calendar_client.py → Google Calendar API
                                    │    ├─ spotify.py → go-librespot + Spotify Web API
                                    │    └─ images.py → Wikipedia / Openverse, cast to a Nest Hub
