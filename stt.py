@@ -45,18 +45,36 @@ class ParakeetSTT:
 
             self.model = parakeet_mlx.from_pretrained(self.MODEL_MLX)
         elif self.backend == "onnx":
-            import onnx_asr
-
-            providers = onnx_gpu.providers()
-            logger.info(f"ONNX STT execution providers: {providers}")
-            self.model = onnx_asr.load_model(
-                self.MODEL_ONNX, providers=providers, sess_options=onnx_gpu.session_options()
-            )
-            # The encoder's activations follow the recording's length (onnx-asr has no run options)
-            onnx_gpu.shrinking(self.model.asr._encoder)
+            # load's test run makes CUDA handles for its thread: the models' one
+            self.model = await onnx_gpu.run(onnx_gpu.load, self._onnx_model, self._run_once, "STT")
         else:
             raise ValueError(f"Unknown STT_BACKEND '{self.backend}' (expected mlx|onnx|auto)")
-        logger.info("Parakeet STT model loaded")
+        logger.info(f"Parakeet STT model loaded ({self.device})")
+
+    def _onnx_model(self, gpu: bool):
+        import onnx_asr
+
+        model = onnx_asr.load_model(
+            self.MODEL_ONNX,
+            # For the rest: the preprocessor in NumPy, the resampler never used (we pass 16 kHz)
+            providers=[onnx_gpu.CPU],
+            asr_config=onnx_gpu.session_kwargs(gpu),
+        )
+        # The encoder's activations follow the recording's length (onnx-asr has no run options)
+        onnx_gpu.shrinking(model.asr._encoder)
+        return model
+
+    @staticmethod
+    def _run_once(model):
+        model.recognize(np.zeros(16000, np.float32))  # a second of silence
+
+    @property
+    def device(self) -> str:
+        return "mlx" if self.backend == "mlx" else onnx_gpu.device(self.model.asr._encoder)
+
+    async def retry_gpu(self):
+        """Back on CUDA if it works now."""
+        self.model = await onnx_gpu.run(onnx_gpu.retry, self._onnx_model, self._run_once, "STT") or self.model
 
     def _transcribe_sync(self, audio_bytes: bytes) -> str:
         if self.backend != "mlx":

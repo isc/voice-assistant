@@ -10,6 +10,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+import onnx_gpu
 from sites import Site, site_at_address
 
 logger = logging.getLogger(__name__)
@@ -302,6 +303,8 @@ def setup_routes(app, server):
         Returns 200 when all required components are ready, 503 otherwise.
         ESP and calendar are reported but optional (don't affect the verdict).
         LLM is checked by configuration only — not pinged, to avoid token cost.
+        STT or TTS on the CPU though the server has CUDA is `degraded` but still 200: slower,
+        working (AD-055).
         """
         # From the server, not `from voice_server import`: the service runs voice_server as __main__,
         # so that import loaded a second copy of the module
@@ -325,8 +328,12 @@ def setup_routes(app, server):
         llm_ready = bool(LLM_MODEL) if is_cloud else bool(LLM_URL)
 
         components = {
-            "stt": {"ready": stt_ready, "model": "parakeet-tdt-0.6b-v3"},
-            "tts": {"ready": tts_ready, "engine": "kokoro-82m"},
+            "stt": {
+                "ready": stt_ready,
+                "model": "parakeet-tdt-0.6b-v3",
+                "device": server.stt.device if stt_ready else None,
+            },
+            "tts": {"ready": tts_ready, "engine": "kokoro-82m", "device": server.tts.device if tts_ready else None},
             "llm": {
                 "ready": llm_ready,
                 "mode": "cloud" if is_cloud else "local",
@@ -346,7 +353,8 @@ def setup_routes(app, server):
         }
 
         required_ok = stt_ready and tts_ready and llm_ready and ha_ready
-        status = "ok" if required_ok else "degraded"
+        lost_cuda = (stt_ready and onnx_gpu.lost_cuda(server.stt)) or (tts_ready and onnx_gpu.lost_cuda(server.tts))
+        status = "ok" if required_ok and not lost_cuda else "degraded"
         body = {
             "status": status,
             "components": components,

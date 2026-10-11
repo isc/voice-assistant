@@ -35,6 +35,7 @@ from aioesphomeapi.core import TimeoutAPIError
 from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
+import onnx_gpu
 from ha_client import LOCAL_CONFIG, compact, is_whole_house, normalize
 from images import find_image
 from places import find_place
@@ -57,6 +58,8 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "")  # empty = llama-server's only model
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 # Devices re-read from Home Assistant this often (and a Home Assistant that was down, retried)
 _HA_REFRESH_SECONDS = 300
+# STT or TTS on the CPU, CUDA having failed at load: how often to try it again (AD-055)
+_GPU_RETRY_SECONDS = 60
 # A tool result kept in history this long at most (a weather or calendar answer runs to 1 kB)
 _HISTORY_RESULT_CHARS = 300
 # While a request is heard, the HA speakers playing are turned down to this share of their volume
@@ -336,6 +339,7 @@ class VoiceAssistantServer:
 
         self.tts = KokoroTTS()
         await self.tts.init()
+        self._gpu_retry_task = asyncio.create_task(self._back_to_gpu())
 
         await self.init_ha_clients()
         self._ha_refresh_task = asyncio.create_task(self._keep_ha_fresh())
@@ -395,6 +399,15 @@ class VoiceAssistantServer:
                         await self._connect_ha(site)
                 except Exception:
                     logger.exception(f"Site {site.label}: Home Assistant refresh failed")
+
+    async def _back_to_gpu(self):
+        """STT or TTS loaded on the CPU, CUDA failing (the card full): try CUDA again every minute,
+        between requests, until both are back on it (AD-055)."""
+        while engines := [engine for engine in (self.stt, self.tts) if onnx_gpu.lost_cuda(engine)]:
+            await asyncio.sleep(_GPU_RETRY_SECONDS)
+            for engine in engines:
+                if not (self.is_recording or self._pipeline_running):
+                    await engine.retry_gpu()
 
     async def init_calendar_client(self):
         """Connect to Google Calendar API."""
@@ -1745,7 +1758,7 @@ class VoiceAssistantServer:
 
         One file for the whole reply: Kokoro takes ~0.1 s a sentence on the GPU, and the Voice PE
         (ESPHome 2026.6) stops its mixer 0.4-0.8 s after an announcement ends, under the next one
-        if it starts by then: a second sentence after a short first hung, unheard (AD-053).
+        if it starts by then: a second sentence after a short first hung, unheard (AD-054).
         """
         logger.info(f'TTS: generating audio for "{text}"')
 

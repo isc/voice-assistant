@@ -30,7 +30,7 @@ ESP (wake word) → audio stream → voice_server.py
 | `timer.py` | Timer manager: in-memory timers with asyncio scheduling, ESP native timer events |
 | `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 48 kHz mono FLAC through ffmpeg (the Voice PE decodes no WAV) |
 | `stt.py` | Parakeet TDT 0.6B v3: onnx-asr on Linux/CUDA (server) or parakeet-mlx on Apple Silicon (Mac dev), picked by `STT_BACKEND` |
-| `onnx_gpu.py` | ONNX Runtime on the GPU shared with Ollama: one thread for STT and TTS runs, CUDA arenas that give their memory back after each run (AD-053) |
+| `onnx_gpu.py` | ONNX Runtime on the GPU shared with Ollama: one thread for STT and TTS runs, CUDA arenas that give their memory back after each run (AD-053), the CPU when CUDA fails (AD-055) |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
 | `places.py` | Shops and places from OpenStreetMap, nearest to the home first: address, phone, the week's opening hours read by opening-hours-py |
 | `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, prompt summary |
@@ -63,7 +63,7 @@ ESP (wake word) → audio stream → voice_server.py
 - **Entity resolution**: fuzzy matching on normalized friendly_name (accents stripped, stopwords removed), scoped by room/area.
 - **Multi-round tool loop**: LLM can return tool_calls across multiple rounds (max 3). After executing tools, results are sent back with tools still available so the LLM can make additional calls; a call already run this turn reuses its result, and a round whose only call is `end_conversation` gets no second round. Tool calls and follow-up flags of a request live in a per-request object (`_Request`, ContextVar), so concurrent requests stay apart.
 - **Conversation history**: per site, last 5 exchanges with their tool calls and results (capped), expires after 10 min inactivity (`CONVERSATION_TIMEOUT`). Dry runs keep a conversation of their own (`Site.dry_run`) and never read, extend or end the live one; `/api/reset-conversation` clears only theirs (AD-047).
-- **GPU memory**: Ollama keeps ~8.6 GB of the 16 GB card. STT and TTS run on one thread (`onnx_gpu.run`), and the arenas of Kokoro and Parakeet's encoder shrink after each run: the voice server stays at ~4.2 GB, 4.9 GB during a run. Left to grow, the arenas reached 7.2 GB and the card ran out (AD-053).
+- **GPU memory**: Ollama keeps ~8.6 GB of the 16 GB card. STT and TTS run on one thread (`onnx_gpu.run`), and the arenas of Kokoro and Parakeet's encoder shrink after each run: the voice server stays at ~4.2 GB, 4.9 GB during a run. Left to grow, the arenas reached 7.2 GB and the card ran out (AD-053). A model that finds no room at startup loads on the CPU (STT 5×, TTS 10× slower) with an ERROR in the log and `degraded` in `/health`, and the server tries CUDA again every minute between requests (AD-055).
 - **Static system prompt**: date/time, timers and music go in a context message just before the request, not in the system prompt, so that Ollama reuses its prompt cache (a new minute re-read ~3.6K tokens, ~1.9 s). The server pins the model with a native `keep_alive: -1` after each request.
 - **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
 - **Text fallback parser**: catches when the LLM outputs tool calls as plain text instead of structured JSON (3 patterns: JSON args, quoted string, Python kwargs; never in dry runs).
@@ -119,7 +119,7 @@ journalctl -u voice-assistant -f          # logs
 ```
 
 `systemctl restart` returns before the models are loaded: the server is up once the journal says
-`Server running` (`Fatal error` otherwise), or `curl -s localhost:8888/health` answers 200.
+`Server running` (`Fatal error` otherwise), or `curl -s localhost:8888/health` answers 200. There, `status: degraded` with `device: cpu` under `stt` or `tts`: that model runs on the CPU, the card was full (AD-055).
 
 On a Mac (dev), `./run.sh` runs the server in the foreground, and `ctl.sh` wraps launchd:
 

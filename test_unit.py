@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 
 from aioesphomeapi import MediaPlayerCommand, VoiceAssistantConfigurationResponse, VoiceAssistantWakeWord
 from aiohttp import web
-from aiohttp.test_utils import make_mocked_request
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from opening_hours import ParserError
 
 from ha_client import HAClient, cover_kind, normalize
@@ -32,7 +32,7 @@ from llm import claims_completed_action, get_tool_definitions, parse_text_tool_c
 from places import week
 from recordings import Recordings
 from sites import load_sites, site_at_address
-from web_ui import KEY_COOKIE, access_control, is_trusted_client
+from web_ui import KEY_COOKIE, access_control, is_trusted_client, setup_routes
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -1828,6 +1828,84 @@ class TestWebUIThroughFunnel(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cookie.value, "s3cret")
         self.assertTrue(cookie["secure"] and cookie["httponly"])
         self.assertNotIn("Path=", cookie.OutputString())
+
+
+class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
+    """CUDA failing at load (the card full): the model on the CPU, said so, and CUDA tried again (AD-055)."""
+
+    ERROR = "CUDA failure 100: no CUDA-capable device is detected"
+
+    def build(self, gpu):
+        if gpu:  # ONNX Runtime's Fail is no RuntimeError
+            raise Exception(self.ERROR)
+        return "on the CPU"
+
+    @staticmethod
+    def runs(model):
+        pass
+
+    @staticmethod
+    def stale_error(model):
+        raise Exception("CUDA error cudaErrorMemoryAllocation:out of memory")
+
+    def test_load(self):
+        import onnx_gpu
+
+        with patch.object(onnx_gpu, "has_cuda", return_value=True):
+            self.assertEqual(onnx_gpu.load(lambda gpu: gpu, self.runs, "STT"), True)
+            with self.assertLogs("onnx_gpu", "ERROR") as logs:
+                self.assertEqual(onnx_gpu.load(self.build, self.runs, "STT"), "on the CPU")
+            self.assertIn(self.ERROR, logs.output[0])
+            self.assertEqual(onnx_gpu.load(lambda gpu: gpu or "on the CPU", self.stale_error, "STT"), "on the CPU")
+        with patch.object(onnx_gpu, "has_cuda", return_value=False):  # a Mac
+            self.assertEqual(onnx_gpu.load(self.build, self.runs, "TTS"), "on the CPU")
+
+    def test_retry(self):
+        import onnx_gpu
+
+        self.assertIsNone(onnx_gpu.retry(self.build, self.runs, "STT"))
+        self.assertIsNone(onnx_gpu.retry(lambda gpu: gpu, self.stale_error, "STT"))
+        self.assertTrue(onnx_gpu.retry(lambda gpu: gpu, self.runs, "STT"))
+
+    async def test_tried_again_between_requests_until_back(self):
+        server = make_server()
+        server.stt, server.tts = MagicMock(device="cpu"), MagicMock(device="cuda")
+        server._pipeline_running = True
+        attempts = 0
+
+        async def retry_gpu():
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                server.stt.device = "cuda"
+
+        server.stt.retry_gpu = retry_gpu
+        with patch("voice_server._GPU_RETRY_SECONDS", 0), patch("onnx_gpu.has_cuda", return_value=True):
+            task = asyncio.create_task(server._back_to_gpu())
+            await asyncio.sleep(0.05)
+            self.assertEqual(attempts, 0)  # not during a request
+            server._pipeline_running = False
+            await asyncio.wait_for(task, 1)
+        self.assertEqual(attempts, 2)
+        server.tts.retry_gpu.assert_not_called()
+
+    async def test_health(self):
+        server = make_server()
+        server.llm_config = ("", "gemma4:12b-8k", "http://localhost:11434/v1/chat/completions")
+        server.calendar_client = None
+        server.sites[0].ha_client = make_client()
+        server.stt = MagicMock(model=object(), device="cpu")
+        server.tts = MagicMock(engine=object(), device="cuda")
+        app = web.Application()
+        setup_routes(app, server)
+        async with TestClient(TestServer(app)) as client:
+            with patch("onnx_gpu.has_cuda", return_value=True):
+                response = await client.get("/health")
+                body = await response.json()
+                self.assertEqual((response.status, body["status"]), (200, "degraded"))
+                self.assertEqual(body["components"]["stt"]["device"], "cpu")
+            with patch("onnx_gpu.has_cuda", return_value=False):  # a Mac
+                self.assertEqual((await (await client.get("/health")).json())["status"], "ok")
 
 
 if __name__ == "__main__":

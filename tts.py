@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 # Next to the code, not in /tmp: /tmp is emptied at boot, and the server could not start without GitHub
 MODELS_DIR = Path(__file__).parent / "models"
+MODEL_PATH = MODELS_DIR / "kokoro-v1.0.onnx"
+VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
 # Replies are fetched once by the speaker, right after being written
 _REPLY_MAX_AGE = 600  # seconds
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
@@ -48,41 +50,53 @@ class KokoroTTS:
     async def init(self):
         """Initialize Kokoro TTS and French G2P."""
         logger.info("Initializing Kokoro TTS...")
-        import kokoro_onnx
         from misaki.espeak import EspeakG2P
 
         MODELS_DIR.mkdir(exist_ok=True)
-        model_path = MODELS_DIR / "kokoro-v1.0.onnx"
-        voices_path = MODELS_DIR / "voices-v1.0.bin"
 
-        if not model_path.exists() or not voices_path.exists():
+        if not MODEL_PATH.exists() or not VOICES_PATH.exists():
             logger.info("Downloading Kokoro models...")
             import urllib.request
 
-            if not model_path.exists():
+            if not MODEL_PATH.exists():
                 logger.info("  Downloading kokoro-v1.0.onnx (~310MB)...")
-                urllib.request.urlretrieve(MODEL_URL, model_path)
-            if not voices_path.exists():
+                urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+            if not VOICES_PATH.exists():
                 logger.info("  Downloading voices-v1.0.bin (~27MB)...")
-                urllib.request.urlretrieve(VOICES_URL, voices_path)
+                urllib.request.urlretrieve(VOICES_URL, VOICES_PATH)
         else:
             logger.info("Kokoro models already cached")
 
-        self.engine = self._engine(kokoro_onnx, model_path, voices_path)
+        # load's test run makes CUDA handles for its thread: the models' one
+        self.engine = await onnx_gpu.run(onnx_gpu.load, self._engine, self._run_once, "TTS")
         self.g2p = EspeakG2P(language="fr-fr")
-        logger.info("Kokoro TTS ready (voice: ff_siwis, French G2P via espeak)")
+        logger.info(f"Kokoro TTS ready ({self.device}, voice: ff_siwis, French G2P via espeak)")
 
     @staticmethod
-    def _engine(kokoro_onnx, model_path: Path, voices_path: Path):
-        """Kokoro on CUDA when onnxruntime has it: kokoro-onnx 0.5 looks for the GPU package under a
-        name find_spec never finds, and ran on the CPU (0.18 x real time)."""
+    def _engine(gpu: bool):
+        """Kokoro on our own session: kokoro-onnx 0.5 looks for the GPU package under a name
+        find_spec never finds, and ran on the CPU (0.18 x real time)."""
+        import kokoro_onnx
         import onnxruntime
 
-        session = onnxruntime.InferenceSession(
-            str(model_path), onnx_gpu.session_options(), providers=onnx_gpu.providers()
-        )
-        logger.info(f"Kokoro providers: {session.get_providers()}")
-        return kokoro_onnx.Kokoro.from_session(onnx_gpu.shrinking(session), str(voices_path))
+        session = onnxruntime.InferenceSession(str(MODEL_PATH), **onnx_gpu.session_kwargs(gpu))
+        return kokoro_onnx.Kokoro.from_session(onnx_gpu.shrinking(session), str(VOICES_PATH))
+
+    @staticmethod
+    def _speak(engine, phonemes: str):
+        return engine.create(phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True)
+
+    @classmethod
+    def _run_once(cls, engine):
+        cls._speak(engine, "a")
+
+    @property
+    def device(self) -> str:
+        return onnx_gpu.device(self.engine.sess)
+
+    async def retry_gpu(self):
+        """Back on CUDA if it works now."""
+        self.engine = await onnx_gpu.run(onnx_gpu.retry, self._engine, self._run_once, "TTS") or self.engine
 
     async def synthesize_to_file(self, text: str, output_dir: Path, base_url: str) -> str:
         """Generate a 48 kHz FLAC file and return its URL."""
@@ -110,9 +124,7 @@ class KokoroTTS:
         logger.info(f"Phonemes: {phonemes}")
 
         # Generate audio with Kokoro (runs sync, on the models' thread)
-        audio_24k, sr = await onnx_gpu.run(
-            lambda: self.engine.create(phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True)
-        )
+        audio_24k, sr = await onnx_gpu.run(self._speak, self.engine, phonemes)
 
         logger.info(f"Kokoro output: {len(audio_24k)} samples at {sr}Hz")
 
