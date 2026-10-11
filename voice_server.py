@@ -378,9 +378,8 @@ class VoiceAssistantServer:
     async def _keep_ha_fresh(self):
         """Every few minutes, re-read each site's devices, or connect a Home Assistant that was down.
 
-        Entities are read at connection only, and an unavailable one is left out: Charras's Velux,
-        offline while the house is closed, would stay unknown after the family arrives, and a Home
-        Assistant down at startup (booting slower after a power cut) would never be used.
+        Without it, devices added in HA would stay unknown until a restart, and a Home Assistant
+        down at startup (booting slower after a power cut) would never be used.
         """
         while True:
             await asyncio.sleep(_HA_REFRESH_SECONDS)
@@ -1000,6 +999,10 @@ class VoiceAssistantServer:
             answers = [self.ha_client.format_state_for_speech(eid, st) for eid, st in zip(entity_ids, states) if st]
             return ". ".join(answers) if answers else f"Impossible de lire l'état de {entity_name}"
 
+        if not (reachable := await self.ha_client.reachable(entity_ids)):
+            return self.ha_client.offline_reply(entity_ids)
+        entity_ids = reachable
+
         extra = {}
         if function_name == "set_temperature" and "temperature" in arguments:
             extra["temperature"] = arguments["temperature"]
@@ -1090,6 +1093,13 @@ class VoiceAssistantServer:
 
         return None
 
+    async def _offline_reply(self, target: tuple[str, str]) -> Optional[str]:
+        """The result when the target is an HA speaker HA cannot reach (the satellite answers, being the one listening)."""
+        kind, ident = target
+        if kind == "ha" and not await self.ha_client.reachable([ident]):
+            return self.ha_client.offline_reply([ident])
+        return None
+
     def _after_media_change(self, target: Optional[tuple[str, str]]) -> None:
         """Remember the speaker for volume follow-ups; no follow-up listening (an open mic would
         transcribe the radio)."""
@@ -1107,6 +1117,8 @@ class VoiceAssistantServer:
         target = self._resolve_media_target(room)
         if not target:
             return _no_speaker(room)
+        if refusal := await self._offline_reply(target):
+            return refusal
 
         if function_name == "play_radio":
             station_name = arguments.get("station", "")
@@ -1169,6 +1181,8 @@ class VoiceAssistantServer:
             target = target or self._resolve_media_target(room)
             if not target:
                 return _no_speaker(room)
+            if refusal := await self._offline_reply(target):
+                return refusal
             found = None
             if function_name == "play_music":
                 query = arguments.get("query", "")
@@ -1306,11 +1320,13 @@ class VoiceAssistantServer:
         """Find a picture on the web and cast it to the screen."""
         if not self.ha_client.screens:
             return "Aucun écran disponible"
+        if not (screens := await self.ha_client.reachable(self.ha_client.screens)):
+            return self.ha_client.offline_reply(self.ha_client.screens)
         picture = await find_image(query, exclude=self._shown_images)
         if not picture:
             return f"Aucune image trouvée pour {query}"
         self._shown_images.add(picture.url)
-        screen = self.ha_client.screens[0]
+        screen = screens[0]
         await self._media_play_url(("ha", screen), picture.url, picture.content_type)
         return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {picture.caption}"
 

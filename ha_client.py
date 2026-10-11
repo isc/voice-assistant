@@ -152,10 +152,14 @@ class HAClient:
         if self._session:
             await self._session.close()
 
-    async def _render_template(self, template: str) -> Optional[str]:
+    async def _render_template(self, template: str, timeout: Optional[float] = None) -> Optional[str]:
         """Render a template with HA's template API — the REST way into the registries. None on failure."""
         try:
-            async with self._session.post(f"{self.base_url}/api/template", json={"template": template}) as r:
+            async with self._session.post(
+                f"{self.base_url}/api/template",
+                json={"template": template},
+                timeout=aiohttp.ClientTimeout(total=timeout) if timeout else None,
+            ) as r:
                 if r.status != 200:
                     logger.warning(f"HA template API returned {r.status}")
                     return None
@@ -253,7 +257,9 @@ class HAClient:
                 "",
             ):
                 continue
-            if state["state"] == "unavailable" or entity_id in hidden:
+            # An unavailable one stays known: a sleeping battery speaker (the Paris Sonos Roam), left
+            # out, let « la radio sur Sonos » go to the one speaker of the room the LLM made up
+            if entity_id in hidden:
                 continue
 
             area_id = entity_to_area.get(entity_id)
@@ -538,11 +544,7 @@ class HAClient:
         payload = {"entity_id": entity_id}
         payload.update(kwargs)
 
-        info = self.entities.get(entity_id, {})
-        friendly = info.get("friendly_name", entity_id)
-        area = info.get("area_name", "")
-        # Include room name in response for generic names like "Plafonnier" or "Volet"
-        display_name = f"{friendly} {area}" if area and friendly in ("Plafonnier", "Volet") else friendly
+        display_name = self.display_name(entity_id)
 
         try:
             url = f"{self.base_url}/api/services/{domain}/{service}"
@@ -626,6 +628,36 @@ class HAClient:
             logger.error(f"Error getting state for {entity_id}: {e}")
             return None
 
+    def display_name(self, entity_id: str) -> str:
+        """The device's name for the reply, with its room for a generic one like "Plafonnier" or "Volet"."""
+        info = self.entities.get(entity_id, {})
+        friendly = info.get("friendly_name", entity_id)
+        area = info.get("area_name", "")
+        return f"{friendly} {area}" if area and friendly in ("Plafonnier", "Volet") else friendly
+
+    def offline_reply(self, entity_ids: list[str]) -> str:
+        """The result for devices HA cannot reach, which the reply must not report done. A count
+        past a few: the closed Charras house has 18 Velux, which the reply would read out."""
+        if len(entity_ids) == 1:
+            return f"{self.display_name(entity_ids[0])} ne répond pas (hors ligne)"
+        names = ", ".join(map(self.display_name, entity_ids)) if len(entity_ids) <= 3 else f"{len(entity_ids)} appareils"
+        return f"{names} ne répondent pas (hors ligne)"
+
+    def _unavailable(self, entity_id: str) -> bool:
+        return self.entities.get(entity_id, {}).get("state") == "unavailable"
+
+    async def reachable(self, entity_ids: list[str]) -> list[str]:
+        """The devices HA can reach among these. Those the last refresh found unavailable are read
+        again, in one short call: a speaker woken up since would otherwise be refused for five minutes."""
+        if suspects := [eid for eid in entity_ids if self._unavailable(eid)]:
+            template = "{% for e in " + json.dumps(suspects) + " %}{{ e }} {{ states(e) }}\n{% endfor %}"
+            text = await self._render_template(template, timeout=2)
+            for line in (text or "").splitlines():
+                eid, _, state = line.partition(" ")
+                if eid in self.entities:
+                    self.entities[eid]["state"] = state
+        return [eid for eid in entity_ids if not self._unavailable(eid)]
+
     def _build_response(self, domain: str, service: str, display_name: str, kwargs: dict) -> str:
         """Build a natural French TTS response for a service call."""
         # Include brightness in response when specified
@@ -669,7 +701,7 @@ class HAClient:
 
         # Not "éteint" for a switch nobody can reach
         if state == "unavailable":
-            return f"{friendly} ne répond pas (hors ligne)"
+            return self.offline_reply([entity_id])
         if state == "unknown":
             return f"L'état de {friendly} est inconnu"
 

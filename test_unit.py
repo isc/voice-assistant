@@ -1416,6 +1416,7 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
 class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
     async def test_a_speaker_that_never_joins_is_not_said_playing(self):
         server = make_server()
+        server.ha_client = make_client()
         server.spotify = MagicMock()
         server.spotify.find = AsyncMock(return_value=("spotify:artist:x", "Daft Punk"))
         server.spotify.play = AsyncMock()
@@ -1424,6 +1425,56 @@ class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
         result = await server._execute_music_function("play_music", {"query": "Daft Punk", "kind": "artist"})
         self.assertIn("ne répond pas", result)
         server.spotify.play.assert_not_awaited()
+
+
+class TestOfflineDevices(unittest.IsolatedAsyncioTestCase):
+    """Paris, one morning: the Sonos Roam asleep, left out of the devices, so « la radio sur
+    Sonos » became room « Living Room » and played on the Google Home."""
+
+    def setUp(self):
+        self.client = make_client()
+        speakers = (
+            ("media_player.google_home", "Google Home", "idle", "living_room", "Living Room"),
+            ("media_player.sonos_paris", "Sonos Paris", "unavailable", None, ""),
+        )
+        for eid, name, state, area_id, area in speakers:
+            self.client.entities[eid] = {
+                "friendly_name": name, "domain": "media_player", "state": state,
+                "attributes": {}, "area_id": area_id, "area_name": area,
+            }  # fmt: skip
+        self.client.call_service = AsyncMock(return_value="ok")
+        self.client._render_template = AsyncMock(return_value=None)  # HA not answering: the refresh's states hold
+        self.server = make_server()
+        self.server.ha_client = self.client
+        self.server.device_media_keys = {}
+        self.server._pending_service_calls = set()
+
+    def test_listed_for_the_llm(self):
+        self.assertIn("Sonos Paris", self.client.get_entity_list_for_prompt())
+
+    async def test_said_offline_not_played_elsewhere(self):
+        result = await self.server.execute_function("play_radio", {"room": "Sonos", "station": "fip"})
+        self.assertEqual(result, "Sonos Paris ne répond pas (hors ligne)")
+        self.client.call_service.assert_not_awaited()
+
+    async def test_woken_up_since_the_refresh(self):
+        self.client._render_template.return_value = "media_player.sonos_paris idle\n"
+        await self.server.execute_function("play_radio", {"room": "Sonos Paris", "station": "fip"})
+        self.assertEqual(self.client.call_service.await_args.args[2], "media_player.sonos_paris")
+
+    async def test_actions_skip_the_offline_ones(self):
+        zoe = self.client.entities["light.plafonnier_zoe"]
+        self.client.entities["light.plafonnier_zoe"] = {**zoe, "state": "unavailable"}
+        result = await self.server.execute_function("turn_on", {"entity": "plafonnier", "room": "Chambre Zoé"})
+        self.assertEqual(result, "Plafonnier Chambre Zoé ne répond pas (hors ligne)")
+        await self.server.execute_function("turn_off", {"entity": "lumières", "room": "tout"})
+        called = {call.args[2] for call in self.client.call_service.call_args_list}
+        self.assertNotIn("light.plafonnier_zoe", called)
+        self.assertIn("light.plafonnier_charlie", called)
+
+    def test_many_offline_counted(self):
+        velux = [f"cover.velux_{i}" for i in range(18)]
+        self.assertEqual(self.client.offline_reply(velux), "18 appareils ne répondent pas (hors ligne)")
 
 
 class TestTimers(unittest.IsolatedAsyncioTestCase):

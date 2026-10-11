@@ -13,6 +13,8 @@ The same evening, a request said next to the playing Sonos was recorded for 14 s
 ### Media target from live player state
 Media commands without a room go to `_last_media_target`, a value kept in memory: it is lost on restart (picked up from HA at startup since 2026-10-10) and goes stale when music is started or stopped from a phone or the Sonos app. Reading HA player states at command time would send "stop" and "plus fort" to whatever actually plays. It would also let the conversation stay open after a media command when nothing plays near the satellite (AD-035 ends it unconditionally). Cost: one HA read per media command, or a websocket subscription.
 
+The same subscription would make the device states live: they are polled every 5 minutes, so a device gone offline since is still reported done, and an offline one is read again before each refusal.
+
 ## UX
 
 ### Proactive announcements
