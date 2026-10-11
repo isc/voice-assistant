@@ -81,9 +81,11 @@ Gemma 4 12B, now the LLM, takes audio input natively. It could absorb the STT st
 
 Audio specs: 16 kHz mono float32 in [-1, 1] (the pipeline has 16-bit PCM, a trivial conversion), 25 tokens/s, 30 s max segment.
 
-Open questions, settled by a short test on real French command recordings:
-1. **Runtime**: does Ollama (or llama.cpp) accept audio input for Gemma 4 12B?
-2. **French recognition**: no published French WER against Parakeet.
-3. **Audio and tool calling in the same call**: does the chat template handle both?
+**Tested on 2026-10-11: not ready.** Ollama 0.30.11, `gemma4:12b-8k` (Q4_K_M), the day's 107 recordings (Paris):
+1. **Runtime**: yes. Ollama takes the WAV as recorded, through `/v1/chat/completions`, the endpoint `llm.py` uses (`{"type": "input_audio", "input_audio": {"data": <base64>, "format": "wav"}}`), or `/api/chat` (`images`). The prompt grows by the expected 25 tokens a second.
+2. **French recognition**: well behind Parakeet. On 28 requests whose words are known (references written from both transcripts and the conversation around them, not yet checked by ear), 25 % of words wrong against Parakeet's 3.6 %, and 4 requests mostly invented against none (« Tu peux ouvrir le volet dans la chambre invitée » → « Je ne vous ai pas encore parlé de ce sujet »). It does hear a few names better (« Chopin », « Sonos », where Parakeet wrote « goûter du chopin », « sonneuse »). On 10 of the 11 recordings the VAD found silent, it wrote English comments (« I'm sorry, … no audio provided »). With Google's ASR prompt, instruction before the audio; the audio first, it answers the request instead (144 %); a system message with the house's names, worse (35 %). 0.8 s a transcription (median), Parakeet's 0.08 s.
+3. **Audio and tools in one call**: no. Behind the real prompt (~4.1K tokens, 24 tools), the audio is not heard: « Ouvre le volet de la chambre invitée » → `get_weather`, « Tu peux fermer la porte ? » → RMC in the living room. Replayed as dry runs, of the 28 requests where the transcript led to calls, 1 got the same calls from the audio; of the 56 that called nothing, 33 called something (bedroom lights off, a pasta timer). Length, not tools: the system prompt alone (~500 tokens, no tools) gets 5 of 6 commands right (« C'est fait, j'ouvre le volet de la chambre invités »); with 4.4K tokens of neutral notes appended, 2 of 6 at most; with the tools written in the prompt instead of `tools`, none.
+
+What would reopen it: audio heard behind a long prompt, from a newer Ollama (the length effect may be its own, a short reproduction is worth reporting) or another runtime, then French recognition near Parakeet's on children and on speech over music. Splitting it in two calls (Gemma transcribes behind a short prompt, then the usual text request) works today, but gets point 2's accuracy for 0.8 s more.
 
 Trade-off: the web UI's debug log loses the transcript, unless the model is asked to write it out.
