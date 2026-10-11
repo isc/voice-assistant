@@ -1275,8 +1275,8 @@ class VoiceAssistantServer:
         """Make the target speaker play the Spotify stream, and move it off the previous one.
         False if it never connected: nothing changed, the music must not start nor be said playing.
 
-        A speaker taken off the stream (radio, stop) needs nothing here: once the music
-        plays to nobody, the stream pauses go-librespot."""
+        A speaker since given a radio or a picture is no longer _spotify_at, so that it is not
+        stopped here; once the music plays to nobody, the stream pauses go-librespot."""
         stream = self.spotify.stream
         previous, new = self._spotify_at, (self.site, target)
         if previous == new and stream.listeners:
@@ -1288,18 +1288,20 @@ class VoiceAssistantServer:
         if not await stream.wait_for_join(joins, timeout=8):
             logger.warning(f"Spotify: {target} did not connect to {url}")
             return False
-        # Stopped after the new one joined, so the encoder never runs dry; and only if
-        # still on the stream, as it may have moved to a radio since
-        if previous and previous != new and len(stream.listeners) > 1:
-            previous_site, previous_target = previous
-            await self._media_command(
-                previous_target, MediaPlayerCommand.STOP, ha_service="media_stop", site=previous_site
-            )
+        # Stopped after the new one joined, so the encoder never runs dry. Not on a count of
+        # listeners: the Sonos opens the stream, closes it and opens it again, and caught in
+        # between, the satellite went on playing next to it (and froze at the next wake word)
         self._spotify_at = new
+        if previous and previous != new:
+            previous_site, previous_target = previous
+            stop = MediaPlayerCommand.STOP
+            self._in_background(self._media_command(previous_target, stop, ha_service="media_stop", site=previous_site))
         return True
 
     async def _media_play_url(self, target: tuple[str, str], url: str, content_type: str = "music") -> None:
         """Start playback of an arbitrary media URL on the target speaker (or show it, for a picture)."""
+        if self._spotify_here == target:
+            self._spotify_at = None  # a radio or a picture takes it off the stream (the stream, once it joins, back)
         kind, ident = target
         if kind == "esp":
             api = self.devices.get(ident)

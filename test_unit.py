@@ -134,6 +134,7 @@ def make_server(env=None):
     server._pipeline_running = False
     server._pending_service_calls = set()
     server._volume_lock = asyncio.Lock()
+    server._spotify_at = None
     return server
 
 
@@ -1439,6 +1440,43 @@ class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
         result = await server._execute_music_function("play_music", {"query": "Daft Punk", "kind": "artist"})
         self.assertIn("ne répond pas", result)
         server.spotify.play.assert_not_awaited()
+
+
+class TestSpotifyMoves(unittest.IsolatedAsyncioTestCase):
+    """Paris: the music moved from the satellite to the Sonos went on, on the satellite too."""
+
+    SATELLITE = ("esp", "")
+    SONOS = ("ha", "media_player.sonos_paris")
+    GOOGLE_HOME = ("ha", "media_player.google_home")
+
+    def setUp(self):
+        self.server = make_server()
+        self.server.site.ha_client = make_client()
+        self.server.site.ha_client.call_service = AsyncMock(return_value="ok")
+        self.satellite = MagicMock()
+        self.server.devices = {"": self.satellite}
+        self.server.device_media_keys = {"": 1}
+        # Joined, and no listener counted: the Sonos's first connection already closed
+        stream = MagicMock(listeners=set(), wait_for_join=AsyncMock(return_value=True))
+        self.server.spotify = MagicMock(stream=stream)
+
+    async def stops(self):
+        await asyncio.gather(*self.server._pending_service_calls)
+        satellite = [c for c in self.satellite.media_player_command.call_args_list if "command" in c.kwargs]
+        ha = [c.args[2] for c in self.server.site.ha_client.call_service.call_args_list if c.args[1] == "media_stop"]
+        return len(satellite), ha
+
+    async def test_the_previous_speaker_stops(self):
+        await self.server._point_at_spotify(self.SATELLITE)
+        await self.server._point_at_spotify(self.SONOS)
+        self.assertEqual(await self.stops(), (1, []))
+        self.assertEqual(self.server._spotify_at[1], self.SONOS)
+
+    async def test_a_radio_since_is_left_playing(self):
+        await self.server._point_at_spotify(self.SONOS)
+        await self.server._media_play_url(self.SONOS, "https://icecast.radiofrance.fr/fip-midfi.mp3")
+        await self.server._point_at_spotify(self.GOOGLE_HOME)
+        self.assertEqual(await self.stops(), (0, []))
 
 
 class TestOfflineDevices(unittest.IsolatedAsyncioTestCase):

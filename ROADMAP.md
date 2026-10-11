@@ -5,12 +5,12 @@ What is still open. Shipped work is recorded in `DECISIONS.md` and the git histo
 ## Robustness
 
 ### Know why the Voice PE restarts
-On 2026-10-10 the Voice PE most likely rebooted after a reply asked for follow-up while its own player was busy; since 2026-10-11 the server asks for no follow-up while the satellite plays (AD-045). The reboot was inferred from the LED (solid warm white is the firmware's init-without-Wi-Fi state). Adding ESPHome's `debug:` component to the Voice PE firmware would report the reset reason.
+On 2026-10-10 the Voice PE most likely rebooted after a reply asked for follow-up while its own player was busy; since 2026-10-11 the server asks for no follow-up while the satellite plays (AD-045). The reboot was inferred from the LED (solid warm white is the firmware's init-without-Wi-Fi state). On 2026-10-11 at 12:52 it froze instead: a wake word while it played the Spotify stream itself (left on it by a server bug, fixed since) brought no audio, then no answer to the API at all until unplugged. Adding ESPHome's `debug:` component to the Voice PE firmware would report the reset reason.
 
 ### Media target from live player state
 Media commands without a room go to `_last_media_target`, a value kept in memory: it is lost on restart (picked up from HA at startup since 2026-10-10) and goes stale when music is started or stopped from a phone or the Sonos app. Reading HA player states at command time would send "stop" and "plus fort" to whatever actually plays. It would also let the conversation stay open after a media command when nothing plays near the satellite (AD-035 ends it unconditionally). Cost: one HA read per media command, or a websocket subscription.
 
-Ducking (AD-049) would drop its template read at each wake word too. The same subscription would make the device states live: they are polled every 5 minutes, so a device gone offline since is still reported done, and an offline one is read again before each refusal.
+Ducking (AD-049) would drop its template read at each wake word too. Moving Spotify would stop the previous HA speaker only if it still plays the stream, not when the Sonos app has since put something else on it. The same subscription would make the device states live: they are polled every 5 minutes, so a device gone offline since is still reported done, and an offline one is read again before each refusal.
 
 ## UX
 
