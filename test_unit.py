@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
+from aioesphomeapi import VoiceAssistantConfigurationResponse, VoiceAssistantWakeWord
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
 from opening_hours import ParserError
@@ -1283,6 +1284,8 @@ class TestSites(unittest.TestCase):
             {
                 "SITES": "Paris, charras",
                 "ESP_NOISE_PSK": "shared-key",
+                "WAKE_WORDS": "okay_nabu, hey_jarvis",
+                "CHARRAS_WAKE_WORDS": "hey_mycroft",
                 "PARIS_ESP_HOST": "127.0.0.1",
                 "PARIS_ESP_PORT": "16053",
                 "PARIS_HA_URL": "http://127.0.0.1:18123",
@@ -1299,6 +1302,7 @@ class TestSites(unittest.TestCase):
             (charras.esp_host, charras.esp_port, charras.tts_base_url), ("home-assistant-voice-09d3f1.local", 6053, "")
         )
         self.assertEqual({paris.esp_noise_psk, charras.esp_noise_psk}, {"shared-key"})
+        self.assertEqual((paris.wake_words, charras.wake_words), (["okay_nabu", "hey_jarvis"], ["hey_mycroft"]))
         self.assertEqual((paris.ha_token, charras.ha_token), ("", ""))
 
 
@@ -1311,6 +1315,33 @@ class TestSiteNames(unittest.TestCase):
     def test_empty_port_is_the_default(self):
         (site,) = load_sites({"ESP_PORT": ""})
         self.assertEqual(site.esp_port, 6053)
+
+
+class TestWakeWords(unittest.IsolatedAsyncioTestCase):
+    async def set_wake_words(self, wanted, active):
+        server = make_server({"WAKE_WORDS": wanted})
+        api = MagicMock()
+        api.get_voice_assistant_configuration = AsyncMock(
+            return_value=VoiceAssistantConfigurationResponse(
+                available_wake_words=[
+                    VoiceAssistantWakeWord(id=id, wake_word=phrase, trained_languages=["en"])
+                    for id, phrase in (("okay_nabu", "Okay Nabu"), ("hey_jarvis", "Hey Jarvis"))
+                ],
+                active_wake_words=active,
+                max_active_wake_words=1,  # what ESPHome always reports
+            )
+        )
+        await server._set_wake_words(api, server.site)
+        return api.set_voice_assistant_configuration
+
+    async def test_activates_the_known_ones(self):
+        set_config = await self.set_wake_words("okay_nabu,hey_mycroft,hey_jarvis", ["hey_jarvis"])
+        set_config.assert_called_once_with(["okay_nabu", "hey_jarvis"])
+
+    async def test_leaves_the_satellite_alone_when_already_active_or_unset(self):
+        for wanted in ("hey_jarvis,okay_nabu", ""):
+            set_config = await self.set_wake_words(wanted, ["okay_nabu", "hey_jarvis"])
+            set_config.assert_not_called()
 
 
 class TestSiteAtAddress(unittest.IsolatedAsyncioTestCase):

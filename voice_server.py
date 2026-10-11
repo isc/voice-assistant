@@ -577,9 +577,30 @@ class VoiceAssistantServer:
                 handle_audio=partial(self.handle_voice_assistant_audio, site),
             )
             logger.info("Voice assistant subscription successful")
+            await self._set_wake_words(api, site)
 
         except Exception as e:
             logger.error(f"Voice assistant setup error: {e}")
+
+    async def _set_wake_words(self, api: APIClient, site: Site):
+        """Activate the site's WAKE_WORDS: the satellite takes them only from its voice assistant client,
+        so Home Assistant's selector cannot while this server holds it. ESPHome reports at most one
+        active, a fixed value: it enables every word it is sent, as Home Assistant's two do."""
+        if not site.wake_words:
+            return
+        try:
+            config = await api.get_voice_assistant_configuration(5)
+        except Exception as e:
+            logger.warning(f"Site {site.label}: could not read the wake words: {e}")
+            return
+        available = {ww.id: ww.wake_word for ww in config.available_wake_words}
+        if unknown := [w for w in site.wake_words if w not in available]:
+            logger.warning(f"Site {site.label}: unknown wake words {unknown}, the satellite has {list(available)}")
+        wanted = [w for w in site.wake_words if w in available]
+        if wanted and set(wanted) != set(config.active_wake_words):
+            api.set_voice_assistant_configuration(wanted)
+        active = wanted or config.active_wake_words
+        logger.info(f"Site {site.label}: wake words {[available.get(w, w) for w in active]}")
 
     # === VOICE ASSISTANT EVENT HANDLERS ===
 

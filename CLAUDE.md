@@ -75,11 +75,12 @@ ESP (wake word) → audio stream → voice_server.py
 
 | Variable | Default | Description |
 |---|---|---|
-| `SITES` | (empty) | Comma-separated homes served by this server (`paris,charras`). Each then reads the satellite and Home Assistant settings below with its name as prefix (`PARIS_HA_URL`, `CHARRAS_ESP_HOST`…); `ESP_PORT`, `ESP_PASSWORD`, `ESP_NOISE_PSK` may stay unprefixed, shared. Empty: one site, unprefixed settings |
+| `SITES` | (empty) | Comma-separated homes served by this server (`paris,charras`). Each then reads the satellite and Home Assistant settings below with its name as prefix (`PARIS_HA_URL`, `CHARRAS_ESP_HOST`…); `ESP_PORT`, `ESP_PASSWORD`, `ESP_NOISE_PSK`, `WAKE_WORDS` may stay unprefixed, shared. Empty: one site, unprefixed settings |
 | `ESP_HOST` | (empty) | ESPHome device IP or `name.local` (resolved by mDNS); empty for a site without satellite |
 | `ESP_PORT` | `6053` | ESPHome native API port |
 | `ESP_PASSWORD` | (empty) | Legacy password auth |
 | `ESP_NOISE_PSK` | (empty) | Noise encryption key (preferred) |
+| `WAKE_WORDS` | (empty) | Satellite wake words to keep active, by id (`okay_nabu,hey_jarvis`). Only this server can set them (AD-051); it does at each connection, which keeps them past a reflash or a new satellite. Empty leaves the satellite's own |
 | `LLM_URL` | `http://localhost:8080/v1/chat/completions` (llama-server) | OpenAI-compatible endpoint. Server: Ollama, `http://localhost:11434/v1/chat/completions` |
 | `LLM_API_KEY` | (empty) | If set, enables cloud mode (bearer auth, provider's default reasoning). Empty on the server |
 | `LLM_MODEL` | (empty) | Model name: `gemma4:12b-8k` on the server's Ollama (gemma4:12b with an 8192-token context, see INSTALL.md), e.g. `gpt-5.4-nano` in the cloud; empty lets llama-server use its only model |

@@ -1,7 +1,7 @@
 """Sites: one per home, each with its voice satellite and its Home Assistant, served by one server.
 
 `SITES=paris,charras` names them; each then reads its settings with its name as prefix
-(`PARIS_HA_URL`, `CHARRAS_ESP_HOST`…). The satellite's port and keys may be shared, unprefixed.
+(`PARIS_HA_URL`, `CHARRAS_ESP_HOST`…). The satellite's port, keys and wake words may be shared, unprefixed.
 Without `SITES`, the unprefixed variables describe a single site, as before.
 """
 
@@ -16,7 +16,7 @@ from timer import TimerManager
 
 _Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 # Read as NAME_KEY for a named site; these may also be set once, unprefixed, for all sites
-_SHARED_KEYS = {"ESP_PORT", "ESP_PASSWORD", "ESP_NOISE_PSK"}
+_SHARED_KEYS = {"ESP_PORT", "ESP_PASSWORD", "ESP_NOISE_PSK", "WAKE_WORDS"}
 
 
 @dataclass(eq=False)
@@ -37,6 +37,7 @@ class Site:
     esp_port: int = 6053
     esp_password: str = ""
     esp_noise_psk: str = ""
+    wake_words: list[str] = field(default_factory=list)  # ids (okay_nabu…); [] leaves the satellite's own
     ha_url: str = ""
     ha_token: str = ""
     tts_base_url: str = ""  # "" for this host's LAN address
@@ -79,6 +80,7 @@ def load_sites(env: Mapping[str, str] = os.environ) -> list[Site]:
             esp_port=int(setting(name, "ESP_PORT") or 6053),
             esp_password=setting(name, "ESP_PASSWORD"),
             esp_noise_psk=setting(name, "ESP_NOISE_PSK"),
+            wake_words=[w.strip() for w in setting(name, "WAKE_WORDS").split(",") if w.strip()],
             ha_url=setting(name, "HA_URL"),
             ha_token=setting(name, "HA_TOKEN"),
             tts_base_url=setting(name, "TTS_BASE_URL"),
