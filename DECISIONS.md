@@ -293,3 +293,15 @@ This document tracks all architecture and technology decisions made for this pro
   - Spotify: no false « playing », music kept through a restart, silence not streamed forever. Web UI on Tailscale with a site selector; exchange log 0600 and atomic. Lint clean, versions pinned.
 - **Measured**: test_e2e 19/19 in dry run after the changes; 133 unit tests.
 - **Left for later** (ROADMAP): timers lost on restart, alarms more than a day ahead, duplicate device names, sensor-search synonyms, a VAD minimum speech length, the web API without CSRF/Host checks.
+
+## 2026-10-11: Shops and their opening hours
+
+### AD-046: OpenStreetMap for places, opening hours computed for the LLM
+- **Context**: « Est-ce que le magasin Altermundi de la rue du Commerce il est ouvert le dimanche ? » got « je ne peux pas vérifier les horaires ». OpenStreetMap has the shop, with `opening_hours: Mo-Sa 10:00-19:30`.
+- **Decision**: a `find_place` tool, offered everywhere like the weather (`places.py`).
+  - **Photon** (komoot's OSM geocoder) finds the places, biased to the home's coordinates from Home Assistant with `zoom=16`, `location_bias_scale=0.1`. Nominatim's own search ranks by importance, not distance: « Altermundi » gave five shops across Paris before the one 700 m away. Streets, stations, bus stops and Vélib' stations named after a place are dropped, on our side: Photon's `osm_tag=!highway` filter reranks, and put a stadium before the Leclerc supermarket.
+  - **Nominatim's `/lookup`** gives the three nearest places' tags (`opening_hours`, `phone`) in one request: Photon returns no tags.
+  - **opening-hours-py** turns `opening_hours` into the next seven days in French and « fermé, ouvre demain à 10:00 » for now, with the country's public holidays (`PH off`). The 12B model reads a week instead of OSM's syntax. The time zone is the home's and the country Photon's: guessed from coordinates, the library loads a 110 MB map and keeps it.
+  - Google Places would know more shops and fresher hours, but needs a key, billing, and sends each request to Google; OSM fits the free, no-key pattern of the weather and pictures.
+- **Measured**: Photon + Nominatim ~0.3–0.6 s. Dry runs: 7 out of 7 phrasings called `find_place` with a good query (« Altermundi rue du Commerce », « pharmacie », « Monoprix »…), weather and lights unchanged. Real runs: 7 out of 7 answers true to the data (« Non, le magasin Altermundi de la rue du Commerce est fermé aujourd'hui. Il rouvrira demain à 10h. »), 2.0–3.3 s.
+- **Trade-off**: OSM's hours can be stale (Altermundi's were last checked in 2024) and many small shops have none: the answer is then « je ne connais pas leurs horaires ». A place far enough to be in another time zone gets the home's. Three places with a week each is ~700 tokens of the 8192-token context.
