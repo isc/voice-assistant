@@ -3,6 +3,7 @@ Home Assistant REST API client for voice assistant integration.
 Handles entity discovery with area grouping, fuzzy matching, and service calls.
 """
 
+import asyncio
 import difflib
 import json
 import logging
@@ -640,7 +641,7 @@ class HAClient:
         past a few: the closed Charras house has 18 Velux, which the reply would read out."""
         if len(entity_ids) == 1:
             return f"{self.display_name(entity_ids[0])} ne répond pas (hors ligne)"
-        names = ", ".join(map(self.display_name, entity_ids)) if len(entity_ids) <= 3 else f"{len(entity_ids)} appareils"
+        names = f"{len(entity_ids)} appareils" if len(entity_ids) > 3 else ", ".join(map(self.display_name, entity_ids))
         return f"{names} ne répondent pas (hors ligne)"
 
     def _unavailable(self, entity_id: str) -> bool:
@@ -657,6 +658,20 @@ class HAClient:
                 if eid in self.entities:
                     self.entities[eid]["state"] = state
         return [eid for eid in entity_ids if not self._unavailable(eid)]
+
+    async def playing_volumes(self) -> dict[str, float]:
+        """The speakers playing, with their volume; not a voice satellite, which lowers its own music."""
+        text = await self._render_template(
+            "{% for s in states.media_player if s.state == 'playing' and s.attributes.volume_level is number"
+            " and not s.attributes.is_volume_muted and 'Voice' not in (device_attr(s.entity_id, 'model') or '') %}"
+            "{{ s.entity_id }} {{ s.attributes.volume_level }}\n{% endfor %}",
+            timeout=2,
+        )
+        return {eid: float(level) for eid, _, level in (line.partition(" ") for line in (text or "").splitlines())}
+
+    async def set_volumes(self, volumes: dict[str, float]) -> None:
+        calls = (self.call_service("media_player", "volume_set", eid, volume_level=v) for eid, v in volumes.items())
+        await asyncio.gather(*calls)
 
     def _build_response(self, domain: str, service: str, display_name: str, kwargs: dict) -> str:
         """Build a natural French TTS response for a service call."""

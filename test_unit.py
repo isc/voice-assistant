@@ -132,6 +132,8 @@ def make_server(env=None):
     server.devices = {}
     server.is_recording = False
     server._pipeline_running = False
+    server._pending_service_calls = set()
+    server._volume_lock = asyncio.Lock()
     return server
 
 
@@ -1487,6 +1489,46 @@ class TestOfflineDevices(unittest.IsolatedAsyncioTestCase):
     def test_many_offline_counted(self):
         velux = [f"cover.velux_{i}" for i in range(18)]
         self.assertEqual(self.client.offline_reply(velux), "18 appareils ne répondent pas (hors ligne)")
+
+
+class TestDucking(unittest.IsolatedAsyncioTestCase):
+    """Paris: next to the radio on the Google Home, the request came out as « mettre la boutique »."""
+
+    def setUp(self):
+        self.volumes = {"media_player.google_home": 0.42}
+        client = MagicMock()
+        client.playing_volumes = AsyncMock(side_effect=lambda: dict(self.volumes))
+
+        async def set_volume(domain, service, eid, volume_level):
+            self.volumes[eid] = volume_level
+
+        client.call_service = AsyncMock(side_effect=set_volume)
+        client.set_volumes = lambda volumes: HAClient.set_volumes(client, volumes)
+        self.server = make_server()
+        self.server.recording_task = None
+        self.server.site.ha_client = client
+
+    async def wake(self, wake_word="Hey Jarvis"):
+        await self.server.handle_voice_assistant_start(self.server.site, "", 1, None, wake_word)
+
+    async def settle(self):
+        await asyncio.gather(*self.server._pending_service_calls)
+
+    async def test_down_while_listening_back_once_heard(self):
+        await self.wake()
+        await self.settle()
+        self.assertEqual(self.volumes, {"media_player.google_home": 0.08})
+        self.server._end_recording()
+        await self.settle()
+        self.assertEqual(self.volumes, {"media_player.google_home": 0.42})
+
+    async def test_a_follow_up_reads_the_volume_back_up(self):
+        await self.wake()
+        self.server._end_recording()
+        await self.wake(wake_word=None)  # the follow-up, before the volume is back
+        self.server._end_recording()
+        await self.settle()
+        self.assertEqual(self.volumes, {"media_player.google_home": 0.42})
 
 
 class TestTimers(unittest.IsolatedAsyncioTestCase):

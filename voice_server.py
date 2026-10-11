@@ -60,6 +60,8 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 _HA_REFRESH_SECONDS = 300
 # A tool result kept in history this long at most (a weather or calendar answer runs to 1 kB)
 _HISTORY_RESULT_CHARS = 300
+# While a request is heard, the HA speakers playing are turned down to this share of their volume
+_DUCKED_SHARE = 0.2
 
 
 # French web radio streams. All MP3: the Voice PE does not decode AAC.
@@ -212,6 +214,9 @@ class VoiceAssistantServer:
     # later starts clean. Voice conversations usually end sooner anyway, via the end_conversation tool.
     CONVERSATION_TIMEOUT = 600  # seconds
 
+    # The HA speakers turned down while a request is heard: their site and own volumes (AD-049)
+    _ducked: Optional[tuple[Site, dict[str, float]]] = None
+
     # Per home, read from the active site (sites.py)
     ha_client = _site_attribute("ha_client")
     timer_manager = _site_attribute("timer_manager")
@@ -273,6 +278,7 @@ class VoiceAssistantServer:
         # so the tasks aren't garbage-collected mid-flight, discarded on completion.
         self._pending_service_calls: set = set()
         self._background_tasks: set = set()  # held until done, not awaited at shutdown
+        self._volume_lock = asyncio.Lock()  # turning speakers down and back up, in turn
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -527,7 +533,7 @@ class VoiceAssistantServer:
             self.devices.pop(site.name, None)
             # A recording cut short would hold the voice state, refusing the other site for 30 s
             if site is self._voice_site and self.is_recording:
-                self.is_recording = False
+                self._end_recording()
 
         # No name: ReconnectLogic derives it from the host, and matches mDNS announcements with it
         # (an x.local satellite reconnects as soon as it appears; an IP gets no listener)
@@ -595,6 +601,11 @@ class VoiceAssistantServer:
         if not self.claim_voice(site):
             return None  # the ESP takes it as an error
 
+        # The Voice PE lowers only its own speaker: next to the radio on the Google Home, the request
+        # came out as « Est-ce que je peux mettre la boutique? »
+        if site.ha_client:
+            self._in_background(self._lower_speakers(site))
+
         self.is_followup = wake_word_phrase is None
         # Only overwrite conversation_id for new conversations (wake word detected).
         # Follow-ups keep the server-assigned ID so exchanges group correctly.
@@ -623,6 +634,32 @@ class VoiceAssistantServer:
 
         return 0
 
+    async def _lower_speakers(self, site: Site) -> None:
+        async with self._volume_lock:
+            if self._ducked:  # still down: the volumes read now would be the lowered ones, kept for good
+                return
+            volumes = await site.ha_client.playing_volumes()
+            self._ducked = site, volumes
+            await site.ha_client.set_volumes({eid: round(level * _DUCKED_SHARE, 2) for eid, level in volumes.items()})
+
+    async def _restore_speakers(self) -> None:
+        async with self._volume_lock:
+            if ducked := self._ducked:
+                self._ducked = None
+                site, volumes = ducked
+                await site.ha_client.set_volumes(volumes)
+
+    def _end_recording(self) -> None:
+        """The request is heard: the speakers turned down for it go back up."""
+        self.is_recording = False
+        self._in_background(self._restore_speakers())
+
+    def _in_background(self, coro) -> None:
+        """Run an HA call without waiting for it; shutdown does, so that it still reaches HA."""
+        task = asyncio.ensure_future(coro)
+        self._pending_service_calls.add(task)
+        task.add_done_callback(self._pending_service_calls.discard)
+
     async def monitor_recording_timeout(self, api: APIClient):
         """Safety timeout. In follow-up mode, wait 5s for speech to start,
         then extend to 30s once speech is detected."""
@@ -648,7 +685,7 @@ class VoiceAssistantServer:
         if not self.is_recording:
             return
 
-        self.is_recording = False
+        self._end_recording()
         audio_data = bytes(self.audio_buffer)
         logger.info(f"Recording stopped ({reason}): {len(audio_data)} bytes")
 
@@ -677,7 +714,7 @@ class VoiceAssistantServer:
         # The device stopped the run itself (start=False): the user closed the mic, so no reply
         if abort:
             if self.is_recording:
-                self.is_recording = False
+                self._end_recording()
                 if self.recording_task and self.recording_task is not asyncio.current_task():
                     self.recording_task.cancel()
                 logger.info("Run stopped by the device - request dropped")
@@ -685,7 +722,7 @@ class VoiceAssistantServer:
 
         if self.is_recording and len(self.audio_buffer) > 0:
             logger.info(f"Complete audio received: {len(self.audio_buffer)} bytes")
-            self.is_recording = False
+            self._end_recording()
 
             if api := self.device:
                 await self.process_voice_pipeline(api, bytes(self.audio_buffer))
@@ -1022,9 +1059,7 @@ class VoiceAssistantServer:
         # let them drain while the pipeline moves on to the reply. call_service
         # swallows and logs its own errors, so a failed background call never raises.
         for call in calls:
-            task = asyncio.ensure_future(call)
-            self._pending_service_calls.add(task)
-            task.add_done_callback(self._pending_service_calls.discard)
+            self._in_background(call)
 
         if len(entity_ids) > 1:
             if is_whole_house(room):
@@ -1091,7 +1126,8 @@ class VoiceAssistantServer:
         return None
 
     async def _offline_reply(self, target: tuple[str, str]) -> Optional[str]:
-        """The result when the target is an HA speaker HA cannot reach (the satellite answers, being the one listening)."""
+        """The result when the target is an HA speaker HA cannot reach (the satellite, being the one listening,
+        always answers)."""
         kind, ident = target
         if kind == "ha" and not await self.ha_client.reachable([ident]):
             return self.ha_client.offline_reply([ident])
@@ -1110,6 +1146,7 @@ class VoiceAssistantServer:
         Dispatches to the ESP's media_player directly when possible (no HA round-trip),
         or to a HA media_player entity when the user names a specific room.
         """
+        await self._restore_speakers()  # « monte le son » starts from the speaker's own volume
         room = arguments.get("room")
         target = self._resolve_media_target(room)
         if not target:
@@ -1160,6 +1197,7 @@ class VoiceAssistantServer:
         play_music and resume need a speaker to point at the stream."""
         if not self.spotify:
             return "Spotify non disponible"
+        await self._restore_speakers()
         action = arguments.get("action")
         try:
             if function_name == "music_control" and action != "resume":
@@ -1801,7 +1839,9 @@ async def main():
         sys.exit(1)
     finally:
         # Let any fire-and-forget service calls reach HA before we tear down the
-        # session — otherwise a restart right after "ferme tout" drops commands.
+        # session — otherwise a restart right after "ferme tout" drops commands —
+        # and speakers turned down for a request being heard go back up.
+        server._end_recording()
         if server._pending_service_calls:
             logger.info(f"Draining {len(server._pending_service_calls)} pending service calls...")
             await asyncio.gather(*server._pending_service_calls, return_exceptions=True)

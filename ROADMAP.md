@@ -7,13 +7,10 @@ What is still open. Shipped work is recorded in `DECISIONS.md` and the git histo
 ### Know why the Voice PE restarts
 On 2026-10-10 the Voice PE most likely rebooted after a reply asked for follow-up while its own player was busy; since 2026-10-11 the server asks for no follow-up while the satellite plays (AD-045). The reboot was inferred from the LED (solid warm white is the firmware's init-without-Wi-Fi state). Adding ESPHome's `debug:` component to the Voice PE firmware would report the reset reason.
 
-### Duck the music while listening
-The same evening, a request said next to the playing Sonos was recorded for 14 s (the VAD never heard silence) and transcribed into song lyrics. The Voice PE ducks only its own speaker. On wake word, lower the HA speakers playing in the satellite's room, and restore them once the request is transcribed. Needs the satellite's room (see "Room of the voice satellite").
-
 ### Media target from live player state
 Media commands without a room go to `_last_media_target`, a value kept in memory: it is lost on restart (picked up from HA at startup since 2026-10-10) and goes stale when music is started or stopped from a phone or the Sonos app. Reading HA player states at command time would send "stop" and "plus fort" to whatever actually plays. It would also let the conversation stay open after a media command when nothing plays near the satellite (AD-035 ends it unconditionally). Cost: one HA read per media command, or a websocket subscription.
 
-The same subscription would make the device states live: they are polled every 5 minutes, so a device gone offline since is still reported done, and an offline one is read again before each refusal.
+Ducking (AD-049) would drop its template read at each wake word too. The same subscription would make the device states live: they are polled every 5 minutes, so a device gone offline since is still reported done, and an offline one is read again before each refusal.
 
 ## UX
 
@@ -21,7 +18,7 @@ The same subscription would make the device states live: they are polled every 5
 The assistant speaks without wake word: washing machine done, doorbell, reminders. Simplest shape: Home Assistant already knows when these happen, so an HA automation calls a server endpoint (`POST /announce` with the text, through a `rest_command`) and the server plays it like a timer announcement. Needs quiet hours (no washing-machine news at 23:00) and a choice of satellite once there are several.
 
 ### Room of the voice satellite
-"Éteins la lumière" should target the room the request came from. The room of the satellite that heard the wake word is the reliable signal: give each satellite an HA area and use it as the default `room`. This replaces the earlier idea of tracking phones through UniFi Wi-Fi access points, set aside because an AP covers several rooms and the phone is not always on the person. Only matters once a site has more than one satellite.
+"Éteins la lumière" should target the room the request came from. The room of the satellite that heard the wake word is the reliable signal: give each satellite an HA area and use it as the default `room`. This replaces the earlier idea of tracking phones through UniFi Wi-Fi access points, set aside because an AP covers several rooms and the phone is not always on the person. Only matters once a site has more than one satellite. Ducking (AD-049) would use it too: it lowers every HA speaker playing at the site, where only those near the satellite need it.
 
 ### Answer in the speaker's language
 Parakeet v3 already transcribes 25 European languages with automatic detection: spoken to in English, it understands (seen 2026-10-10), but the assistant answers in French. Two pieces are missing:
