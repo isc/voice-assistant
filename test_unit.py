@@ -27,7 +27,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from opening_hours import ParserError
 
-from ha_client import HAClient, cover_kind, normalize
+from ha_client import HAClient, asks_whole_house, cover_kind, normalize
 from images import is_about
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
@@ -544,6 +544,61 @@ class TestNoCrossRoomFallback(unittest.TestCase):
         """The rescue path stays: HA has no 'Garage' area, so the filter is dropped."""
         eid = self.client.resolve_entity("Appliques salon", room="Garage")
         self.assertEqual(eid, "light.appliques_salon")
+
+
+class TestWholeHouseAsked(unittest.IsolatedAsyncioTestCase):
+    """Paris, 2026-10-12: « Tu peux fermer les volets là, je suis un désolé » (« … dans la chambre
+    de Zoé », misheard) became close_cover room « partout », and every shutter of the flat closed (AD-058)."""
+
+    def setUp(self):
+        self.client = make_client()
+        self.client.call_service = AsyncMock(return_value="ok")
+        self.client._render_template = AsyncMock(return_value=None)  # the discovery's states hold
+        self.server = make_server()
+        self.server.ha_client = self.client
+        self.server.new_request()
+
+    def test_said_in_so_many_words(self):
+        for text in (
+            "Ouvre tous les volets.", "éteins tout", "ferme les volets partout", "allume toutes les lumières",
+            "ferme les volets de toute la maison", "ferme les volets de l'appart",
+        ):  # fmt: skip
+            self.assertTrue(asks_whole_house(text), text)
+        for text in (
+            "Tu peux fermer les volets là, je suis un désolé.", "Ferme les volets.",
+            "ferme les volets tout de suite", "ferme les volets, c'est tout", "ferme le volet de Zoé",
+        ):  # fmt: skip
+            self.assertFalse(asks_whole_house(text), text)
+
+    async def test_not_asked_not_run(self):
+        result = await self.server.execute_function("close_cover", {"entity": "volets", "room": "partout"})
+        self.assertIn("quelle pièce", result)
+        self.client.call_service.assert_not_called()
+
+    async def test_asked_runs(self):
+        self.server._whole_house = True
+        result = await self.server.execute_function("close_cover", {"entity": "volets", "room": "partout"})
+        self.assertEqual(result, "Tous les volets en cours de fermeture")
+        await asyncio.gather(*self.server._pending_service_calls)
+        self.assertEqual(self.client.call_service.call_count, 4)
+
+    async def test_reading_needs_no_asking(self):
+        self.client.get_entity_state = AsyncMock(return_value={"state": "open", "attributes": {}})
+        result = await self.server.execute_function("get_state", {"entity": "volets", "room": "partout"})
+        self.assertNotIn("quelle pièce", result)
+
+    async def test_no_room_picks_no_shutter(self):
+        """« volets » held Charlie's « Volet »: in Paris, the guest room's, first of three so named."""
+        self.assertEqual(self.client.resolve_all_entities("volets", domain_hints=["cover"]), [])
+        self.assertEqual(self.client.resolve_all_entities("volets", room="parcourt", domain_hints=["cover"]), [])
+        for room in (None, "parcourt"):
+            result = await self.server.execute_function("close_cover", {"entity": "volets", "room": room})
+            self.assertIn("quelle pièce", result)
+        self.client.call_service.assert_not_called()
+        # A room HA has, without one: none there
+        del self.client.entities["cover.volet_zoe"]
+        result = await self.server.execute_function("close_cover", {"entity": "volets", "room": "Chambre Zoé"})
+        self.assertEqual(result, "Appareil volets non trouvé")
 
 
 # ---------------------------------------------------------------------------
@@ -1564,9 +1619,9 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "18 degrés."},
         ]
 
-    async def ask(self, dry_run=False):
-        with patch("llm.chat_completion", AsyncMock(side_effect=self.replies)) as self.completion:
-            return await self.server.process_with_llm(None, "quel temps fait-il ?", dry_run=dry_run)
+    async def ask(self, dry_run=False, text="quel temps fait-il ?"):
+        with patch("llm.chat_completion", AsyncMock(side_effect=list(self.replies))) as self.completion:
+            return await self.server.process_with_llm(None, text, dry_run=dry_run)
 
     async def test_history_keeps_the_calls(self):
         """With only « request → C'est fait », gemma answered repeats from history, calling nothing."""
@@ -1586,6 +1641,16 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((live.history, live.id, live.last_time, live.shown_images), ([request], 1000, 1.0, {"a.jpg"}))
         self.assertEqual(len(self.server.site.dry_run.history), 4)  # a conversation of its own, for tests
         self.server.execute_function.assert_not_awaited()
+
+    async def test_whole_house_only_when_said(self):
+        """Dry runs too, so that a test shows what the request would do (AD-058)."""
+        self.server.ha_client = make_client()
+        sweep = {"name": "close_cover", "arguments": '{"entity": "volets", "room": "partout"}'}
+        self.replies[0]["tool_calls"][0]["function"] = sweep
+        for text, result in (("ferme les volets", "quelle pièce"), ("ferme tous les volets", "OK")):
+            self.server.new_request()
+            await self.ask(dry_run=True, text=text)
+            self.assertIn(result, self.server._last_tool_calls[0]["result"])
 
     async def test_malformed_arguments_do_not_fail_the_request(self):
         self.replies[0]["tool_calls"][0]["function"]["arguments"] = "{not json"
@@ -1728,6 +1793,7 @@ class TestOfflineDevices(unittest.IsolatedAsyncioTestCase):
         self.client.entities["light.plafonnier_zoe"] = {**zoe, "state": "unavailable"}
         result = await self.server.execute_function("turn_on", {"entity": "plafonnier", "room": "Chambre Zoé"})
         self.assertEqual(result, "Plafonnier Chambre Zoé ne répond pas (hors ligne)")
+        self.server._whole_house = True  # « éteins tout »
         await self.server.execute_function("turn_off", {"entity": "lumières", "room": "tout"})
         called = {call.args[2] for call in self.client.call_service.call_args_list}
         self.assertNotIn("light.plafonnier_zoe", called)

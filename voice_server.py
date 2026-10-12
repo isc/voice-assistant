@@ -36,7 +36,7 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 import onnx_gpu
-from ha_client import LOCAL_CONFIG, compact, is_whole_house, normalize
+from ha_client import LOCAL_CONFIG, asks_whole_house, compact, is_whole_house, normalize
 from images import find_image
 from places import find_place
 from recordings import Recordings
@@ -126,6 +126,10 @@ def _speaker_left_on(entities: dict, urls: set[str]) -> Optional[tuple[str, str]
     )
 
 
+# The result of an action on several rooms that the request did not say (AD-058)
+_WHICH_ROOM = "Rien n'a été fait : la demande ne dit pas dans quelle pièce. Demande laquelle."
+
+
 def _no_speaker(room: Optional[str]) -> str:
     return f"Aucune enceinte trouvée pour {room}" if room else "Aucune enceinte disponible"
 
@@ -185,6 +189,7 @@ class _Request:
     tool_calls: list = field(default_factory=list)
     end_conversation: bool = False  # the end_conversation tool: no follow-up, history cleared
     no_followup: bool = False  # a media command: no follow-up, history kept (AD-035)
+    whole_house: bool = False  # the request says tout, tous, partout…: an action may sweep every room (AD-058)
 
 
 _current_request: ContextVar[_Request] = ContextVar("current_request")
@@ -228,6 +233,7 @@ class VoiceAssistantServer:
     _last_tool_calls = _request_attribute("tool_calls")
     _end_conversation = _request_attribute("end_conversation")
     _no_followup = _request_attribute("no_followup")
+    _whole_house = _request_attribute("whole_house")
 
     def __init__(self):
         self.llm_config = (LLM_API_KEY, LLM_MODEL, LLM_URL)  # for /health
@@ -965,6 +971,27 @@ class VoiceAssistantServer:
 
     # === FUNCTION CALLING ===
 
+    # The device tools, each named after its HA service, and the domains they act on
+    _DEVICE_DOMAINS = {
+        "turn_on": ["light", "switch", "media_player"],
+        "turn_off": ["light", "switch", "media_player"],
+        "open_cover": ["cover"],
+        "close_cover": ["cover"],
+        "set_cover_position": ["cover"],
+        "set_temperature": ["climate"],
+        "lock": ["lock"],
+        "get_state": None,
+    }
+
+    def _unasked_sweep(self, function_name: str, arguments: dict) -> Optional[str]:
+        """The result of an action on every room that the request did not ask for, else None (AD-058)."""
+        if function_name == "get_state" or function_name not in self._DEVICE_DOMAINS:
+            return None
+        if not is_whole_house(arguments.get("room")) or self._whole_house:
+            return None
+        logger.warning(f"Whole house not asked for: {function_name}({arguments}) not run")
+        return _WHICH_ROOM
+
     async def execute_function(self, function_name: str, arguments: dict) -> str:
         """Execute a function call from the LLM."""
         if function_name == "end_conversation":
@@ -1054,24 +1081,18 @@ class VoiceAssistantServer:
         entity_name = arguments.get("entity", "")
         room = arguments.get("room")
 
-        # Every action tool is named after its HA service; this is also the list of them
-        domain_map = {
-            "turn_on": ["light", "switch", "media_player"],
-            "turn_off": ["light", "switch", "media_player"],
-            "open_cover": ["cover"],
-            "close_cover": ["cover"],
-            "set_cover_position": ["cover"],
-            "set_temperature": ["climate"],
-            "lock": ["lock"],
-            "get_state": None,
-        }
-        if function_name not in domain_map:
+        if function_name not in self._DEVICE_DOMAINS:
             logger.warning(f"Unknown function: {function_name}")
             return f"Fonction {function_name} inconnue"
-        domains = domain_map[function_name]
+        if unasked := self._unasked_sweep(function_name, arguments):
+            return unasked
+        domains = self._DEVICE_DOMAINS[function_name]
 
         entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
         if not entity_ids:
+            # « ferme les volets » with no room HA knows (none said, or « parcourt »): not one of them at random
+            if self.ha_client.is_generic(entity_name) and not self.ha_client.knows_room(room):
+                return _WHICH_ROOM
             return f"Appareil {entity_name} non trouvé"
 
         if function_name == "get_state":
@@ -1484,6 +1505,7 @@ class VoiceAssistantServer:
 
         logger.info(f'LLM input: "{text}"')
         self._keep_llm_loaded()
+        self._whole_house = asks_whole_house(text)
 
         is_local = not LLM_API_KEY
 
@@ -1640,8 +1662,8 @@ class VoiceAssistantServer:
                     return tc_entry, tc_entry["result"]
                 if dry_run:
                     logger.info(f"Dry run: {function_name}({function_args})")
-                    tc_entry["result"] = "OK"
-                    return tc_entry, "OK"
+                    tc_entry["result"] = self._unasked_sweep(function_name, function_args) or "OK"
+                    return tc_entry, tc_entry["result"]
                 async with self._tool_semaphore:
                     try:
                         result = await self.execute_function(function_name, function_args)

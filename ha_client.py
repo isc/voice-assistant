@@ -8,6 +8,7 @@ import difflib
 import json
 import logging
 import os
+import re
 import unicodedata
 from typing import Optional
 
@@ -54,6 +55,23 @@ _WHOLE_HOUSE = {normalize(room) for room in ("tout", "toute la maison", "partout
 
 def is_whole_house(room: Optional[str]) -> bool:
     return bool(room) and normalize(room) in _WHOLE_HOUSE
+
+
+# A request asks for every room only in so many words, those of _WHOLE_HOUSE and more; « tout de
+# suite » or « c'est tout » do not
+_WHOLE_HOUSE_WORDS = re.compile(r"\b(?:tout|tous|toute|toutes|partout|maison|appart|appartement)\b")
+_NOT_WHOLE_HOUSE = re.compile(r"\btout (?:de suite|a l'heure|a fait|le monde)\b|\bc'est tout\b")
+
+
+def asks_whole_house(text: str) -> bool:
+    """Whether a request says the whole house: tout, tous, partout, la maison, l'appart…"""
+    return bool(_WHOLE_HOUSE_WORDS.search(_NOT_WHOLE_HOUSE.sub(" ", fold(text))))
+
+
+def _group_rooms(room: str) -> Optional[list[str]]:
+    """The rooms of the group a room names, also said with more words (« les chambres des enfants »)."""
+    room_words = set(normalize(room).split())
+    return next((rooms for name, rooms in ROOM_GROUPS.items() if set(normalize(name).split()) <= room_words), None)
 
 
 # Built in, whatever an older config.local.json still lists for them
@@ -350,6 +368,16 @@ class HAClient:
         "verrou": ("lock", None),
     }
 
+    def is_generic(self, name: str) -> bool:
+        """Whether a name says a kind of device (« volets », « la lumière ») rather than one device."""
+        return normalize(name) in self._GENERIC_NAMES
+
+    def knows_room(self, room: Optional[str]) -> bool:
+        """Whether a room is one HA has, a group of them, or the whole house."""
+        if not room:
+            return False
+        return is_whole_house(room) or self._area_exists(normalize(room)) or _group_rooms(room) is not None
+
     def _area_exists(self, norm_room: str) -> bool:
         """Whether HA knows this area, using the same loose matching as the filter."""
         return any(_area_matches(normalize(area), norm_room) for area in self.areas.values())
@@ -388,15 +416,9 @@ class HAClient:
             # one is not its speaker or a plug; « la porte » is the lock, not a switch named Porte
             domain_hints = [target_domain]
 
-        # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"]), also when
-        # said with more words (« les chambres des enfants »)
-        if room and not whole_house:
-            room_words = set(normalize(room).split())
-            for group_name, group_rooms in ROOM_GROUPS.items():
-                if set(normalize(group_name).split()) <= room_words:
-                    rooms_to_search = group_rooms
-                    is_group = True
-                    break
+        # Expand room groups (e.g. "enfants" -> ["Chambre Zoé", "Chambre Charlie"])
+        if room and not whole_house and (group_rooms := _group_rooms(room)) is not None:
+            rooms_to_search, is_group = group_rooms, True
 
         # A group sweeps under a name that says a kind of cover: for « ferme les volets des enfants »,
         # gemma4:12b names the shutters of one room (« Petit volet », « Grand volet », 6 times out of
@@ -465,7 +487,7 @@ class HAClient:
         """Match a spoken name to an entity_id, optionally scoped to a room."""
         norm_input = normalize(name)
         norm_room = normalize(room) if room else None
-        generic = norm_input in self._GENERIC_NAMES
+        generic = self.is_generic(name)
 
         candidates = self._candidates(norm_input, norm_room, domain_hints)
         in_known_room = bool(candidates) and bool(norm_room)
@@ -492,7 +514,9 @@ class HAClient:
         if not candidates:
             return None
 
-        if norm_input:
+        # A generic name says which device only within a room: without one, « volets » held the
+        # « Volet » of the guest room, first of three so named among nine shutters (AD-058)
+        if norm_input and (norm_room or not generic):
             # The closest name containing the request (the exact name first: it is the shortest);
             # else the longest name the request contains (« lumière du salon » holds « salon »)
             containing = sorted(
