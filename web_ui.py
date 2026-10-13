@@ -1,5 +1,6 @@
 """Web UI and HTTP routes for the voice assistant."""
 
+import asyncio
 import hmac
 import ipaddress
 import json
@@ -8,11 +9,15 @@ import os
 import socket
 import time
 from pathlib import Path
+from typing import Optional
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
+from yarl import URL
 
 import onnx_gpu
 from sites import Site, site_at_address
+from spotify import CONTROLS
+from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,8 @@ _INSTALL_PATHS = ("/manifest.webmanifest", "/static/")
 KEY_COOKIE = "assistant_key"
 # The names browsers reach this server by, besides IP addresses and MagicDNS's (*.ts.net, Funnel's too)
 _OUR_NAMES = {"localhost", socket.gethostname().split(".")[0].lower()}
+# What the app's microphone sends: 16 kHz 16-bit mono, as long as the satellite's at most
+_MAX_RECORDING = int(MAX_SECONDS) * 16000 * 2
 
 
 def is_trusted_client(remote: str | None) -> bool:
@@ -97,7 +104,58 @@ async def cross_site_guard(request, handler):
         raise web.HTTPMisdirectedRequest(text="Unknown host")
     if request.method not in ("GET", "HEAD") and request.content_type != "application/json":
         raise _json_error(web.HTTPUnsupportedMediaType, "JSON body only (Content-Type: application/json)")
+    if request.headers.get("Upgrade", "").lower() == "websocket" and not _same_origin(request):
+        raise web.HTTPForbidden(text="Not this server's page")
     return await handler(request)
+
+
+def _same_origin(request) -> bool:
+    """A WebSocket opened by this server's own page. Browsers open WebSockets across sites without a
+    preflight, a GET the JSON rule does not cover, and say which page asks in Origin: a page of any site,
+    in a browser on the tailnet, could otherwise speak to the house (AD-059). No Origin: no browser."""
+    if (origin := request.headers.get("Origin")) is None:
+        return True
+    try:
+        return URL(origin).host == request.url.host
+    except ValueError:
+        return False
+
+
+async def _send(ws: web.WebSocketResponse, message: dict) -> None:
+    """To the page, if it is still there: a request it left (the phone locked) still runs."""
+    if not ws.closed:
+        try:
+            await ws.send_json(message)
+        except ConnectionError:
+            pass
+
+
+async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[bytes, bool]]:
+    """Take the app's audio until speech ends, the page says the user is done, or time is up, with the
+    satellite's limits. Returns the recording and whether it holds speech; None if the page went away."""
+    recording, speech = bytearray(), SpeechEnd()
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    while len(recording) < _MAX_RECORDING:
+        limit = MAX_SECONDS if speech.heard else WAIT_FOR_FOLLOW_UP if follow_up else WAIT_FOR_SPEECH
+        if (wait := limit - (loop.time() - start)) <= 0:
+            break
+        try:
+            message = await ws.receive(timeout=wait)
+        except TimeoutError:
+            break
+        if message.type == WSMsgType.BINARY:
+            heard = speech.heard
+            recording.extend(message.data)
+            if speech.read(recording):
+                break
+            if speech.heard and not heard:
+                await _send(ws, {"type": "speech"})
+        elif message.type == WSMsgType.TEXT:  # the user tapped: done speaking
+            break
+        else:
+            return None
+    return bytes(recording), speech.heard
 
 
 def _json_error(error: type[web.HTTPException], message: str) -> web.HTTPException:
@@ -120,6 +178,12 @@ class ExchangeLog:
         self.path = path
         self.max_entries = max_entries
         self.entries = self._load()
+        # Changes with each entry, and from one run of the server to the next
+        self._started, self._added = time.time_ns(), 0
+
+    @property
+    def etag(self) -> str:
+        return f'"{self._started}-{self._added}"'
 
     def _load(self):
         try:
@@ -168,6 +232,7 @@ class ExchangeLog:
             "site": site,
         }
         self.entries.append(entry)
+        self._added += 1
         if len(self.entries) > self.max_entries:
             self.entries = self.entries[-self.max_entries :]
         self._save()
@@ -233,77 +298,91 @@ def setup_routes(app, server):
         )
 
     async def handle_get_exchanges(request):
-        return web.json_response(server.exchange_log.entries)
+        # Polled every few seconds by open pages, often on mobile data: unchanged, a 304 and no body
+        log = server.exchange_log
+        headers = {"ETag": log.etag, "Cache-Control": "no-cache"}
+        if request.headers.get("If-None-Match") == log.etag:
+            return web.Response(status=304, headers=headers)
+        return web.json_response(log.entries, headers=headers)
 
     async def handle_web_send(request):
-        text = await read_text(request)
-
-        timings = {}
-        t0 = time.time()
-        response_text = await server.process_with_llm(None, text)
-        timings["llm"] = round(time.time() - t0, 2)
-        if not response_text:
-            server.exchange_log.add(
-                "web",
-                text,
-                text,
-                "[Erreur LLM: pas de réponse]",
-                timings=timings,
-                conversation_id=server.conversation.id,
-                site=server.site.name,
-            )
+        """A request typed in the web app: its reply is read, not spoken."""
+        reply = await server.answer(await read_text(request), "web", {}, speak=False)
+        if not reply["response"]:
             return web.json_response({"error": "LLM returned no response"}, status=500)
-
-        t0 = time.time()
-        tts_url = await server.text_to_speech_file(text=response_text)
-        timings["tts"] = round(time.time() - t0, 2)
-        timings["total"] = round(sum(timings.values()), 2)
-
-        tool_calls = server._last_tool_calls
-        server.exchange_log.add(
-            "web",
-            text,
-            text,
-            response_text,
-            tts_url,
-            timings=timings,
-            tool_calls=tool_calls,
-            conversation_id=server.conversation.id,
-            site=server.site.name,
-        )
-        return web.json_response(
-            {
-                "input": text,
-                "response": response_text,
-                "tts_url": tts_url,
-                "timings": timings,
-                "tool_calls": tool_calls,
-            }
-        )
+        return web.json_response(reply)
 
     async def handle_test_prompt(request):
         text = await read_text(request)
-
         logger.info(f'[TEST] Input: "{text}"')
-        response_text = await server.process_with_llm(None, text)
-        if not response_text:
-            server.exchange_log.add(
-                "web",
-                text,
-                text,
-                "[Erreur LLM: pas de réponse]",
-                conversation_id=server.conversation.id,
-                site=server.site.name,
-            )
+        reply = await server.answer(text, "web", {}, speak=True)
+        if not reply["response"]:
             return web.json_response({"error": "LLM returned no response"}, status=500)
-
-        tts_url = await server.text_to_speech_file(text=response_text)
-        result = {"input": text, "response": response_text, "tts_url": tts_url}
+        result = {key: reply[key] for key in ("input", "response", "tts_url")}
         logger.info(f"[TEST] Result: {json.dumps(result, ensure_ascii=False)}")
-        server.exchange_log.add(
-            "web", text, text, response_text, tts_url, conversation_id=server.conversation.id, site=server.site.name
-        )
         return web.json_response(result)
+
+    async def handle_listen(request):
+        """The app as a satellite (AD-059): its microphone, 16 kHz 16-bit mono in binary messages,
+        heard by the satellite's VAD; the reply is the phone's to play. To the page, in order:
+        speech (someone speaks), heard (stop sending), transcript, then reply or error. A text
+        message from the page means the user is done speaking; closing drops the request.
+
+        ?site=… as for a typed request; ?follow_up=1 for the listening that follows a reply."""
+        await use_site(request, dict(request.query))
+        follow_up = request.query.get("follow_up") == "1"
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        server.new_request()
+        if not (heard := await _listen(ws, follow_up)):
+            return ws
+        await _send(ws, {"type": "heard"})
+        try:
+            reply = await server.answer_recording(
+                *heard, follow_up, lambda transcript: _send(ws, {"type": "transcript", "text": transcript})
+            )
+        except Exception:
+            logger.exception("App request failed")
+            reply = {"response": None}
+        if reply and reply["response"]:
+            # Where the page fetches it: relative, the app lives at / and at /assistant/
+            await _send(ws, {"type": "reply", **reply, "audio": "tts/" + reply["tts_url"].rsplit("/", 1)[-1]})
+        elif reply:
+            await _send(ws, {"type": "error"})
+        await ws.close()
+        return ws
+
+    async def handle_state(request):
+        """What runs now at the page's home: its timers; and Spotify, wherever it plays (one for every home)."""
+        await use_site(request, dict(request.query))
+        timers = [
+            {
+                "id": timer.id,
+                "name": timer.name,
+                "seconds_left": timer.seconds_left,
+                "alarm": timer.target_time if timer.is_alarm else None,
+            }
+            for timer in server.timer_manager.get_timers()
+        ]
+        return web.json_response({"timers": timers, "music": await server.music_now()})
+
+    async def handle_cancel_timer(request):
+        """The app's ✕ on a timer: {"id": …, "site": …}."""
+        body = await _read_body(request)
+        await use_site(request, body)
+        if not isinstance(timer_id := body.get("id"), str) or not await server.cancel_timer(timer_id):
+            raise _json_error(web.HTTPNotFound, "no such timer")
+        return web.json_response({"status": "ok"})
+
+    async def handle_music(request):
+        """The app's music buttons, as music_control: {"action": "pause" | "resume" | "next" | "previous"}."""
+        body = await _read_body(request)
+        if not isinstance(action := body.get("action"), str) or action not in CONTROLS:
+            raise _json_error(web.HTTPBadRequest, f"action: one of {', '.join(CONTROLS)}")
+        await use_site(request, body)
+        server.new_request()
+        result = await server.execute_function("music_control", {"action": action})
+        return web.json_response({"result": result, "music": await server.music_now()})
 
     async def handle_dry_run(request):
         """LLM-only endpoint: produces tool calls without executing them."""
@@ -403,10 +482,14 @@ def setup_routes(app, server):
     app.router.add_get("/health", handle_health)
     app.router.add_get("/api/exchanges", handle_get_exchanges)
     app.router.add_get("/api/sites", handle_sites)
+    app.router.add_get("/api/state", handle_state)
+    app.router.add_get("/api/listen", handle_listen)
     # The patterns keep the path inside the recordings folder
     app.router.add_get(r"/recordings/{recording:[\d-]+/[\d_]+\.wav}", handle_recording)
     app.router.add_post("/api/send", handle_web_send)
     app.router.add_post("/api/dry-run", handle_dry_run)
+    app.router.add_post("/api/timers/cancel", handle_cancel_timer)
+    app.router.add_post("/api/music", handle_music)
     app.router.add_post("/api/reset-conversation", handle_reset_conversation)
     app.router.add_post("/test", handle_test_prompt)
     app.router.add_static("/static", STATIC_DIR)

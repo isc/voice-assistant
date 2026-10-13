@@ -233,12 +233,16 @@ def _artist_names(item: dict) -> list[str]:
     return [a["name"] for a in item.get("artists", [])]
 
 
+def _current(status: dict) -> Optional[dict]:
+    """go-librespot's current track, None when there is none."""
+    track = status.get("track")
+    return None if not track or status.get("stopped") else track
+
+
 def _track(status: dict) -> Optional[str]:
     """go-librespot's current track as told to the LLM, None when there is none."""
-    track = status.get("track")
-    if not track or status.get("stopped"):
-        return None
-    return f"« {track['name']} » de {_artists(track['artist_names'])}"
+    track = _current(status)
+    return track and f"« {track['name']} » de {_artists(track['artist_names'])}"
 
 
 def _describe(kind: str, item: dict) -> str:
@@ -520,9 +524,19 @@ class Spotify:
 
     async def now_metadata(self) -> Optional[dict]:
         """What a screen shows for the track go-librespot plays, None when there is none."""
-        status = await self.status()
-        track = status.get("track")
-        if not track or status.get("stopped"):
+        if not (track := _current(await self.status())):
             return None
         cover = track["album_cover_url"] or ""
         return screen_metadata(track["name"], track["artist_names"], track["album_name"], cover)
+
+    async def now_for_app(self) -> Optional[dict]:
+        """What the web app shows of the track go-librespot plays, None when there is none."""
+        status = await self.status()
+        if not (track := _current(status)):
+            return None
+        return {
+            "title": track["name"],
+            "artist": _artists(track["artist_names"]),
+            "cover": track["album_cover_url"] or None,
+            "paused": bool(status.get("paused")),
+        }

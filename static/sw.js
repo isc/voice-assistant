@@ -1,9 +1,9 @@
 // Minimal service worker: makes the web UI an installable PWA and lets the
 // app shell load offline. Deliberately conservative — it never touches POST
-// requests or api/* so the live debug UI keeps working against the network.
+// requests or api/* so the live UI keeps working against the network.
 // URLs are relative to this script: the app lives at / on the tailnet, at
 // /assistant/ through Funnel.
-const CACHE = "va-shell-v3";
+const CACHE = "va-shell-v4";
 const SHELL = [
   "./",
   "manifest.webmanifest",

@@ -75,21 +75,22 @@ class TimerManager:
         return timer
 
     def cancel_timer(self, timer_id: str | None = None, name: str | None = None) -> Timer | None:
-        """Cancel an active timer by ID or name. Returns the cancelled timer or None."""
+        """Cancel an active timer by ID, or by name: a spoken one, so with neither or a name that
+        matches none, the only active timer (« annule le minuteur »). Returns the cancelled timer or None."""
         timer = None
-        if timer_id and timer_id in self.timers:
-            timer = self.timers[timer_id]
-        elif name:
-            name_lower = name.lower()
-            for t in self.timers.values():
-                if t.is_active and t.name and t.name.lower() == name_lower:
-                    timer = t
-                    break
-        if not timer:
-            # The only active timer, whatever name was said or none (« annule le minuteur »)
-            active = [t for t in self.timers.values() if t.is_active]
-            if len(active) == 1:
-                timer = active[0]
+        if timer_id:
+            timer = self.timers.get(timer_id)
+        else:
+            if name:
+                name_lower = name.lower()
+                for t in self.timers.values():
+                    if t.is_active and t.name and t.name.lower() == name_lower:
+                        timer = t
+                        break
+            if not timer:
+                active = [t for t in self.timers.values() if t.is_active]
+                if len(active) == 1:
+                    timer = active[0]
 
         if timer and timer.is_active:
             timer.is_active = False

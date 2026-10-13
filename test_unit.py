@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
+import aiohttp
 from aioesphomeapi import MediaPlayerCommand, VoiceAssistantConfigurationResponse, VoiceAssistantWakeWord
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
@@ -33,6 +34,7 @@ from llm import claims_completed_action, get_tool_definitions, parse_text_tool_c
 from places import week
 from recordings import Recordings
 from sites import load_sites, site_at_address
+from vad import FRAME_BYTES, SpeechEnd
 from web_ui import KEY_COOKIE, access_control, cross_site_guard, is_trusted_client, setup_routes
 
 # ---------------------------------------------------------------------------
@@ -1883,24 +1885,33 @@ class TestVADFrames(unittest.IsolatedAsyncioTestCase):
         """ESPHome 2026.6 sends chunks of no fixed size: a 32 ms frame may arrive in two."""
         server = make_server()
         server.is_recording, server.skip_audio_until, server.audio_buffer = True, 0, bytearray()
-        server.vad_offset = server.vad_speech_frames = server.vad_silence_frames = 0
-        server.vad_has_speech = False
-        server.vad = MagicMock()
-        server.vad.process.return_value = 0.9
+        server.speech = SpeechEnd()
+        server.speech.vad = MagicMock()
+        server.speech.vad.process.return_value = 0.9
         for _ in range(3):
             await server.handle_voice_assistant_audio(server.site, bytes(700))
-        self.assertEqual(server.vad.process.call_count, 2)  # 2100 bytes: two frames of 1024
-        self.assertTrue(server.vad_has_speech)
+        self.assertEqual(server.speech.vad.process.call_count, 2)  # 2100 bytes: two frames of 1024
+        self.assertTrue(server.speech.heard)
+
+    def test_a_second_of_silence_after_speech_ends_it(self):
+        speech = SpeechEnd()
+        speech.vad = MagicMock()
+        speech.vad.process.side_effect = [0.1, 0.9] + [0.2] * 30 + [0.2]
+        self.assertFalse(speech.read(bytes(FRAME_BYTES * 32)))  # silence, speech, 30 silent frames
+        self.assertTrue(speech.heard)
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 33)))
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 40)))  # ended: no more frames read
+        self.assertEqual(speech.vad.process.call_count, 33)
 
     async def test_each_recording_gets_a_fresh_vad(self):
         """Silero keeps its state between windows: the previous request's must not carry over."""
         server = make_server()
         server.recording_task = None
         await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
-        first = server.vad
+        first = server.speech.vad
         server._end_recording()
         await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
-        self.assertIsNot(server.vad, first)
+        self.assertIsNot(server.speech.vad, first)
 
 
 class TestTimers(unittest.IsolatedAsyncioTestCase):
@@ -2041,6 +2052,138 @@ class TestWebUICrossSite(unittest.IsolatedAsyncioTestCase):
             response = await client.post("/api/dry-run", data="{", headers={"Content-Type": "application/json"})
             self.assertEqual((response.status, await response.json()), (400, {"error": "invalid JSON"}))
             self.assertEqual((await client.post("/api/reset-conversation", json={})).status, 200)
+
+
+class FakeSpeech:
+    """Speech heard in the first chunk, ended by the third."""
+
+    def __init__(self):
+        self.heard = False
+
+    def read(self, recording):
+        self.heard = True
+        return len(recording) >= 3 * 2048
+
+
+class TestWebApp(unittest.IsolatedAsyncioTestCase):
+    """The app as a satellite: its microphone through a WebSocket, the reply for the phone to play (AD-059)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        from web_ui import ExchangeLog
+
+        server = self.server = make_server()
+        server.spotify = None
+        server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
+        server.recordings = Recordings(Path(tmp.name) / "recordings", days=90)
+        server.stt = MagicMock(transcribe=AsyncMock(return_value="ferme les volets"))
+        server.text_to_speech_file = AsyncMock(return_value="http://192.168.1.10:8888/tts/reply_1.flac")
+
+        async def process_with_llm(api, text, dry_run=False):
+            server._last_tool_calls = [{"function": "close_cover", "args": {"entity": "volets"}, "result": "OK"}]
+            return "C'est fait."
+
+        server.process_with_llm = process_with_llm
+
+    async def client(self):
+        app = web.Application()
+        setup_routes(app, self.server)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        return client
+
+    async def test_speech_heard_answered_and_logged(self):
+        client = await self.client()
+        with patch("web_ui.SpeechEnd", FakeSpeech):
+            ws = await client.ws_connect("/api/listen")
+            for _ in range(3):
+                await ws.send_bytes(bytes(2048))
+            messages = [await ws.receive_json() for _ in range(4)]
+        self.assertEqual([m["type"] for m in messages], ["speech", "heard", "transcript", "reply"])
+        self.assertEqual(messages[2]["text"], "ferme les volets")
+        reply = messages[3]
+        self.assertEqual((reply["response"], reply["audio"]), ("C'est fait.", "tts/reply_1.flac"))
+        self.assertTrue(reply["follow_up"])
+        entry = self.server.exchange_log.entries[-1]
+        self.assertEqual(
+            (entry["source"], entry["input"], entry["tool_calls"][0]["function"]),
+            ("app", "ferme les volets", "close_cover"),
+        )
+        self.server.stt.transcribe.assert_awaited_once_with(bytes(3 * 2048))
+        with wave.open(str(self.server.recordings.path(entry["audio"]))) as recording:
+            self.assertEqual(recording.getnframes(), 3 * 1024)
+
+    async def test_a_follow_up_nobody_spoke_in_ends_quietly(self):
+        client = await self.client()
+        ws = await client.ws_connect("/api/listen?follow_up=1")
+        await ws.send_bytes(bytes(2048))  # silence
+        await ws.send_str("end")
+        messages = [await ws.receive_json() for _ in range(2)]
+        self.assertEqual(messages, [{"type": "heard"}, {"type": "transcript", "text": ""}])
+        self.server.stt.transcribe.assert_not_awaited()
+        self.assertEqual(self.server.exchange_log.entries, [])
+
+    async def test_pages_of_other_sites_refused(self):
+        client = await self.client()
+        with self.assertRaises(aiohttp.WSServerHandshakeError) as refused:
+            await client.ws_connect("/api/listen", headers={"Origin": "https://evil.example"})
+        self.assertEqual(refused.exception.status, 403)
+        host = f"http://{client.host}:{client.port}"
+        await (await client.ws_connect("/api/listen", headers={"Origin": host})).close()
+
+    async def test_tool_results_saying_nothing_was_done(self):
+        from voice_server import _NOTHING_DONE
+
+        for result in (
+            "Appareil volets non trouvé",
+            "Google Home ne répond pas (hors ligne)",
+            "Plafonnier, Volet ne répondent pas (hors ligne)",
+            "Rien n'a été fait : la demande ne dit pas dans quelle pièce. Demande laquelle.",
+            "Aucune enceinte disponible",
+            "Station Radio Truc inconnue",
+            "Erreur: arguments illisibles",
+        ):
+            self.assertTrue(_NOTHING_DONE.search(result), result)
+        for result in ("Volets chambre de Zoé en cours de fermeture", "Timer de 5 minutes lancé", "OK"):
+            self.assertFalse(_NOTHING_DONE.search(result), result)
+
+    async def test_a_goodbye_ends_the_conversation_at_the_next_request(self):
+        conversation = self.server.site.conversation
+        conversation.history, conversation.id, conversation.last_time = [{"role": "user"}], 42, 1e12
+        self.server.new_request()
+        await self.server.execute_function("end_conversation", {})
+        self.assertEqual((conversation.id, conversation.last_time), (42, 0))  # its id kept for the log
+
+    async def test_typed_request_without_spoken_reply(self):
+        client = await self.client()
+        reply = await (await client.post("/api/send", json={"text": "ferme les volets"})).json()
+        self.assertEqual((reply["response"], reply["tts_url"]), ("C'est fait.", None))
+        self.server.text_to_speech_file.assert_not_awaited()
+        self.assertEqual(self.server.exchange_log.entries[-1]["source"], "web")
+
+    async def test_exchanges_unchanged_answer_304(self):
+        client = await self.client()
+        first = await client.get("/api/exchanges")
+        etag = first.headers["ETag"]
+        self.assertEqual((await client.get("/api/exchanges", headers={"If-None-Match": etag})).status, 304)
+        self.server.exchange_log.add("web", "x", "x", "y")
+        self.assertEqual((await client.get("/api/exchanges", headers={"If-None-Match": etag})).status, 200)
+
+    async def test_timers_shown_and_cancelled_by_id(self):
+        client = await self.client()
+        manager = self.server.site.timer_manager
+        pasta = manager.start_timer(600, "pâtes", AsyncMock())
+        manager.start_alarm("7:00", None, AsyncMock())
+        state = await (await client.get("/api/state")).json()
+        self.assertEqual([(t["name"], t["alarm"]) for t in state["timers"]], [("pâtes", None), (None, "07:00")])
+        self.assertIsNone(state["music"])
+        self.assertEqual((await client.post("/api/timers/cancel", json={"id": pasta.id})).status, 200)
+        # An id it does not know: not the only timer left, as a spoken « annule le minuteur » would
+        self.assertEqual((await client.post("/api/timers/cancel", json={"id": pasta.id})).status, 404)
+        self.assertEqual(len(manager.get_timers()), 1)
+        manager.cancel_all()
 
 
 class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):

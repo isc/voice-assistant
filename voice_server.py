@@ -9,6 +9,7 @@ import datetime
 import locale
 import logging
 import os
+import re
 import signal
 import socket
 import sys
@@ -18,7 +19,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urljoin
 
 import aiohttp
@@ -34,7 +35,6 @@ from aioesphomeapi import (
 from aioesphomeapi.core import TimeoutAPIError
 from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
-from silero_vad_lite import SileroVAD
 
 import onnx_gpu
 from ha_client import LOCAL_CONFIG, asks_whole_house, compact, is_whole_house, normalize
@@ -43,6 +43,8 @@ from places import find_place
 from recordings import Recordings
 from sites import Site, load_sites
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
+from timer import Timer
+from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -129,6 +131,16 @@ def _speaker_left_on(entities: dict, urls: set[str]) -> Optional[tuple[str, str]
 
 # The result of an action on several rooms that the request did not say (AD-058)
 _WHICH_ROOM = "Rien n'a été fait : la demande ne dit pas dans quelle pièce. Demande laquelle."
+# Tool results saying nothing was done (« Appareil volet non trouvé », « Sonos ne répond pas (hors ligne) »):
+# flagged in the log, so that the web app shows them beside a reply that may claim otherwise
+_NOTHING_DONE = re.compile(
+    r"^(erreur|rien n'a été fait|rien trouvé|aucun|impossible|précise|le déverrouillage)|non (trouvée?s?|disponibles?)"
+    r"|ne répond(ent)? pas|hors ligne|inconnue?\b|n'est pas connecté|manquante?",
+    re.IGNORECASE,
+)
+# The exchange log's replies to requests that got none
+NOTHING_HEARD = "[Rien compris]"
+LLM_FAILED = "[Erreur LLM: pas de réponse]"
 
 
 def _no_speaker(room: Optional[str]) -> str:
@@ -661,13 +673,7 @@ class VoiceAssistantServer:
 
         self.audio_buffer = bytearray()
         self.is_recording = True
-        self.vad_offset = 0  # bytes of the recording the VAD has read
-        self.vad_speech_frames = 0
-        self.vad_silence_frames = 0
-        self.vad_has_speech = False
-        # Silero's state carries from one window to the next, and has no reset: kept from the
-        # previous request, it scored a clear request 0.26 instead of 0.99 (red LED)
-        self.vad = SileroVAD(16000)
+        self.speech = SpeechEnd()  # a fresh VAD for each recording
         # In follow-up mode, skip initial audio to avoid picking up TTS echo
         self.skip_audio_until = time.time() + 0.5 if self.is_followup else 0
 
@@ -708,20 +714,17 @@ class VoiceAssistantServer:
         task.add_done_callback(self._pending_service_calls.discard)
 
     async def monitor_recording_timeout(self, api: APIClient):
-        """Safety timeout. In follow-up mode, wait 5s for speech to start,
-        then extend to 30s once speech is detected."""
-        # End early if nobody speaks: 5 s in a follow-up, 8 s after a wake word (a false one kept
-        # the mic open 30 s, recording the room)
-        wait = 5.0 if self.is_followup else 8.0
+        """Safety timeout: the recording ends if nobody speaks soon enough, and at MAX_SECONDS in all."""
+        wait = WAIT_FOR_FOLLOW_UP if self.is_followup else WAIT_FOR_SPEECH
         await asyncio.sleep(wait)
         if not self.is_recording:
             return
-        if not self.vad_has_speech:
+        if not self.speech.heard:
             logger.info("No speech - stopping")
             await self.stop_recording(api, "no speech")
             return
-        # Speech detected: the normal limit for the rest, 30 s in all
-        await asyncio.sleep(30.0 - wait)
+        # Speech detected: the normal limit for the rest
+        await asyncio.sleep(MAX_SECONDS - wait)
 
         if self.is_recording:
             logger.warning("SAFETY TIMEOUT reached (30s)")
@@ -738,7 +741,7 @@ class VoiceAssistantServer:
 
         try:
             # No "thinking" if nobody spoke: the ESP would ignore the RUN_END that follows (AD-036)
-            if self.vad_has_speech:
+            if self.speech.heard:
                 api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
                 logger.info("STT_VAD_END sent - LEDs orange (thinking)")
 
@@ -830,45 +833,9 @@ class VoiceAssistantServer:
             logger.debug("Audio received after recording stopped (normal)")
 
     async def analyze_audio_vad(self):
-        """Run Silero VAD over the recording's new frames, to detect the end of speech.
-
-        Frames are cut from the whole recording, not from each chunk: the satellite's chunks have no
-        fixed size since ESPHome 2026.6, and a chunk's leftover would be lost."""
-        import array
-
-        frame_size = 512 * 2  # 32 ms at 16 kHz, int16
-
-        while self.vad_offset + frame_size <= len(self.audio_buffer):
-            frame = self.audio_buffer[self.vad_offset : self.vad_offset + frame_size]
-            self.vad_offset += frame_size
-
-            try:
-                int16_samples = array.array("h")
-                int16_samples.frombytes(frame)
-                float_samples = array.array("f", [s / 32768.0 for s in int16_samples])
-
-                speech_prob = self.vad.process(float_samples)
-                is_speech = speech_prob > 0.5
-
-                if is_speech:
-                    self.vad_speech_frames += 1
-                    self.vad_silence_frames = 0
-                    if not self.vad_has_speech:
-                        self.vad_has_speech = True
-                        logger.info("Speech detected")
-                else:
-                    if self.vad_has_speech:
-                        self.vad_silence_frames += 1
-
-                if self.vad_has_speech and self.vad_silence_frames >= 31:
-                    logger.info(f"Silence detected after speech ({self.vad_silence_frames} frames)")
-                    if self.is_recording and (api := self.device):
-                        await self.stop_recording(api, "VAD silence")
-                    return
-
-            except Exception as e:
-                logger.debug(f"VAD error: {e}")
-                continue
+        """Run the VAD over the recording's new frames; once speech has ended, the request is heard."""
+        if self.speech.read(self.audio_buffer) and self.is_recording and (api := self.device):
+            await self.stop_recording(api, "VAD silence")
 
     # === MAIN PIPELINE ===
 
@@ -886,13 +853,13 @@ class VoiceAssistantServer:
             "timings": timings,
             "audio": self.recordings.save(audio_bytes),
             "wake_word": not self.is_followup,
-            "vad_speech": self.vad_has_speech,
+            "vad_speech": self.speech.heard,
         }
 
         try:
             # 1. STT, skipped if the VAD heard no speech (AD-036)
             t0 = time.time()
-            if self.vad_has_speech:
+            if self.speech.heard:
                 transcript = await self.stt.transcribe(audio_bytes)
             else:
                 logger.info("STT skipped: the VAD heard no speech")
@@ -900,7 +867,7 @@ class VoiceAssistantServer:
             timings["stt"] = round(time.time() - t0, 2)
             entry["transcript"] = transcript
             if not transcript:
-                entry["response"] = "[Rien compris]"
+                entry["response"] = NOTHING_HEARD
                 if self.is_followup:
                     # Normal: no speech during follow-up, end conversation quietly
                     logger.info("No speech during follow-up - ending conversation")
@@ -921,7 +888,7 @@ class VoiceAssistantServer:
             timings["llm"] = round(time.time() - t0, 2)
             # Capture conversation_id now — TTS triggers ESP follow-up which overwrites it
             entry.update(
-                response=response_text or "[Erreur LLM: pas de réponse]",
+                response=response_text or LLM_FAILED,
                 tool_calls=self._last_tool_calls,
                 conversation_id=self.conversation.id,
             )
@@ -995,6 +962,8 @@ class VoiceAssistantServer:
         """Execute a function call from the LLM."""
         if function_name == "end_conversation":
             self._end_conversation = True
+            # Over: the next request starts a new one, as after a silence; this one keeps its id for the log
+            self.conversation.last_time = 0
             return "Conversation terminée"
 
         # Timers — standalone, doesn't need HA
@@ -1019,13 +988,7 @@ class VoiceAssistantServer:
             return f"Alarme programmée pour {time_str}"
 
         if function_name == "cancel_timer":
-            label = arguments.get("label")
-            timer = self.timer_manager.cancel_timer(name=label)
-            if timer:
-                from aioesphomeapi import VoiceAssistantTimerEventType
-
-                cancelled = VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED
-                await self._handle_timer_event(self.site, cancelled, timer)
+            if timer := await self.cancel_timer(name=arguments.get("label")):
                 return f"Annulé: {_describe_timer(timer)}"
             if running := self.timer_manager.get_timers():
                 names = ", ".join(map(_describe_timer, running))
@@ -1324,6 +1287,18 @@ class VoiceAssistantServer:
             "music_control resume avec room : elle continue sans changer."
         )
 
+    async def music_now(self) -> Optional[dict]:
+        """What Spotify plays and where, for the web app; None when no speaker listens to it."""
+        if not self.spotify or not self.spotify.stream.listeners or not self._spotify_at:
+            return None
+        try:
+            if not (track := await self.spotify.now_for_app()):
+                return None
+        except SpotifyError:
+            return None
+        site, target = self._spotify_at
+        return {**track, "speaker": self._speaker_name(target, site), "site": site.name}
+
     def _speaker_name(self, target: tuple[str, str], site: Optional[Site] = None) -> str:
         kind, ident = target
         ha_client = (site or self.site).ha_client
@@ -1475,6 +1450,16 @@ class VoiceAssistantServer:
         if event_type == VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_FINISHED and api:
             await self._announce_timer_finished(api, timer, site)
 
+    async def cancel_timer(self, timer_id: Optional[str] = None, name: Optional[str] = None) -> Optional[Timer]:
+        """Cancel a timer of this site by id or name (with neither, the only one), and its satellite's countdown."""
+        timer = self.timer_manager.cancel_timer(timer_id, name)
+        if timer:
+            from aioesphomeapi import VoiceAssistantTimerEventType
+
+            cancelled = VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED
+            await self._handle_timer_event(self.site, cancelled, timer)
+        return timer
+
     async def _announce_timer_finished(self, api, timer, site: Site):
         """Generate TTS and play announcement when a timer finishes."""
         if timer.is_alarm:
@@ -1562,7 +1547,7 @@ class VoiceAssistantServer:
         now = time.time()
         if now - conversation.last_time > self.CONVERSATION_TIMEOUT:
             if conversation.history:
-                logger.info("Conversation history expired, starting fresh")
+                logger.info("Conversation ended or expired, starting fresh")
             conversation.history = []
             conversation.id = None
         conversation.last_time = now
@@ -1678,6 +1663,8 @@ class VoiceAssistantServer:
 
             tool_messages = []
             for (tc_entry, result), tool_call in zip(outcomes, message["tool_calls"]):
+                if "error" in tc_entry or _NOTHING_DONE.search(result):
+                    tc_entry["failed"] = True
                 self._last_tool_calls.append(tc_entry)
                 tool_messages.append(
                     {
@@ -1778,6 +1765,82 @@ class VoiceAssistantServer:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    # === WEB APP ===
+
+    async def answer(self, text: str, source: str, timings: dict, speak: bool, audio: Optional[str] = None) -> dict:
+        """Answer a request of the web app, typed or heard by the phone (AD-059): the LLM, then, if it is to be
+        spoken, the reply's audio; logged. Returns the reply, whose `response` is None when the LLM gave none."""
+        t0 = time.time()
+        response_text = await self.process_with_llm(None, text)
+        timings["llm"] = round(time.time() - t0, 2)
+        tts_url = None
+        if response_text and speak:
+            t0 = time.time()
+            tts_url = await self.text_to_speech_file(response_text)
+            timings["tts"] = round(time.time() - t0, 2)
+        timings["total"] = round(sum(timings.values()), 2)
+        self.exchange_log.add(
+            source,
+            text,
+            text,
+            response_text or LLM_FAILED,
+            tts_url,
+            timings=timings,
+            tool_calls=self._last_tool_calls,
+            conversation_id=self.conversation.id,
+            audio=audio,
+            site=self.site.name,
+        )
+        return {
+            "input": text,
+            "response": response_text,
+            "tts_url": tts_url,
+            "timings": timings,
+            "tool_calls": self._last_tool_calls,
+            # The phone listens again after the reply, unless it said goodbye or started music
+            "follow_up": not (self._end_conversation or self._no_followup),
+        }
+
+    async def answer_recording(
+        self, audio: bytes, heard: bool, follow_up: bool, on_transcript: Callable[[str], Awaitable]
+    ) -> Optional[dict]:
+        """Answer a request the phone heard (AD-059): recorded, transcribed unless the VAD heard no speech
+        (AD-036), told to `on_transcript`, answered. None when nothing was said; errors are logged and raised."""
+        timings = {}
+        # What became of the request, beside its recording, as for the satellite's
+        entry = {"site": self.site.name, "source": "app", "follow_up": follow_up, "vad_speech": heard}
+        entry.update(audio=self.recordings.save(audio), transcript="", timings=timings)
+        try:
+            t0 = time.time()
+            entry["transcript"] = (await self.stt.transcribe(audio) if heard else None) or ""
+            timings["stt"] = round(time.time() - t0, 2)
+            await on_transcript(entry["transcript"])
+            if entry["transcript"]:
+                reply = await self.answer(entry["transcript"], "app", timings, speak=True, audio=entry["audio"])
+                entry.update(response=reply["response"], tool_calls=reply["tool_calls"])
+                return reply
+            if heard or not follow_up:  # a follow-up nobody spoke in is how conversations end
+                entry["response"] = NOTHING_HEARD
+                self.exchange_log.add(
+                    "app", "", "", NOTHING_HEARD, timings=timings, audio=entry["audio"], site=self.site.name
+                )
+            return None
+        except Exception as e:
+            entry["error"] = str(e)
+            transcript = entry["transcript"]
+            self.exchange_log.add(
+                "app",
+                transcript,
+                transcript,
+                f"[Erreur: {e}]",
+                timings=timings,
+                audio=entry["audio"],
+                site=self.site.name,
+            )
+            raise
+        finally:
+            self.recordings.describe(entry["audio"], entry)
+
     # === TTS ===
 
     async def text_to_speech_file(self, text: str, site: Optional[Site] = None) -> str:
@@ -1813,10 +1876,6 @@ class VoiceAssistantServer:
             t0 = time.time()
             await self._announce(api, url, follow_up=follow_up)
             play_time = time.time() - t0
-            if self._end_conversation:
-                self.conversation.history = []
-                self.conversation.id = None
-                logger.info("Conversation ended, history cleared")
 
             timings = {"gen": round(gen_time, 2), "play": round(play_time, 2)}
             logger.info(f"TTS done: gen={timings['gen']}s play={timings['play']}s")

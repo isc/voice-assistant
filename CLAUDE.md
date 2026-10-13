@@ -7,7 +7,8 @@ Production runs on a Linux server ([Deployment](#deployment-and-service-manageme
 ## Architecture
 
 ```
-ESP (wake word) → audio stream → voice_server.py
+ESP (wake word) ─┐
+Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
                                    ├─ stt.py (Parakeet: onnx-asr on CUDA, MLX on a Mac) → transcript
                                    ├─ llm.py (OpenAI-compatible: Ollama, or cloud) → tool calls or text
                                    │    ├─ ha_client.py → Home Assistant REST API
@@ -17,7 +18,7 @@ ESP (wake word) → audio stream → voice_server.py
                                    │    ├─ spotify.py → go-librespot (playback) + Spotify Web API (search)
                                    │    └─ images.py → Wikipedia / Openverse (free, no key) → cast to a Nest Hub
                                    ├─ tts.py (Kokoro-82M) → FLAC file
-                                   └─ web_ui.py → debug UI on :8888
+                                   └─ web_ui.py → the web app on :8888 (static/index.html)
 ```
 
 ## Files
@@ -38,7 +39,9 @@ ESP (wake word) → audio stream → voice_server.py
 | `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
 | `images.py` | Pictures for the screen: Wikipedia article's lead image, else an Openverse photo; the screen loads the URL itself |
 | `recordings.py` | Each voice request kept as WAV + JSON (transcript, reply, tool calls, timings) for 90 days, root-only |
-| `web_ui.py` | Web UI (HTML + routes), exchange log with persistence (`exchanges.json`) |
+| `web_ui.py` | Web app routes: the phone as a satellite (`/api/listen`, a WebSocket), typed requests, timers and music, exchange log with persistence (`exchanges.json`) |
+| `static/index.html` | The web app, a PWA: voice and typed requests, the conversation, timers and music now, shortcuts, technical details on demand |
+| `vad.py` | End of speech by Silero VAD, for the satellite's recordings and the phone's |
 | `requirements-linux.txt` / `requirements-mac.txt` | Base deps (`requirements.txt`) plus the STT backend: onnx-asr (server) or parakeet-mlx (Mac) |
 | `run.sh` | Mac dev launcher: sources `.env`, reads secrets from the macOS Keychain, starts llama-server unless a cloud key is set |
 | `ctl.sh` | Mac dev service control via launchd; `./ctl.sh install` generates the (gitignored) plist |
@@ -66,12 +69,13 @@ ESP (wake word) → audio stream → voice_server.py
 - **Conversation history**: per site, last 5 exchanges with their tool calls and results (capped), expires after 10 min inactivity (`CONVERSATION_TIMEOUT`). Dry runs keep a conversation of their own (`Site.dry_run`) and never read, extend or end the live one; `/api/reset-conversation` clears only theirs (AD-047).
 - **GPU memory**: Ollama keeps ~8.6 GB of the 16 GB card. STT and TTS run on one thread (`onnx_gpu.run`), and the arenas of Kokoro and Parakeet's encoder shrink after each run: the voice server stays at ~4.2 GB, 4.9 GB during a run. Left to grow, the arenas reached 7.2 GB and the card ran out (AD-053). A model that finds no room at startup loads on the CPU (STT 5×, TTS 10× slower) with an ERROR in the log and `degraded` in `/health`, and the server tries CUDA again every minute between requests (AD-055).
 - **Static system prompt**: date/time, timers and music go in a context message just before the request, not in the system prompt, so that Ollama reuses its prompt cache (a new minute re-read ~3.6K tokens, ~1.9 s). The server pins the model with a native `keep_alive: -1` after each request.
+- **The phone as a satellite** (AD-059): the web app streams its microphone (16 kHz PCM, AudioWorklet) over `/api/listen`; the server runs the satellite's VAD, STT, LLM and TTS, and the phone plays the reply then listens again for a follow-up. Browser noise suppression off: it garbled Parakeet's input. WebSocket handshakes must carry this server's `Origin` (`cross_site_guard`), which AD-056's JSON rule does not cover. Typed requests (`/api/send`) get no TTS. Tool results saying nothing was done are flagged `failed` in the log (`_NOTHING_DONE`), and the app shows them.
 - **Continuous conversation**: after TTS playback, ESP starts listening for follow-up without wake word. 500ms audio skip avoids TTS echo. `end_conversation` tool lets the LLM end cleanly on "merci", "bonne nuit", etc.
 - **Text fallback parser**: catches when the LLM outputs tool calls as plain text instead of structured JSON (3 patterns: JSON args, quoted string, Python kwargs; never in dry runs).
 - **Ducking**: from wake word to transcription, the HA speakers playing at the site are turned down to a fifth of their volume (the Voice PE ducks only its own speaker), and back up once the request is heard; the media tools wait for it, so that « monte le son » starts from their real volume (AD-049).
 - **Spotify as a radio station**: go-librespot (separate service) plays into a FIFO; `spotify.py` paces it at real time, pads gaps with silence, encodes MP3 and serves `/spotify/stream.mp3` next to `/tts/`. Speakers (ESP or HA) play that URL; one stream, so one speaker at a time. Search results are ranked again on the request's words, number and key (« do mineur » = « C minor »), and a screen gets the title, artist and cover of what was asked, not updated at each track (AD-057).
 - **Locks lock, never unlock**: a `lock` tool and state reads, no unlock tool. Only the tools offered this turn run, and `HAClient.call_service` refuses `lock.unlock` and `lock.open` (AD-041).
-- **Web UI on the tailnet, or the internet with a key**: port 8888 also answers on the LAN, where speakers fetch `/tts/` and `/spotify/stream.mp3`; everything else (UI, API, recordings) answers localhost and the tailnet. Tailscale Funnel publishes it at `https://charras-server.tailcef78d.ts.net/assistant/`, where a request (told apart by the proxy's headers) needs the `WEB_UI_KEY` cookie, dropped by `?k=<key>` (`web_ui.access_control`, AD-048). Hence relative URLs in `static/`: the app lives at `/` and at `/assistant/`. Pages of other sites open in a browser there cannot use it: POSTs take a JSON body only, and the Host must be an IP address, `localhost`, the machine's name or a `*.ts.net` name (`web_ui.cross_site_guard`, AD-056).
+- **Web UI on the tailnet, or the internet with a key**: port 8888 also answers on the LAN, where speakers fetch `/tts/` and `/spotify/stream.mp3`; everything else (UI, API, recordings) answers localhost and the tailnet. Tailscale Funnel publishes it at `https://charras-server.tailcef78d.ts.net/assistant/`, where a request (told apart by the proxy's headers) needs the `WEB_UI_KEY` cookie, dropped by `?k=<key>` (`web_ui.access_control`, AD-048). Hence relative URLs in `static/`: the app lives at `/` and at `/assistant/`. The microphone needs HTTPS, so voice works through Funnel only. Pages of other sites open in a browser there cannot use it: POSTs take a JSON body only, and the Host must be an IP address, `localhost`, the machine's name or a `*.ts.net` name (`web_ui.cross_site_guard`, AD-056).
 - **Secrets**: the server only reads env vars: `/etc/voice-assistant.env` on the server, the Keychain (`voice-assistant-ha-token`, `voice-assistant-openai-key`) through `run.sh` on a Mac.
 
 ## Configuration (env vars)

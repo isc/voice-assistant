@@ -2,216 +2,952 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- resizes-content: the keyboard shrinks the page, so the composer stays above it (Chrome 108+) -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Voice">
-<meta name="theme-color" content="#0a84ff">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1013" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="static/apple-touch-icon.png">
 <title>Voice Assistant</title>
 <style>
   :root {
-    --bg: #fff; --bg2: #f5f5f7; --bg3: #e8e8ed;
-    --fg: #1d1d1f; --fg2: #6e6e73; --fg3: #aeaeb2;
-    --accent: #007aff; --accent2: #34c759; --border: #d2d2d7;
-    --card: #fff; --card-border: #e5e5ea;
+    color-scheme: light dark;
+    --bg: #f4f5f7; --surface: #fff; --surface-2: #eceef2; --line: #e1e4ea;
+    --text: #14171c; --text-2: #5b6170; --text-3: #949bab;
+    --accent: #0a7cff; --accent-2: #0062d6; --on-accent: #fff;
+    --soft: #e4eefe; --on-soft: #0b3d80; --bubble: #0a72ea;
+    --warn: #b54708; --warn-soft: #fff0e3; --bad: #d92d20; --good: #16a34a;
+    --shadow: 0 1px 2px rgb(16 24 40 / .05), 0 2px 8px rgb(16 24 40 / .06);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #1c1c1e; --bg2: #2c2c2e; --bg3: #3a3a3c;
-      --fg: #f5f5f7; --fg2: #98989d; --fg3: #636366;
-      --accent: #0a84ff; --accent2: #30d158; --border: #38383a;
-      --card: #2c2c2e; --card-border: #38383a;
+      --bg: #0e1013; --surface: #1a1d23; --surface-2: #252930; --line: #2b3039;
+      --text: #eef0f4; --text-2: #a4abb8; --text-3: #6c7381;
+      --accent: #3d95ff; --accent-2: #2a7fe8;
+      --soft: #172a49; --on-soft: #cfe0ff; --bubble: #1d6fd8;
+      --warn: #f6a161; --warn-soft: #3a2415; --bad: #ff6b5e; --good: #3ccb7f;
+      --shadow: none;
     }
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif; background: var(--bg); color: var(--fg); height: 100dvh; height: 100vh; display: flex; flex-direction: column; -webkit-text-size-adjust: 100%; }
-  @supports (height: 100dvh) { body { height: 100dvh; } }
-  .container { width: 100%; max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; height: 100%; }
-  header { padding: 14px 20px; padding-top: calc(14px + env(safe-area-inset-top, 0px)); background: var(--bg2); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
-  header h1 { font-size: 17px; font-weight: 600; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); }
-  #install { margin-left: auto; background: var(--accent); color: #fff; border: none; padding: 6px 14px; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
-  #exchanges { flex: 1; overflow-y: auto; padding: 12px 20px; display: flex; flex-direction: column; gap: 16px; }
-  .conversation { display: flex; flex-direction: column; gap: 2px; }
-  .conversation .exchange:first-child { border-radius: 10px 10px 4px 4px; }
-  .conversation .exchange:last-child { border-radius: 4px 4px 10px 10px; }
-  .conversation .exchange:only-child { border-radius: 10px; }
-  .conversation .exchange:not(:first-child):not(:last-child) { border-radius: 4px; }
-  .exchange { background: var(--card); border: 1px solid var(--card-border); padding: 12px 14px; overflow-wrap: anywhere; }
-  .meta { font-size: 11px; color: var(--fg2); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
-  .badge { padding: 1px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
-  .badge.voice { background: var(--accent); color: #fff; }
-  .badge.web { background: var(--accent2); color: #fff; }
-  .timings { margin-left: auto; font-family: SF Mono, Menlo, monospace; font-size: 10px; color: var(--fg3); }
-  .input-line { color: var(--fg2); margin-bottom: 4px; font-size: 14px; }
-  .response-line { color: var(--fg); font-weight: 500; font-size: 15px; }
-  .actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
-  .actions button { background: var(--bg2); border: 1px solid var(--border); color: var(--fg2); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; min-height: 36px; }
-  .actions button:hover { border-color: var(--accent); color: var(--accent); }
-  .debug { display: none; margin-top: 8px; padding: 8px 10px; background: var(--bg2); border-radius: 6px; font-family: SF Mono, Menlo, monospace; font-size: 11px; color: var(--fg2); line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
-  .debug.open { display: block; }
-  .debug .label { color: var(--fg3); }
-  .debug .val { color: var(--fg); }
-  .debug .tc { margin-top: 4px; padding: 4px 6px; background: var(--bg3); border-radius: 4px; }
-  .empty { color: var(--fg3); text-align: center; margin-top: 40px; font-size: 14px; }
-  #input-bar { padding: 10px 20px; padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); background: var(--bg2); border-top: 1px solid var(--border); display: flex; gap: 8px; }
-  #input-bar input { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--border); color: var(--fg); padding: 10px 14px; border-radius: 10px; font-size: 16px; outline: none; }
-  #input-bar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
-  #input-bar button { background: var(--accent); color: #fff; border: none; padding: 10px 20px; border-radius: 10px; font-weight: 600; cursor: pointer; font-size: 16px; min-height: 44px; }
-  #input-bar button:disabled { opacity: 0.4; cursor: not-allowed; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  .i { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .i.fill { fill: currentColor; stroke: none; }
+  .app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; max-width: 680px; margin: 0 auto; }
+
+  /* Header */
+  header { display: flex; align-items: center; gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 16px 8px; }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: -.01em; margin: 0; display: flex; align-items: center; gap: 8px; }
+  .net { width: 8px; height: 8px; border-radius: 50%; background: var(--good); transition: background .3s; }
+  .offline .net { background: var(--bad); }
+  .offline-note { display: none; font-size: 13px; color: var(--bad); font-weight: 500; }
+  .offline .offline-note { display: inline; }
+  .site { display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 10px; border-radius: 15px; background: var(--surface-2); color: var(--text-2); font-size: 14px; font-weight: 500; }
+  .site .i { width: 15px; height: 15px; }
+  select.site { appearance: none; border: 0; padding-right: 26px; background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23889' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 8px center / 14px; font: inherit; font-size: 14px; color: var(--text-2); font-weight: 500; }
+  .spacer { flex: 1; }
+  .pill-btn { height: 32px; padding: 0 12px; border-radius: 16px; background: var(--accent); color: var(--on-accent); font-size: 14px; font-weight: 600; }
+  .icon-btn { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; color: var(--text-2); }
+  .icon-btn:active { background: var(--surface-2); }
+
+  /* What runs now: timers, music */
+  #live { display: flex; gap: 8px; overflow-x: auto; padding: 2px 16px 10px; scrollbar-width: none; }
+  #live::-webkit-scrollbar { display: none; }
+  #live:empty { display: none; }
+  .card { flex: none; display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 6px 0 12px; border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); border: 1px solid var(--line); max-width: 86vw; }
+  .card .what { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+  .card b { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card small { font-size: 12.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card .count { font-variant-numeric: tabular-nums; }
+  .card .ic { color: var(--accent); }
+  .card img { width: 38px; height: 38px; border-radius: 8px; object-fit: cover; flex: none; background: var(--surface-2); }
+  .card button { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; color: var(--text-2); flex: none; }
+  .card button:active { background: var(--surface-2); }
+  .card.done { border-color: var(--accent); }
+
+  /* The conversation */
+  #thread { flex: 1; overflow-y: auto; padding: 4px 16px 12px; overscroll-behavior: contain; scroll-behavior: auto; }
+  .day { text-align: center; font-size: 12.5px; font-weight: 600; color: var(--text-3); margin: 18px 0 6px; }
+  .conv { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; }
+  .conv + .conv { border-top: 1px dashed var(--line); margin-top: 6px; padding-top: 12px; }
+  .msg { display: flex; flex-direction: column; max-width: 86%; }
+  .msg.user { align-self: flex-end; align-items: flex-end; margin-top: 6px; }
+  .msg.bot { align-self: flex-start; align-items: flex-start; }
+  .who { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-3); margin: 0 6px 3px; }
+  .who .i { width: 13px; height: 13px; }
+  .bubble { padding: 9px 14px; border-radius: 20px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .user .bubble { background: var(--bubble); color: #fff; border-bottom-right-radius: 6px; }
+  .user.from-voice .bubble { background: var(--soft); color: var(--on-soft); }
+  .user .bubble.unheard { background: transparent; border: 1px dashed var(--line); color: var(--text-3); font-style: italic; }
+  .bot .bubble { background: var(--surface); box-shadow: var(--shadow); border: 1px solid var(--line); border-bottom-left-radius: 6px; }
+  .bot .bubble.failed { background: transparent; box-shadow: none; color: var(--text-2); font-style: italic; }
+  .acts { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 2px 0; }
+  .act { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 9px 3px 7px; border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: 12.5px; line-height: 1.3; }
+  .act .i { width: 14px; height: 14px; }
+  .act span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .act.warn { background: var(--warn-soft); color: var(--warn); }
+  .act.warn span { white-space: normal; }
+  .typing { display: inline-flex; gap: 4px; padding: 14px 16px; }
+  .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); animation: blink 1.2s infinite both; }
+  .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
+  .debug { margin: 6px 2px 0; padding: 8px 10px; border-radius: 10px; background: var(--surface-2); color: var(--text-2); font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+  .debug .call { color: var(--text); }
+  .debug button { margin: 6px 6px 0 0; padding: 4px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); font: 12px system-ui, sans-serif; color: var(--text-2); }
+  .hello { text-align: center; color: var(--text-2); padding: 12vh 12px 0; }
+  .hello .mark { width: 64px; height: 64px; border-radius: 20px; margin: 0 auto 14px; display: grid; place-items: center; background: var(--soft); color: var(--accent); }
+  .hello .mark .i { width: 30px; height: 30px; }
+  .hello h2 { color: var(--text); font-size: 22px; margin: 0 0 6px; }
+  .hello p { margin: 0 0 18px; }
+  .hello button { display: block; margin: 8px auto; padding: 8px 14px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); color: var(--text-2); font-size: 14.5px; }
+
+  /* Dock: shortcuts, composer, voice */
+  .dock { padding: 6px 12px calc(10px + env(safe-area-inset-bottom)); position: relative; }
+  #shortcuts { display: flex; gap: 6px; overflow-x: auto; padding: 2px 4px 8px; scrollbar-width: none; }
+  #shortcuts::-webkit-scrollbar { display: none; }
+  #shortcuts:empty { display: none; }
+  .chip { flex: none; max-width: 70vw; height: 34px; padding: 0 13px; border-radius: 17px; background: var(--surface); border: 1px solid var(--line); color: var(--text); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--shadow); }
+  .chip:active { background: var(--soft); }
+  .composer { display: flex; align-items: center; gap: 6px; padding: 5px 5px 5px 18px; border-radius: 28px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); }
+  .composer:focus-within { border-color: var(--accent); }
+  .composer input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 16px; padding: 10px 0; }
+  .composer input::placeholder { color: var(--text-3); }
+  #go { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); flex: none; transition: transform .1s; }
+  #go:active { transform: scale(.94); }
+  #go .i { width: 22px; height: 22px; }
+  #go .send, .typed #go .mic { display: none; }
+  .typed #go .send { display: block; }
+  #go.nudge { animation: nudge 1s ease-in-out 3; }
+  @keyframes nudge { 50% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent) 25%, transparent); } }
+
+  #voice { display: none; flex-direction: column; align-items: center; gap: 10px; padding: 6px 0 2px; }
+  .voicing #voice { display: flex; }
+  .voicing #shortcuts, .voicing .composer { display: none; }
+  #voice-status { font-size: 15px; color: var(--text-2); min-height: 21px; font-weight: 500; }
+  .orb { position: relative; width: 96px; height: 96px; border-radius: 50%; display: grid; place-items: center; --level: 0; }
+  .orb .halo { position: absolute; inset: 6px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 22%, transparent); transform: scale(calc(1 + var(--level) * .5)); transition: transform 80ms linear; }
+  .orb .core { position: absolute; inset: 12px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: radial-gradient(circle at 34% 28%, #6cb2ff, var(--accent) 58%, var(--accent-2)); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 38%, transparent); transform: scale(calc(1 + var(--level) * .08)); transition: transform 80ms linear; }
+  .orb .core .i { width: 30px; height: 30px; }
+  .orb .core .i:not(.now) { display: none; }
+  .orb .ring { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); pointer-events: none; }
+  .orb .ring circle { fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 289; stroke-dashoffset: 289; opacity: 0; }
+  [data-voice=followup] .orb .ring circle { opacity: .9; stroke-dashoffset: 0; animation: deplete 5s linear forwards; }
+  @keyframes deplete { to { stroke-dashoffset: 289; } }
+  [data-voice=thinking] .orb .halo { animation: breathe 1.3s ease-in-out infinite; }
+  [data-voice=thinking] .orb .core::after { content: ""; position: absolute; inset: -7px; border-radius: 50%; border: 3px solid transparent; border-top-color: var(--accent); animation: spin .8s linear infinite; }
+  @keyframes breathe { 50% { transform: scale(1.18); opacity: .6; } }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #voice-cancel { height: 34px; padding: 0 16px; border-radius: 17px; color: var(--text-2); font-size: 14.5px; font-weight: 500; }
+  #voice-cancel:active { background: var(--surface-2); }
+  [data-voice=thinking] #voice-cancel { visibility: hidden; }
+
+  #toast { position: absolute; left: 50%; bottom: calc(100% + 4px); transform: translate(-50%, 8px); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 18px; font-size: 14.5px; white-space: nowrap; max-width: 92vw; overflow: hidden; text-overflow: ellipsis; }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+  /* Settings */
+  dialog { border: 0; padding: 0; width: min(680px, 100%); max-width: 100%; margin: auto auto 0; border-radius: 22px 22px 0 0; background: var(--surface); color: var(--text); padding-bottom: env(safe-area-inset-bottom); }
+  dialog::backdrop { background: rgb(0 0 0 / .35); }
+  dialog h2 { font-size: 17px; margin: 0; padding: 18px 20px 6px; }
+  .row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 20px; text-align: left; }
+  .row > span { flex: 1; display: flex; flex-direction: column; }
+  .row small { color: var(--text-2); font-size: 13px; }
+  button.row:active { background: var(--surface-2); }
+  .switch { appearance: none; width: 46px; height: 28px; border-radius: 14px; background: var(--surface-2); position: relative; transition: background .2s; flex: none; margin: 0; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / .3); transition: transform .2s; }
+  .switch:checked { background: var(--accent); }
+  .switch:checked::after { transform: translateX(18px); }
+  #health { margin: 4px 20px 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: 13px; line-height: 1.6; }
+  #health b { color: var(--text); font-weight: 600; }
+  dialog .done { display: block; width: calc(100% - 40px); margin: 14px 20px 16px; height: 46px; border-radius: 23px; background: var(--surface-2); font-weight: 600; }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition: none !important; }
+  }
 </style>
 </head>
 <body>
-<div class="container">
-<header>
-  <div class="dot"></div>
-  <h1>Voice Assistant</h1>
-  <button id="install" hidden>Installer</button>
-</header>
-<div id="exchanges"><div class="empty">Aucun echange pour le moment</div></div>
-<div id="input-bar">
-  <select id="site" hidden aria-label="Maison"></select>
-  <input type="text" id="cmd" placeholder="Commande..." autocomplete="off">
-  <button id="send-btn">Envoyer</button>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M8 21h8"/></symbol>
+  <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></symbol>
+  <symbol id="i-speaker" viewBox="0 0 24 24"><rect x="6" y="3" width="12" height="18" rx="4"/><circle cx="12" cy="14" r="3"/><path d="M12 7.5h.01"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></symbol>
+  <symbol id="i-keys" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></symbol>
+  <symbol id="i-bulb" viewBox="0 0 24 24"><path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7c.6.5 1 1.2 1 2V18h6v-1.3c0-.8.4-1.5 1-2A7 7 0 0 0 12 2z"/></symbol>
+  <symbol id="i-blinds" viewBox="0 0 24 24"><path d="M3 3h18M5 3v18M19 3v18M5 7h14M5 11h14M5 15h14"/></symbol>
+  <symbol id="i-thermo" viewBox="0 0 24 24"><path d="M14 14.8V4a2 2 0 1 0-4 0v10.8a4 4 0 1 0 4 0z"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4M3.3 19a10 10 0 1 1 17.4 0"/></symbol>
+  <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M10 2h4"/></symbol>
+  <symbol id="i-alarm" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3 2 6M22 6l-3-3"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 22s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></symbol>
+  <symbol id="i-note" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></symbol>
+  <symbol id="i-radio" viewBox="0 0 24 24"><rect x="2" y="8" width="20" height="13" rx="2"/><path d="m6 8 10-5M6 12h3M6 16h3"/><circle cx="15" cy="14.5" r="3"/></symbol>
+  <symbol id="i-vol" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4zM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></symbol>
+  <symbol id="i-tool" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12.5-7.5z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6.5 4h4v16h-4zM13.5 4h4v16h-4z"/></symbol>
+  <symbol id="i-next" viewBox="0 0 24 24"><path d="M5 5v14l10-7zM17 5h2.5v14H17z"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="6" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="18" cy="12" r="2"/></symbol>
+</svg>
+
+<div class="app" id="app">
+  <header>
+    <h1><span class="net" aria-hidden="true"></span>Assistant</h1>
+    <span id="site-slot"></span>
+    <span class="offline-note">Hors connexion</span>
+    <span class="spacer"></span>
+    <button id="install" class="pill-btn" hidden>Installer</button>
+    <button id="menu-btn" class="icon-btn" aria-label="Réglages"><svg class="i fill"><use href="#i-dots"/></svg></button>
+  </header>
+  <section id="live" aria-label="En cours"></section>
+  <main id="thread" aria-live="polite"></main>
+  <footer class="dock" id="dock">
+    <div id="toast" role="status"></div>
+    <div id="shortcuts" aria-label="Raccourcis"></div>
+    <form class="composer" id="composer" autocomplete="off">
+      <input id="cmd" type="text" placeholder="Demandez quelque chose…" enterkeyhint="send" aria-label="Demande">
+      <button id="go" type="submit" aria-label="Parler">
+        <svg class="i mic"><use href="#i-mic"/></svg>
+        <svg class="i send"><use href="#i-send"/></svg>
+      </button>
+    </form>
+    <div id="voice">
+      <div id="voice-status" aria-live="assertive"></div>
+      <button class="orb" id="orb" aria-label="J'ai fini de parler">
+        <span class="halo"></span>
+        <span class="core">
+          <svg class="i" data-for="listening hearing followup"><use href="#i-mic"/></svg>
+          <svg class="i fill" data-for="thinking"><use href="#i-dots"/></svg>
+          <svg class="i fill" data-for="speaking"><use href="#i-stop"/></svg>
+        </span>
+        <svg class="ring" viewBox="0 0 100 100"><circle cx="50" cy="50" r="46"/></svg>
+      </button>
+      <button id="voice-cancel" type="button">Annuler</button>
+    </div>
+  </footer>
 </div>
-</div>
+
+<dialog id="menu">
+  <form method="dialog">
+    <h2>Réglages</h2>
+    <label class="row"><span><b>Détails techniques</b><small>Latences, appels d'outils, enregistrements, demandes vides</small></span><input type="checkbox" class="switch" id="opt-debug"></label>
+    <button type="button" class="row" id="opt-forget"><span><b>Oublier les raccourcis</b><small>Les demandes fréquentes proposées au-dessus du champ</small></span></button>
+    <div id="health">…</div>
+    <button class="done" value="close">Fermer</button>
+  </form>
+</dialog>
+
 <script>
-const ex = document.getElementById('exchanges');
-const cmd = document.getElementById('cmd');
-const siteSel = document.getElementById('site');
-// Several homes: a typed command goes to the one chosen here, never silently to the other. On one
-// home's Wi-Fi the server knows which (from its internet address) and sends commands there itself
-fetch('api/sites').then(r => r.json()).then(({sites, here}) => {
-  if (here) document.querySelector('h1').textContent += ' · ' + here;
-  if (here || sites.length < 2) return;
-  siteSel.innerHTML = sites.map(n => '<option>' + esc(n) + '</option>').join('');
-  siteSel.hidden = false;
-}).catch(() => {});
-const btn = document.getElementById('send-btn');
-let lastHash = '';
+'use strict';
+const $ = (id) => document.getElementById(id);
+const app = $('app'), thread = $('thread'), cmd = $('cmd'), dock = $('dock');
+const store = {
+  get(key, fallback) { try { const v = localStorage.getItem(key); return v == null ? fallback : JSON.parse(v); } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+};
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="#i-${name}"/></svg>`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Only after a tap: Chrome refuses it before, with a console error
+const vibrate = (ms) => { if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.(ms); };
 
-function esc(s) { const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+let toastTimer;
+function toast(text) {
+  const t = $('toast');
+  t.textContent = text;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+}
 
-function fmtTimings(t) {
-  if (!t || !Object.keys(t).length) return '';
-  const parts = [];
-  if (t.stt != null) parts.push('STT ' + t.stt + 's');
-  if (t.llm != null) parts.push('LLM ' + t.llm + 's');
-  if (t.tts != null) parts.push('TTS ' + t.tts + 's');
-  if (t.total != null) parts.push('= ' + t.total + 's');
-  return parts.join(' | ');
+async function post(path, body) {
+  const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+// ---------------------------------------------------------------- Homes
+// Several homes: requests go to the one chosen here, never silently to the other. On a home's Wi-Fi
+// the server knows which, from its internet address (AD-050)
+let sites = [], here = null, site = store.get('va.site', null);
+const withSite = (params = {}) => (site ? {...params, site} : params);
+
+async function loadSites() {
+  try {
+    const r = await fetch('api/sites');
+    ({sites, here} = await r.json());
+  } catch { return; }
+  if (here) site = here;
+  else if (!sites.includes(site)) site = sites[0] || null;
+  const slot = $('site-slot');
+  if (sites.length < 2) slot.innerHTML = '';
+  else if (here) slot.innerHTML = `<span class="site" title="Le Wi-Fi de la maison">${icon('home')}${esc(cap(here))}</span>`;
+  else {
+    slot.innerHTML = `<select class="site" aria-label="Maison">${sites.map((n) => `<option value="${esc(n)}"${n === site ? ' selected' : ''}>${esc(cap(n))}</option>`).join('')}</select>`;
+    slot.firstChild.addEventListener('change', (e) => { site = e.target.value; store.set('va.site', site); render(true); refreshLive(); });
+  }
+  render();
+}
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+// ---------------------------------------------------------------- The conversation
+let entries = [], lastBody = null, pending = [];
+let debug = store.get('va.debug', false);
+
+const SOURCES = {
+  voice: ['speaker', 'Voice PE'],
+  app: ['phone', 'Téléphone'],
+  web: ['keys', 'Écrit'],
+};
+// Each tool as a verb, an icon, and what of its arguments names the target
+const TOOLS = {
+  turn_on: ['Allumer', 'bulb'], turn_off: ['Éteindre', 'bulb'],
+  open_cover: ['Ouvrir', 'blinds'], close_cover: ['Fermer', 'blinds'], set_cover_position: ['Régler', 'blinds'],
+  set_temperature: ['Chauffage', 'thermo'], lock: ['Verrouiller', 'lock'],
+  get_state: ['État', 'eye'], get_sensor: ['Capteur', 'gauge'],
+  set_timer: ['Minuteur', 'timer'], set_alarm: ['Alarme', 'alarm'], cancel_timer: ['Annuler', 'timer'],
+  get_weather: ['Météo', 'sun'], find_place: ['Lieu', 'pin'],
+  query_calendar: ['Agenda', 'cal'], create_event: ['Nouvel événement', 'cal'],
+  play_music: ['Spotify', 'note'], music_control: ['Spotify', 'note'], play_radio: ['Radio', 'radio'],
+  stop_media: ['Stop', 'vol'], set_volume: ['Volume', 'vol'], change_volume: ['Volume', 'vol'],
+  show_image: ['Image', 'image'],
+};
+const ACTIONS = {pause: 'pause', resume: 'reprise', next: 'suivant', previous: 'précédent', current: 'en cours', up: 'plus fort', down: 'moins fort'};
+
+function describeCall(tc) {
+  const [verb, ic] = TOOLS[tc.function] || [tc.function, 'tool'];
+  const a = tc.args || {};
+  const pct = (v) => (v == null ? null : v + ' %');
+  const target = [
+    a.entity, a.room, a.query, a.station, a.location, a.title, a.label,
+    a.duration_minutes && a.duration_minutes + ' min', a.time, shortDate(a.start_date), shortDate(a.start_datetime),
+    ACTIONS[a.action] || ACTIONS[a.direction], pct(a.level), pct(a.position), pct(a.brightness),
+    a.temperature != null && a.temperature + ' °C',
+  ].filter(Boolean);
+  // Nothing done, by the server's reading of the result: shown, so that a reply claiming otherwise is caught
+  const failed = tc.failed || tc.error;
+  const text = failed ? `${verb} · ${tc.result || 'erreur'}` : [verb, ...target].join(' · ');
+  return `<span class="act${failed ? ' warn' : ''}" title="${esc(tc.result || '')}">${icon(failed ? 'warn' : ic)}<span>${esc(text)}</span></span>`;
+}
+
+function shortDate(value) {
+  const d = new Date(typeof value === 'string' ? value.replace(' ', 'T') : NaN);
+  if (isNaN(d)) return null;
+  const day = {weekday: 'short', day: 'numeric', month: 'short'};
+  return /\d:\d\d/.test(value) ? d.toLocaleString('fr-FR', {...day, hour: '2-digit', minute: '2-digit'}) : d.toLocaleDateString('fr-FR', day);
 }
 
 function fmtDebug(e) {
-  let s = '';
-  if (e.timings && Object.keys(e.timings).length) {
-    s += '<span class="label">Latence:</span> <span class="val">' + fmtTimings(e.timings) + '</span>\n';
+  const t = e.timings || {};
+  const s = (k) => (t[k] != null ? `${t[k].toString().replace('.', ',')} s` : null);
+  const lines = [];
+  const times = [['STT', s('stt')], ['LLM', s('llm')], ['TTS', s('tts_gen') || s('tts')], ['total', s('total')]].filter((x) => x[1]);
+  if (times.length) lines.push(times.map(([k, v]) => `${k} ${v}`).join(' · '));
+  for (const tc of e.tool_calls || []) {
+    lines.push(`<span class="call">${esc(tc.function)}(${esc(JSON.stringify(tc.args))})</span>\n  → ${esc(tc.error ? '!! ' + tc.error : tc.result)}`);
   }
-  if (e.tool_calls && e.tool_calls.length) {
-    s += '<span class="label">Tool calls:</span>\n';
-    e.tool_calls.forEach(tc => {
-      s += '<div class="tc">' + esc(tc.function) + '(' + esc(JSON.stringify(tc.args)) + ')';
-      if (tc.result) s += '\n  -> ' + esc(tc.result);
-      if (tc.error) s += '\n  !! ' + esc(tc.error);
-      s += '</div>';
-    });
+  const age = (Date.now() - when(e)) / 1000;
+  let buttons = '';
+  if (e.audio) buttons += `<button data-play="recordings/${esc(e.audio)}">▶ La demande</button>`;
+  // Replies are deleted 10 minutes after being written (tts.py)
+  if (e.tts_url && age < 600) buttons += `<button data-play="tts/${esc(e.tts_url.split('/').pop())}">▶ La réponse</button>`;
+  return lines.length || buttons ? `<div class="debug">${lines.join('\n')}${buttons ? '\n' + buttons : ''}</div>` : '';
+}
+
+const when = (e) => new Date(e.timestamp.replace(' ', 'T'));
+const timeFormat = new Intl.DateTimeFormat('fr-FR', {hour: '2-digit', minute: '2-digit'});
+const dayFormat = new Intl.DateTimeFormat('fr-FR', {weekday: 'long', day: 'numeric', month: 'long'});
+const hhmm = (d) => timeFormat.format(d);
+function dayLabel(d) {
+  const days = Math.round((new Date().setHours(0, 0, 0, 0) - new Date(d).setHours(0, 0, 0, 0)) / 864e5);
+  if (days === 0) return "Aujourd'hui";
+  if (days === 1) return 'Hier';
+  return cap(dayFormat.format(d));
+}
+
+function visible(e) {
+  if (sites.length > 1 && site && e.site && e.site !== site) return false;
+  // False wakes of the satellite: nothing said, nothing done
+  return debug || e.input || e.response !== '[Rien compris]';
+}
+
+function userMsg(input, source, time) {
+  const [ic, label] = SOURCES[source] || SOURCES.web;
+  const who = time === null ? '' : `<div class="who">${icon(ic)}${esc(label)}${time ? ' · ' + time : ''}</div>`;
+  const bubble = input ? `<div class="bubble">${esc(input)}</div>` : '<div class="bubble unheard">rien entendu</div>';
+  return `<div class="msg user${source === 'voice' ? ' from-voice' : ''}">${who}${bubble}</div>`;
+}
+
+function botMsg(e) {
+  const r = e.response || '';
+  let bubble;
+  if (r === '[Rien compris]') bubble = '<div class="bubble failed">Rien compris</div>';
+  else if (r.startsWith('[Erreur')) bubble = `<div class="bubble failed">${esc(r.startsWith('[Erreur LLM') ? 'Pas de réponse du modèle' : r.slice(1, -1))}</div>`;
+  else bubble = `<div class="bubble">${esc(r)}</div>`;
+  const calls = (e.tool_calls || []).filter((tc) => tc.function !== 'end_conversation');
+  const acts = calls.length ? `<div class="acts">${calls.map(describeCall).join('')}</div>` : '';
+  return `<div class="msg bot">${bubble}${acts}${debug ? fmtDebug(e) : ''}</div>`;
+}
+
+const typing = '<div class="msg bot"><div class="bubble typing" aria-label="Réponse en cours"><i></i><i></i><i></i></div></div>';
+
+// Kept at the bottom, as chats are, unless the user scrolled up to read: through renders, and through the
+// timers, shortcuts or keyboard changing the thread's height
+let stick = true;
+thread.addEventListener('scroll', () => { stick = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; }, {passive: true});
+new ResizeObserver(() => { if (stick) thread.scrollTop = thread.scrollHeight; }).observe(thread);
+
+function render(toBottom = false) {
+  let html = '', day = null, conv, previous = null;
+  for (const e of entries.filter(visible)) {
+    const d = when(e);
+    const label = dayLabel(d);
+    const newConv = !e.conversation_id || e.conversation_id !== conv || label !== day;
+    if (label !== day) { html += (day === null ? '' : '</section>') + `<div class="day">${esc(label)}</div>`; day = label; }
+    else if (newConv) html += '</section>';
+    if (newConv) html += '<section class="conv">';
+    // Who and when: at a conversation's start, when the source changes, after a pause of 5 minutes
+    const who = newConv || e.source !== previous.source || d - when(previous) >= 300e3;
+    html += userMsg(e.input, e.source, who ? hhmm(d) : null) + botMsg(e);
+    conv = e.conversation_id;
+    previous = e;
   }
-  return s;
+  if (day !== null) html += '</section>';
+  if (pending.length) html += '<section class="conv">' + pending.map((p) => userMsg(p.input, p.source) + typing).join('') + '</section>';
+  thread.innerHTML = html || hello();
+  if (toBottom) stick = true;
+  if (stick) thread.scrollTop = thread.scrollHeight;
 }
 
-function renderExchange(e, i, isFirst) {
-  const hasDebug = (e.timings && Object.keys(e.timings).length) || (e.tool_calls && e.tool_calls.length);
-  return `<div class="exchange">
-    <div class="meta">
-      ${isFirst ? '<span class="badge ' + e.source + '">' + e.source + '</span>' + (e.site ? '<span>' + esc(e.site) + '</span>' : '') + '<span>' + e.timestamp + '</span>' : ''}
-      ${e.timings && e.timings.total ? '<span class="timings">' + e.timings.total + 's</span>' : ''}
-    </div>
-    <div class="input-line">${esc(e.input)}</div>
-    <div class="response-line">${esc(e.response)}</div>
-    <div class="actions">
-      ${e.audio ? '<button onclick="playAudio(\'recordings/' + e.audio + '\')">Ecouter la demande</button>' : ''}
-      ${e.tts_url ? '<button onclick="playAudio(\'tts/' + e.tts_url.split('/').pop() + '\')">Ecouter</button>' : ''}
-      ${hasDebug ? '<button onclick="toggleDebug(' + i + ')">Debug</button>' : ''}
-    </div>
-    ${hasDebug ? '<div class="debug" id="dbg-' + i + '">' + fmtDebug(e) + '</div>' : ''}
-  </div>`;
+function hello() {
+  const examples = ['Ferme les volets du séjour', 'Quel temps fera-t-il demain ?', 'Mets France Inter dans la cuisine', 'Un minuteur de 10 minutes pour les pâtes'];
+  return `<div class="hello"><div class="mark">${icon('mic')}</div><h2>Bonjour</h2>
+    <p>Touchez le micro et parlez, ou écrivez votre demande.</p>
+    ${examples.map((x) => `<button data-example="${esc(x)}">« ${esc(x)} »</button>`).join('')}</div>`;
 }
 
-function render(data) {
-  if (!data.length) { ex.innerHTML = '<div class="empty">Aucun echange pour le moment</div>'; return; }
-  // Group consecutive exchanges by conversation_id
-  const groups = [];
-  let current = null;
-  data.forEach((e, i) => {
-    const cid = e.conversation_id;
-    if (cid && current && current.cid === cid) {
-      current.items.push({e, i});
-    } else {
-      current = {cid, items: [{e, i}]};
-      groups.push(current);
-    }
-  });
-  ex.innerHTML = groups.map(g =>
-    '<div class="conversation">' + g.items.map(({e, i}, idx) => renderExchange(e, i, idx === 0)).join('') + '</div>'
-  ).join('');
-  ex.scrollTop = ex.scrollHeight;
-}
-
-function toggleDebug(i) {
-  const el = document.getElementById('dbg-' + i);
-  if (el) el.classList.toggle('open');
-}
-
-let currentAudio = null;
-function playAudio(url) {
-  if (currentAudio) currentAudio.pause();
-  currentAudio = new Audio(url);
-  currentAudio.play();
-}
-
-async function refresh() {
+// The log, unchanged most of the time (a 304); true when it changed
+async function fetchLog() {
+  let body;
   try {
     const r = await fetch('api/exchanges');
-    const data = await r.json();
-    const hash = JSON.stringify(data.map(e => e.timestamp));
-    if (hash !== lastHash) { lastHash = hash; render(data); }
-  } catch(e) {}
+    if (!r.ok) throw new Error(r.status);
+    body = await r.text();
+    app.classList.remove('offline');
+  } catch {
+    app.classList.add('offline');
+    return false;
+  }
+  if (body === lastBody) return false;
+  lastBody = body;
+  entries = JSON.parse(body);
+  return true;
+}
+async function refresh() { if (await fetchLog()) render(); }
+
+// A request of this page, shown until the log has it
+function addPending(input, source) {
+  const p = {input, source};
+  pending.push(p);
+  render(true);
+  return p;
+}
+async function settle(p) {
+  await fetchLog();
+  pending = pending.filter((x) => x !== p);
+  render(true);
 }
 
-async function send() {
+thread.addEventListener('click', (e) => {
+  const play = e.target.closest('[data-play]');
+  if (play) {
+    const a = new Audio(play.dataset.play);
+    a.play().catch(() => toast('Audio introuvable'));
+  }
+  const example = e.target.closest('[data-example]');
+  if (example) { cmd.value = example.dataset.example; composerChanged(); cmd.focus(); }
+});
+
+// ---------------------------------------------------------------- Typed requests
+const composer = $('composer');
+function composerChanged() { dock.classList.toggle('typed', cmd.value.trim() !== ''); renderShortcuts(); }
+cmd.addEventListener('input', composerChanged);
+composer.addEventListener('submit', (e) => {
+  e.preventDefault();
   const text = cmd.value.trim();
-  if (!text) return;
-  cmd.value = '';
-  btn.disabled = true;
+  if (text) { cmd.value = ''; composerChanged(); sendText(text); }
+  else if (e.submitter) startVoice();  // the mic button, not Enter in an empty field
+});
+
+async function sendText(text) {
+  const p = addPending(text, 'web');
   try {
-    await fetch('api/send', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(siteSel.hidden ? {text} : {text, site: siteSel.value}) });
-    await refresh();
-  } catch(e) { alert('Erreur: ' + e.message); }
-  btn.disabled = false;
-  cmd.focus();
+    // Typed, read: no spoken reply
+    const reply = await post('api/send', withSite({text}));
+    learn(text, reply.tool_calls);
+  } catch (err) {
+    if (!navigator.onLine || err instanceof TypeError) {
+      toast('Pas de connexion, demande non envoyée');
+      if (!cmd.value) { cmd.value = text; composerChanged(); }
+    }
+  }
+  await settle(p);
 }
 
-btn.addEventListener('click', send);
-// Enter while a request runs sent it twice; Enter that ends an IME composition is no send
-cmd.addEventListener('keydown', e => { if (e.key === 'Enter' && !btn.disabled && !e.isComposing) send(); });
-refresh();
-setInterval(refresh, 3000);
-cmd.focus();
+// ---------------------------------------------------------------- Shortcuts
+// What this phone asks often, at about this time of day, one tap away. Learnt from requests that did
+// something (a tool other than goodbye), kept in this browser only
+const SHORTCUTS = 'va.shortcuts';
+const keyOf = (text) => text.toLowerCase().replace(/[.,;:!?…«»"]/g, ' ').replace(/\s+/g, ' ').trim();
+
+function learn(text, toolCalls) {
+  if (!(toolCalls || []).some((tc) => tc.function !== 'end_conversation')) return;
+  const key = keyOf(text);
+  if (!key || key.length > 90) return;
+  const all = store.get(SHORTCUTS, {});
+  const item = all[key] || {uses: []};
+  all[key] = {text: text.trim().replace(/[.!]+$/, ''), uses: [...item.uses, Date.now()].slice(-20)};
+  const ranked = Object.entries(all).sort((a, b) => score(b[1]) - score(a[1]));
+  store.set(SHORTCUTS, Object.fromEntries(ranked.slice(0, 60)));
+  renderShortcuts();
+}
+
+function score(item, now = new Date()) {
+  const hour = now.getHours() + now.getMinutes() / 60;
+  return item.uses.reduce((sum, t) => {
+    const d = new Date(t);
+    let gap = Math.abs(d.getHours() + d.getMinutes() / 60 - hour);
+    gap = Math.min(gap, 24 - gap);
+    // Recent uses weigh more (three weeks), and those within three hours of now more still
+    return sum + Math.exp(-(now - d) / 864e5 / 21) * (0.3 + Math.max(0, 1 - gap / 3));
+  }, 0);
+}
+
+function renderShortcuts() {
+  const box = $('shortcuts');
+  if (cmd.value.trim()) { box.innerHTML = ''; return; }
+  const all = store.get(SHORTCUTS, {});
+  const best = Object.entries(all)
+    .filter(([, v]) => v.uses.length >= 2)
+    .map(([k, v]) => [k, v, score(v)])
+    .filter(([, , s]) => s > 0.5)
+    .sort((a, b) => b[2] - a[2])
+    .slice(0, 6);
+  box.innerHTML = best.map(([k, v]) => `<button class="chip" data-key="${esc(k)}">${esc(v.text)}</button>`).join('');
+}
+
+$('shortcuts').addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  const item = store.get(SHORTCUTS, {})[chip.dataset.key];
+  if (item) { vibrate(10); sendText(item.text); }
+});
+$('shortcuts').addEventListener('contextmenu', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  e.preventDefault();
+  if (!confirm(`Retirer « ${chip.textContent} » des raccourcis ?`)) return;
+  const all = store.get(SHORTCUTS, {});
+  delete all[chip.dataset.key];
+  store.set(SHORTCUTS, all);
+  renderShortcuts();
+});
+
+// ---------------------------------------------------------------- Voice: the phone as a satellite
+// The microphone streams 16 kHz 16-bit mono to the server over a WebSocket; the server's VAD, the
+// satellite's, says when speech has ended. The reply plays here, then the phone listens again for a
+// follow-up, as the Voice PE does (AD-059)
+let ctx = null, captureModule = null;
+const voice = {session: null, level: 0, target: 0};
+const orb = $('orb');
+
+// Running, else an error: without a tap (the « Parler » shortcut), the browser may keep it suspended, and
+// resume() then never settles
+async function startAudio() {
+  ctx ??= new (window.AudioContext || window.webkitAudioContext)({latencyHint: 'interactive'});
+  if (ctx.state !== 'running') await Promise.race([ctx.resume(), sleep(400)]);
+  if (ctx.state !== 'running') throw new Error('suspended');
+}
+
+// Downsampled to 16 kHz by averaging each output sample's span of input (a box filter), 64 ms chunks
+const CAPTURE = `
+class Capture extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.step = sampleRate / 16000; this.phase = 0; this.sum = 0; this.n = 0;
+    this.out = new Int16Array(1024); this.len = 0; this.energy = 0;
+  }
+  process(inputs) {
+    const input = inputs[0] && inputs[0][0];
+    if (!input) return true;
+    for (let i = 0; i < input.length; i++) {
+      this.sum += input[i]; this.n++;
+      if (++this.phase < this.step) continue;
+      this.phase -= this.step;
+      const v = Math.max(-1, Math.min(1, this.sum / this.n));
+      this.sum = 0; this.n = 0;
+      this.energy += v * v;
+      this.out[this.len++] = v * 32767;
+      if (this.len === this.out.length) {
+        this.port.postMessage({pcm: this.out.buffer, rms: Math.sqrt(this.energy / this.len)}, [this.out.buffer]);
+        this.out = new Int16Array(1024); this.len = 0; this.energy = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('capture', Capture);`;
+
+async function openMic(onChunk) {
+  // No noise suppression: WebRTC's turned « Quelle heure est-il ? » into « Quelle mort est-il ? » 3 times
+  // out of 4, and Parakeet, trained on noisy speech, needs none. Echo cancellation for the earcon
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {channelCount: 1, echoCancellation: true, noiseSuppression: false, autoGainControl: true},
+  });
+  try {
+    captureModule ??= ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([CAPTURE], {type: 'text/javascript'})));
+    await captureModule;
+  } catch (e) {
+    captureModule = null;
+    stream.getTracks().forEach((t) => t.stop());
+    throw e;
+  }
+  const source = ctx.createMediaStreamSource(stream);
+  const node = new AudioWorkletNode(ctx, 'capture');
+  const mute = ctx.createGain();
+  mute.gain.value = 0;  // pulled by the destination, so that it runs, but never heard
+  source.connect(node).connect(mute).connect(ctx.destination);
+  node.port.onmessage = (e) => onChunk(e.data.pcm, e.data.rms);
+  return () => {
+    node.port.onmessage = null;
+    source.disconnect(); node.disconnect(); mute.disconnect();
+    stream.getTracks().forEach((t) => t.stop());
+  };
+}
+
+function earcon(up) {
+  if (!ctx || ctx.state !== 'running') return;
+  const t = ctx.currentTime, osc = ctx.createOscillator(), gain = ctx.createGain();
+  const [a, b] = up ? [660, 990] : [880, 590];
+  osc.frequency.setValueAtTime(a, t);
+  osc.frequency.setValueAtTime(b, t + 0.07);
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(0.1, t + 0.01);
+  gain.gain.setValueAtTime(0.1, t + 0.12);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(t);
+  osc.stop(t + 0.2);
+}
+
+const STATUS = {
+  listening: 'Je vous écoute', hearing: 'Je vous écoute', followup: 'Autre chose ?',
+  thinking: 'Je réfléchis…', speaking: 'Touchez pour couper',
+};
+function setVoice(state) {
+  dock.classList.toggle('voicing', state !== 'idle');
+  dock.dataset.voice = state;
+  $('voice-status').textContent = STATUS[state] || '';
+  for (const svg of document.querySelectorAll('.orb [data-for]')) svg.classList.toggle('now', svg.dataset.for.split(' ').includes(state));
+  orb.setAttribute('aria-label', state === 'speaking' ? 'Couper la réponse' : "J'ai fini de parler");
+  if (state === 'idle') renderShortcuts();
+  else animate();
+}
+
+async function startVoice(followUp = false) {
+  if (voice.session) return;
+  if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode) {
+    toast(window.isSecureContext ? 'Micro non pris en charge par ce navigateur' : 'Le micro demande le lien https');
+    return;
+  }
+  try {
+    await startAudio();
+  } catch {
+    toast('Touchez le micro pour parler');
+    $('go').classList.add('nudge');
+    setTimeout(() => $('go').classList.remove('nudge'), 3000);
+    return;
+  }
+  const session = voice.session = {followUp, closeMic: null, pending: null, player: null, analyser: null};
+  setVoice(followUp ? 'followup' : 'listening');
+  if (!followUp) { earcon(true); vibrate(15); }
+
+  const url = new URL('api/listen', location.href);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.search = new URLSearchParams(withSite(followUp ? {follow_up: '1'} : {}));
+  const ws = session.ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  const early = [];
+  ws.onopen = () => { early.forEach((pcm) => ws.send(pcm)); early.length = 0; };
+  ws.onmessage = (m) => onVoiceMessage(session, JSON.parse(m.data));
+  ws.onclose = () => { toast('Connexion perdue'); endVoice(session); };
+
+  try {
+    const close = await openMic((pcm, rms) => {
+      // 0 at -50 dBFS, 1 at -10 dBFS
+      voice.target = Math.max(0, Math.min(1, (20 * Math.log10(rms + 1e-6) + 50) / 40));
+      if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+      else if (ws.readyState === WebSocket.CONNECTING) early.push(pcm);
+    });
+    if (voice.session !== session || dock.dataset.voice === 'thinking') close();  // ended, or heard, meanwhile
+    else session.closeMic = close;
+  } catch (err) {
+    endVoice(session);
+    toast(err.name === 'NotAllowedError' ? "L'accès au micro est refusé" : 'Micro indisponible');
+  }
+}
+
+function closeMic(session) {
+  session.closeMic?.();
+  session.closeMic = null;
+  voice.target = 0;
+}
+
+// Whatever its state. The server drops a request still being heard, not one being answered: its reply
+// then shows with the log
+function endVoice(session) {
+  session.ws.onclose = null;
+  session.ws.close();
+  closeMic(session);
+  try { session.player?.stop(); } catch {}
+  if (session.pending) { settle(session.pending); session.pending = null; }
+  if (voice.session === session) { voice.session = null; setVoice('idle'); }
+}
+
+async function onVoiceMessage(session, msg) {
+  if (voice.session !== session) return;
+  if (msg.type === 'speech') {
+    setVoice('hearing');
+  } else if (msg.type === 'heard') {
+    closeMic(session);
+    setVoice('thinking');
+    earcon(false);
+    vibrate(10);
+  } else if (msg.type === 'transcript') {
+    if (msg.text) session.pending = addPending(msg.text, 'app');
+    else {
+      endVoice(session);
+      if (!session.followUp) toast("Je n'ai rien entendu");
+    }
+  } else if (msg.type === 'reply') {
+    session.ws.onclose = null;  // the server closes it now, the session goes on
+    learn(msg.input, msg.tool_calls);
+    // The reply's audio loads while the log does
+    const audio = msg.audio && !document.hidden && fetch(msg.audio).then((r) => r.arrayBuffer());
+    settle(session.pending);
+    session.pending = null;
+    if (audio) {
+      setVoice('speaking');
+      await speak(session, audio);
+    }
+    if (voice.session !== session) return;  // stopped meanwhile
+    voice.session = null;
+    if (msg.follow_up && !document.hidden) startVoice(true);
+    else setVoice('idle');
+  } else if (msg.type === 'error') {
+    toast('La demande a échoué');
+    endVoice(session);
+  }
+}
+
+async function speak(session, audio) {
+  try {
+    const buffer = await ctx.decodeAudioData(await audio);
+    if (voice.session !== session) return;
+    const source = session.player = ctx.createBufferSource();
+    const analyser = session.analyser = ctx.createAnalyser();
+    source.buffer = buffer;
+    analyser.fftSize = 512;
+    source.connect(analyser).connect(ctx.destination);
+    await new Promise((resolve) => { source.onended = resolve; source.start(); });
+  } catch {
+    toast('Réponse illisible');
+  } finally {
+    session.player = session.analyser = null;
+    voice.target = 0;
+  }
+}
+
+orb.addEventListener('click', () => {
+  const session = voice.session;
+  const state = dock.dataset.voice;
+  if (!session) return;
+  if (state === 'speaking') endVoice(session);
+  // Done speaking: the server takes what it has
+  else if (state !== 'thinking' && session.ws.readyState === WebSocket.OPEN) session.ws.send('end');
+});
+$('voice-cancel').addEventListener('click', () => { if (voice.session) endVoice(voice.session); });
+
+// The orb follows the voice, the microphone's level while listening, the reply's while speaking: a frame
+// at a time while it shows, none at rest
+const samples = new Float32Array(512);
+let animating = false;
+function animate() {
+  if (animating) return;
+  animating = true;
+  requestAnimationFrame(function frame() {
+    const analyser = voice.session?.analyser;
+    if (analyser) {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const v of samples) sum += v * v;
+      voice.target = Math.min(1, Math.sqrt(sum / samples.length) * 4);
+    }
+    voice.level = voice.target > voice.level ? voice.level * 0.5 + voice.target * 0.5 : voice.level * 0.85 + voice.target * 0.15;
+    orb.style.setProperty('--level', voice.level.toFixed(3));
+    if (dock.dataset.voice !== 'idle') requestAnimationFrame(frame);
+    else animating = false;
+  });
+}
+
+// ---------------------------------------------------------------- What runs now
+let live = {timers: [], music: null};
+
+async function refreshLive() {
+  try {
+    const r = await fetch('api/state?' + new URLSearchParams(withSite()));
+    if (!r.ok) return;
+    const state = await r.json();
+    const now = Date.now();
+    live = {timers: state.timers.map((t) => ({...t, end: now + t.seconds_left * 1000})), music: state.music};
+    renderLive();
+  } catch {}
+}
+
+function countdown(ms) {
+  if (ms <= 0) return 'Terminé';
+  const s = Math.round(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+function renderLive() {
+  const now = Date.now();
+  let html = live.timers.map((t) => {
+    const left = t.end - now;
+    const name = t.alarm ? (t.name ? `${cap(t.name)} · ${t.alarm}` : `Alarme ${t.alarm}`) : t.name ? cap(t.name) : 'Minuteur';
+    return `<div class="card${left <= 0 ? ' done' : ''}">${icon(t.alarm ? 'alarm' : 'timer', 'ic')}
+      <div class="what"><b>${esc(name)}</b><small class="count" data-end="${t.end}">${countdown(left)}</small></div>
+      <button data-cancel="${esc(t.id)}" aria-label="Annuler ${esc(name)}">${icon('x')}</button></div>`;
+  }).join('');
+  const m = live.music;
+  if (m) {
+    const where = m.site && sites.length > 1 && m.site !== site ? `${m.speaker}, ${cap(m.site)}` : m.speaker;
+    html += `<div class="card">${m.cover ? `<img src="${esc(m.cover)}" alt="">` : icon('note', 'ic')}
+      <div class="what"><b>${esc(m.title)}</b><small>${esc(m.artist)} · ${esc(where)}</small></div>
+      <button data-music="${m.paused ? 'resume' : 'pause'}" aria-label="${m.paused ? 'Reprendre' : 'Pause'}">${icon(m.paused ? 'play' : 'pause', 'fill')}</button>
+      <button data-music="next" aria-label="Titre suivant">${icon('next', 'fill')}</button></div>`;
+  }
+  $('live').innerHTML = html;
+}
+
+setInterval(() => {
+  for (const el of document.querySelectorAll('#live [data-end]')) {
+    const left = Number(el.dataset.end) - Date.now();
+    el.textContent = countdown(left);
+    el.closest('.card').classList.toggle('done', left <= 0);
+  }
+}, 1000);
+
+$('live').addEventListener('click', async (e) => {
+  const cancel = e.target.closest('[data-cancel]');
+  const music = e.target.closest('[data-music]');
+  try {
+    if (cancel) {
+      live.timers = live.timers.filter((t) => t.id !== cancel.dataset.cancel);
+      renderLive();
+      await post('api/timers/cancel', withSite({id: cancel.dataset.cancel}));
+    } else if (music) {
+      vibrate(10);
+      const r = await post('api/music', withSite({action: music.dataset.music}));
+      live.music = r.music;
+      renderLive();
+    }
+  } catch {
+    toast("Ça n'a pas marché");
+  }
+  refreshLive();
+});
+
+// ---------------------------------------------------------------- Settings
+const menu = $('menu');
+$('opt-debug').checked = debug;
+$('opt-debug').addEventListener('change', (e) => { debug = e.target.checked; store.set('va.debug', debug); render(); });
+$('opt-forget').addEventListener('click', () => {
+  if (!confirm('Oublier toutes les demandes fréquentes de ce téléphone ?')) return;
+  store.set(SHORTCUTS, {});
+  renderShortcuts();
+  toast('Raccourcis oubliés');
+});
+menu.addEventListener('click', (e) => { if (e.target === menu) menu.close(); });  // the backdrop
+$('menu-btn').addEventListener('click', async () => {
+  menu.showModal();
+  const box = $('health');
+  try {
+    const h = await (await fetch('health')).json();
+    const c = h.components;
+    const device = (x) => (x.device === 'cpu' ? 'processeur (lent)' : x.device === 'cuda' ? 'GPU' : x.device || '?');
+    const homes = Object.entries(h.sites).map(([name, s]) => `${cap(name === 'default' ? 'maison' : name)} : ${s.esp ? 'satellite connecté' : 'pas de satellite'}${s.ha ? '' : ', Home Assistant injoignable'}`);
+    box.innerHTML = [
+      `<b>Serveur ${h.status === 'ok' ? 'en forme' : 'dégradé'}</b>`,
+      ...homes.map(esc),
+      `Modèle : ${esc(c.llm.model || c.llm.mode)}`,
+      `Voix : STT sur ${device(c.stt)}, TTS sur ${device(c.tts)}`,
+    ].join('<br>');
+  } catch {
+    box.textContent = 'État du serveur indisponible';
+  }
+});
 
 // Chrome's menu answers « already installed » for any app of the origin, and kiné, Par chœur and Web ERG
 // share charras-server's; its prompt, offered here, looks at this app's own scope
-const installBtn = document.getElementById('install');
+const installBtn = $('install');
 let installPrompt = null;
-addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; installBtn.hidden = false; });
+addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; installBtn.hidden = false; });
 installBtn.addEventListener('click', () => { installBtn.hidden = true; installPrompt.prompt(); });
 addEventListener('appinstalled', () => { installBtn.hidden = true; });
 
+// ---------------------------------------------------------------- Polling, visibility
+// Every 3 s while shown, nothing while hidden: often on mobile data. The log answers 304 when unchanged
+let poller = null;
+function poll() { refresh(); refreshLive(); }
+function startPolling() { clearInterval(poller); poll(); poller = setInterval(poll, 3000); }
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearInterval(poller);
+    if (voice.session) endVoice(voice.session);
+  } else {
+    loadSites();
+    startPolling();
+  }
+});
+addEventListener('online', poll);
+
+setVoice('idle');
+renderShortcuts();
+loadSites().then(startPolling);
+// The launcher's « Parler » shortcut
+if (new URLSearchParams(location.search).has('parler')) {
+  history.replaceState(null, '', location.pathname);
+  startVoice();
+}
+
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  });
+  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
 </script>
 </body>
