@@ -1632,6 +1632,18 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(roles, ["user", "assistant", "tool", "assistant"])
         self.assertIn("tool_calls", self.server.conversation.history[1])
 
+    async def test_each_device_its_own_conversation(self):
+        """The kitchen's riddles are not the phone's context, nor one phone's another's (AD-061)."""
+        for client in (None, "phone1", None):
+            self.server.new_request(client)
+            await self.ask(text=f"question de {client}")
+        heard = [m["content"] for m in self.completion.await_args_list[0].args[3] if m["role"] == "user"]
+        self.assertEqual(heard, ["question de None", "question de None"])  # the satellite's own, again
+        self.server.new_request("phone1")
+        self.assertEqual(self.server.conversation.history[0]["content"], "question de phone1")
+        self.server.new_request("phone2")
+        self.assertEqual(self.server.conversation.history, [])
+
     async def test_dry_run_leaves_the_conversation_alone(self):
         """A test's « C'est fait » (never run) in the family's history made a real request call nothing (AD-047)."""
         live = self.server.conversation

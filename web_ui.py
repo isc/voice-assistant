@@ -160,7 +160,7 @@ async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[
 
 
 def _client(params) -> Optional[str]:
-    """The id a browser gives itself (`client`), so that its page shows its own conversation (AD-060)."""
+    """The id a browser gives itself (`client`): its conversation (AD-061), the one its page shows (AD-060)."""
     client = params.get("client")
     return client if isinstance(client, str) and 0 < len(client) <= 40 and client.isalnum() else None
 
@@ -256,13 +256,13 @@ def setup_routes(app, server):
     async def read_text(request) -> str:
         """The prompt of a text request; the request then serves the site it names, if any.
 
-        {"text": …, "site": "charras"}"""
+        {"text": …, "site": "charras", "client": the browser's id}"""
         body = await _read_body(request)
         text = body.get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise _json_error(web.HTTPBadRequest, "missing 'text' field")
         await use_site(request, body)
-        server.new_request()
+        server.new_request(_client(body))
         return text
 
     async def use_site(request, body: dict) -> None:
@@ -317,8 +317,7 @@ def setup_routes(app, server):
 
     async def handle_web_send(request):
         """A request typed in the web app: its reply is read, not spoken."""
-        text = await read_text(request)
-        reply = await server.answer(text, "web", {}, speak=False, client=_client(await _read_body(request)))
+        reply = await server.answer(await read_text(request), "web", {}, speak=False)
         if not reply["response"]:
             return web.json_response({"error": "LLM returned no response"}, status=500)
         return web.json_response(reply)
@@ -345,7 +344,7 @@ def setup_routes(app, server):
         follow_up = request.query.get("follow_up") == "1"
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        server.new_request()
+        server.new_request(_client(request.query))
         if not (heard := await _listen(ws, follow_up)):
             return ws
         await _send(ws, {"type": "heard"})
@@ -354,7 +353,6 @@ def setup_routes(app, server):
                 *heard,
                 follow_up,
                 lambda transcript: _send(ws, {"type": "transcript", "text": transcript}),
-                _client(request.query),
             )
         except Exception:
             logger.exception("App request failed")

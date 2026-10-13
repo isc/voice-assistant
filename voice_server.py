@@ -41,7 +41,7 @@ from ha_client import LOCAL_CONFIG, asks_whole_house, compact, is_whole_house, n
 from images import find_image
 from places import find_place
 from recordings import Recordings
-from sites import Site, load_sites
+from sites import Conversation, Site, load_sites
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
 from timer import Timer
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
@@ -203,6 +203,7 @@ class _Request:
     end_conversation: bool = False  # the end_conversation tool: no follow-up, history cleared
     no_followup: bool = False  # a media command: no follow-up, history kept (AD-035)
     whole_house: bool = False  # the request says tout, tous, partout…: an action may sweep every room (AD-058)
+    client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
 
 
 _current_request: ContextVar[_Request] = ContextVar("current_request")
@@ -240,13 +241,13 @@ class VoiceAssistantServer:
     # Per home, read from the active site (sites.py)
     ha_client = _site_attribute("ha_client")
     timer_manager = _site_attribute("timer_manager")
-    conversation = _site_attribute("conversation")
     _last_media_target = _site_attribute("last_media_target")
     # Per request (_Request)
     _last_tool_calls = _request_attribute("tool_calls")
     _end_conversation = _request_attribute("end_conversation")
     _no_followup = _request_attribute("no_followup")
     _whole_house = _request_attribute("whole_house")
+    _client = _request_attribute("client")
 
     def __init__(self):
         self.llm_config = (LLM_API_KEY, LLM_MODEL, LLM_URL)  # for /health
@@ -332,9 +333,15 @@ class VoiceAssistantServer:
         return True
 
     @staticmethod
-    def new_request() -> None:
-        """A request starts in this task: its own tool calls and follow-up flags."""
-        _current_request.set(_Request())
+    def new_request(client: Optional[str] = None) -> None:
+        """A request starts in this task: its own tool calls and follow-up flags; from a browser of the web app,
+        its own conversation."""
+        _current_request.set(_Request(client=client))
+
+    @property
+    def conversation(self) -> Conversation:
+        """The conversation of whoever asks: the site's satellite, or a browser of the web app (AD-061)."""
+        return self.site.conversation_of(self._client)
 
     def site_named(self, name: str) -> Optional[Site]:
         return next((site for site in self.sites if site.name == name.strip().lower()), None)
@@ -1774,11 +1781,10 @@ class VoiceAssistantServer:
         timings: dict,
         speak: bool,
         audio: Optional[str] = None,
-        client: Optional[str] = None,
     ) -> dict:
         """Answer a request of the web app, typed or heard by the phone (AD-059): the LLM, then, if it is to be
-        spoken, the reply's audio; logged with the browser it came from (`client`, its conversation is the one
-        it shows, AD-060). Returns the reply, whose `response` is None when the LLM gave none."""
+        spoken, the reply's audio; logged with the browser it came from, whose page shows it (AD-060). Returns
+        the reply, whose `response` is None when the LLM gave none."""
         t0 = time.time()
         response_text = await self.process_with_llm(None, text)
         timings["llm"] = round(time.time() - t0, 2)
@@ -1799,7 +1805,7 @@ class VoiceAssistantServer:
             conversation_id=self.conversation.id,
             audio=audio,
             site=self.site.name,
-            client=client,
+            client=self._client,
         )
         return {
             "input": text,
@@ -1817,7 +1823,6 @@ class VoiceAssistantServer:
         heard: bool,
         follow_up: bool,
         on_transcript: Callable[[str], Awaitable],
-        client: Optional[str] = None,
     ) -> Optional[dict]:
         """Answer a request the phone heard (AD-059): recorded, transcribed unless the VAD heard no speech
         (AD-036), told to `on_transcript`, answered. None when nothing was said; errors are logged and raised."""
@@ -1831,9 +1836,7 @@ class VoiceAssistantServer:
             timings["stt"] = round(time.time() - t0, 2)
             await on_transcript(entry["transcript"])
             if entry["transcript"]:
-                reply = await self.answer(
-                    entry["transcript"], "app", timings, speak=True, audio=entry["audio"], client=client
-                )
+                reply = await self.answer(entry["transcript"], "app", timings, speak=True, audio=entry["audio"])
                 entry.update(response=reply["response"], tool_calls=reply["tool_calls"])
                 return reply
             if heard or not follow_up:  # a follow-up nobody spoke in is how conversations end
@@ -1846,7 +1849,7 @@ class VoiceAssistantServer:
                     timings=timings,
                     audio=entry["audio"],
                     site=self.site.name,
-                    client=client,
+                    client=self._client,
                 )
             return None
         except Exception as e:
@@ -1860,7 +1863,7 @@ class VoiceAssistantServer:
                 timings=timings,
                 audio=entry["audio"],
                 site=self.site.name,
-                client=client,
+                client=self._client,
             )
             raise
         finally:

@@ -47,7 +47,10 @@ class Site:
     ha_client: Optional[Any] = None  # ha_client.HAClient
     http_base_url: str = ""  # TTS URL announced to this site's speakers
     timer_manager: TimerManager = field(default_factory=TimerManager)
+    # The satellite's, and that of requests from no browser of the web app (curl)
     conversation: Conversation = field(default_factory=Conversation)
+    # Each browser of the web app has its own, by the id it gives itself: two devices, two conversations (AD-061)
+    app_conversations: dict[str, Conversation] = field(default_factory=dict)
     # Dry runs (tests) have one of their own: a multi-turn test needs one, and the family's must
     # neither see it nor be kept alive by it (AD-047)
     dry_run: Conversation = field(default_factory=Conversation)
@@ -56,6 +59,10 @@ class Site:
     @property
     def label(self) -> str:
         return self.name or "default"
+
+    def conversation_of(self, client: Optional[str]) -> Conversation:
+        """The conversation of whoever asks: a browser of the web app by its id, else the satellite (AD-061)."""
+        return self.app_conversations.setdefault(client, Conversation()) if client else self.conversation
 
 
 def load_sites(env: Mapping[str, str] = os.environ) -> list[Site]:
