@@ -75,6 +75,7 @@
   #thread { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px 16px 12px; overscroll-behavior: contain; scroll-behavior: auto; }
   .day { text-align: center; font-size: 12.5px; font-weight: 600; color: var(--text-3); margin: 18px 0 6px; }
   .conv { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; }
+  .conv.now { min-height: 100%; justify-content: flex-end; padding: 0; }  /* near the field, as chats are */
   .conv + .conv { border-top: 1px dashed var(--line); margin-top: 6px; padding-top: 12px; }
   .msg { display: flex; flex-direction: column; min-width: 0; max-width: 86%; }
   .msg.user { align-self: flex-end; align-items: flex-end; margin-top: 6px; }
@@ -104,7 +105,18 @@
   .hello .mark .i { width: 30px; height: 30px; }
   .hello h2 { color: var(--text); font-size: 22px; margin: 0 0 6px; }
   .hello p { margin: 0 0 18px; }
-  .hello button { display: block; margin: 8px auto; padding: 8px 14px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); color: var(--text-2); font-size: 14.5px; }
+  .hello button[data-example] { display: block; margin: 8px auto; padding: 8px 14px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); color: var(--text-2); font-size: 14.5px; }
+  .suggest { text-align: left; margin: 26px auto 0; max-width: 420px; }
+  .suggest h3 { font-size: 13px; font-weight: 600; color: var(--text-3); margin: 0 4px 8px; }
+  .suggest button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; margin-bottom: 8px; padding: 10px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); color: var(--text); font-size: 15.5px; text-align: left; }
+  .suggest button:active { background: var(--soft); }
+  .suggest .i { color: var(--accent); }
+  .empty { text-align: center; color: var(--text-3); padding-top: 30vh; }
+  /* The current conversation, or the history: one screen each */
+  #back { display: none; }
+  .history #back { display: grid; margin-left: -8px; }
+  .history #history-btn, .history #live, .history .dock, .history .net { display: none; }
+  .at-home #shortcuts { display: none; }
 
   /* Dock: shortcuts, composer, voice */
   .dock { padding: 6px 12px calc(10px + env(safe-area-inset-bottom)); position: relative; }
@@ -200,16 +212,20 @@
   <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6.5 4h4v16h-4zM13.5 4h4v16h-4z"/></symbol>
   <symbol id="i-next" viewBox="0 0 24 24"><path d="M5 5v14l10-7zM17 5h2.5v14H17z"/></symbol>
   <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></symbol>
+  <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
   <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="6" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="18" cy="12" r="2"/></symbol>
 </svg>
 
 <div class="app" id="app">
   <header>
-    <h1><span class="net" aria-hidden="true"></span>Assistant</h1>
+    <button id="back" class="icon-btn" aria-label="Retour"><svg class="i"><use href="#i-back"/></svg></button>
+    <h1><span class="net" aria-hidden="true"></span><span id="title">Assistant</span></h1>
     <span id="site-slot"></span>
     <span class="offline-note">Hors connexion</span>
     <span class="spacer"></span>
     <button id="install" class="pill-btn" hidden>Installer</button>
+    <button id="history-btn" class="icon-btn" aria-label="Historique"><svg class="i"><use href="#i-history"/></svg></button>
     <button id="menu-btn" class="icon-btn" aria-label="Réglages"><svg class="i fill"><use href="#i-dots"/></svg></button>
   </header>
   <section id="live" aria-label="En cours"></section>
@@ -283,7 +299,11 @@ async function post(path, body) {
 // Several homes: requests go to the one chosen here, never silently to the other. On a home's Wi-Fi
 // the server knows which, from its internet address (AD-050)
 let sites = [], here = null, site = store.get('va.site', null);
-const withSite = (params = {}) => (site ? {...params, site} : params);
+// This browser's id, sent with its requests: the conversation on screen is its own (AD-060)
+const client = store.get('va.client', null) || Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
+store.set('va.client', client);
+// What a request says of where it comes from: its home, and this browser
+const tagged = (params = {}) => ({...params, client, ...(site ? {site} : {})});
 
 async function loadSites() {
   try {
@@ -367,6 +387,7 @@ function fmtDebug(e) {
   return lines.length || buttons ? `<div class="debug">${lines.join('\n')}${buttons ? '\n' + buttons : ''}</div>` : '';
 }
 
+// ISO with its offset; the log's older entries have none, the server's local time
 const when = (e) => new Date(e.timestamp.replace(' ', 'T'));
 const timeFormat = new Intl.DateTimeFormat('fr-FR', {hour: '2-digit', minute: '2-digit'});
 const dayFormat = new Intl.DateTimeFormat('fr-FR', {weekday: 'long', day: 'numeric', month: 'long'});
@@ -384,9 +405,10 @@ function visible(e) {
   return debug || e.input || e.response !== '[Rien compris]';
 }
 
-function userMsg(input, source, time) {
+// time: null for none; mine: from this browser, where who asked goes without saying
+function userMsg(input, source, time, mine = false) {
   const [ic, label] = SOURCES[source] || SOURCES.web;
-  const who = time === null ? '' : `<div class="who">${icon(ic)}${esc(label)}${time ? ' · ' + time : ''}</div>`;
+  const who = time === null ? '' : `<div class="who">${mine ? esc(time) : `${icon(ic)}${esc(label)}${time ? ' · ' + time : ''}`}</div>`;
   const bubble = input ? `<div class="bubble">${esc(input)}</div>` : '<div class="bubble unheard">rien entendu</div>';
   return `<div class="msg user${source === 'voice' ? ' from-voice' : ''}">${who}${bubble}</div>`;
 }
@@ -410,34 +432,84 @@ let stick = true;
 thread.addEventListener('scroll', () => { stick = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; }, {passive: true});
 new ResizeObserver(() => { if (stick) thread.scrollTop = thread.scrollHeight; }).observe(thread);
 
-function render(toBottom = false) {
-  let html = '', day = null, conv, previous = null;
-  for (const e of entries.filter(visible)) {
-    const d = when(e);
-    const label = dayLabel(d);
-    const newConv = !e.conversation_id || e.conversation_id !== conv || label !== day;
-    if (label !== day) { html += (day === null ? '' : '</section>') + `<div class="day">${esc(label)}</div>`; day = label; }
-    else if (newConv) html += '</section>';
-    if (newConv) html += '<section class="conv">';
-    // Who and when: at a conversation's start, when the source changes, after a pause of 5 minutes
-    const who = newConv || e.source !== previous.source || d - when(previous) >= 300e3;
-    html += userMsg(e.input, e.source, who ? hhmm(d) : null) + botMsg(e);
-    conv = e.conversation_id;
-    previous = e;
+// The page shows this browser's conversation while it goes on, the history on demand. A conversation
+// ends as the server's does: 10 minutes without a request, or a goodbye (shown until the page is left)
+let view = location.hash === '#historique' ? 'history' : 'now';
+let shownAt = Date.now();
+const ended = (e) => (e.tool_calls || []).some((tc) => tc.function === 'end_conversation');
+
+function currentConversation() {
+  const mine = entries.filter((e) => e.client === client && visible(e));
+  let start = mine.length;
+  for (; start > 0; start--) {
+    const e = mine[start - 1], next = mine[start];
+    const over = next ? when(next) - when(e) >= 600e3 || ended(e) : Date.now() - when(e) >= 600e3 || (ended(e) && when(e) < shownAt);
+    if (over) break;
   }
-  if (day !== null) html += '</section>';
-  if (pending.length) html += '<section class="conv">' + pending.map((p) => userMsg(p.input, p.source) + typing).join('') + '</section>';
-  thread.innerHTML = html || hello();
+  return mine.slice(start);
+}
+
+// Who and when: at the start, when the source changes, after a pause of 5 minutes
+function messagesHtml(list, mine = false) {
+  return list.map((e, i) => {
+    const d = when(e), previous = list[i - 1];
+    const who = !previous || e.source !== previous.source || d - when(previous) >= 300e3;
+    return userMsg(e.input, e.source, who ? hhmm(d) : null, mine) + botMsg(e);
+  }).join('');
+}
+
+// By day, then by conversation
+function historyHtml(list) {
+  const days = [];
+  for (const e of list) {
+    const label = dayLabel(when(e));
+    let day = days.at(-1);
+    if (day?.label !== label) days.push(day = {label, convs: []});
+    const conv = day.convs.at(-1);
+    if (conv && e.conversation_id && conv.at(-1).conversation_id === e.conversation_id) conv.push(e);
+    else day.convs.push([e]);
+  }
+  return days.map((d) => `<div class="day">${esc(d.label)}</div>` + d.convs.map((c) => `<section class="conv">${messagesHtml(c)}</section>`).join('')).join('');
+}
+
+let shown = '';
+function render(toBottom = false) {
+  let html;
+  if (view === 'history') html = historyHtml(entries.filter(visible)) || '<div class="empty">Aucun échange pour le moment</div>';
+  else {
+    const conv = currentConversation();
+    const waiting = pending.map((p) => userMsg(p.input, p.source, null) + typing).join('');
+    html = conv.length || pending.length ? `<section class="conv now">${messagesHtml(conv, true)}${waiting}</section>` : home();
+  }
+  app.classList.toggle('at-home', view === 'now' && !html.startsWith('<section'));
+  if (html !== shown) { thread.innerHTML = shown = html; }
   if (toBottom) stick = true;
   if (stick) thread.scrollTop = thread.scrollHeight;
 }
 
-function hello() {
+function home() {
+  const hour = new Date().getHours();
+  const best = bestShortcuts();
   const examples = ['Ferme les volets du séjour', 'Quel temps fera-t-il demain ?', 'Mets France Inter dans la cuisine', 'Un minuteur de 10 minutes pour les pâtes'];
-  return `<div class="hello"><div class="mark">${icon('mic')}</div><h2>Bonjour</h2>
-    <p>Touchez le micro et parlez, ou écrivez votre demande.</p>
-    ${examples.map((x) => `<button data-example="${esc(x)}">« ${esc(x)} »</button>`).join('')}</div>`;
+  const more = best.length
+    ? `<div class="suggest"><h3>Vos raccourcis</h3>${best.map(([k, v]) => `<button data-key="${esc(k)}">${icon(v.icon || 'tool')}${esc(wording(v))}</button>`).join('')}</div>`
+    : examples.map((x) => `<button data-example="${esc(x)}">« ${esc(x)} »</button>`).join('');
+  return `<div class="hello"><div class="mark">${icon('mic')}</div><h2>${hour >= 18 || hour < 5 ? 'Bonsoir' : 'Bonjour'}</h2>
+    <p>Touchez le micro et parlez, ou écrivez votre demande.</p>${more}</div>`;
 }
+
+function showView(name) {
+  view = name;
+  app.classList.toggle('history', name === 'history');
+  $('title').textContent = name === 'history' ? 'Historique' : 'Assistant';
+  render(true);
+}
+$('history-btn').addEventListener('click', () => { history.pushState({history: true}, '', '#historique'); showView('history'); });
+$('back').addEventListener('click', () => {
+  if (history.state?.history) history.back();
+  else { history.replaceState(null, '', location.pathname); showView('now'); }
+});
+addEventListener('popstate', () => showView(location.hash === '#historique' ? 'history' : 'now'));
 
 // The log, unchanged most of the time (a 304); true when it changed
 async function fetchLog() {
@@ -456,7 +528,8 @@ async function fetchLog() {
   entries = JSON.parse(body);
   return true;
 }
-async function refresh() { if (await fetchLog()) render(); }
+// Drawn again even when the log is the same: the conversation on screen ends with time
+async function refresh() { await fetchLog(); render(); }
 
 // A request of this page, shown until the log has it
 function addPending(input, source) {
@@ -496,7 +569,7 @@ async function sendText(text) {
   const p = addPending(text, 'web');
   try {
     // Typed, read: no spoken reply
-    const reply = await post('api/send', withSite({text}));
+    const reply = await post('api/send', tagged({text}));
     learn(text, reply.tool_calls);
   } catch (err) {
     if (!navigator.onLine || err instanceof TypeError) {
@@ -524,6 +597,7 @@ function actionOf(toolCalls) {
   const args = (tc) => Object.entries(tc.args || {}).sort().map(([k, v]) => `${k}=${words(v).join(' ')}`);
   return {
     key: calls.map((tc) => `${tc.function}(${args(tc)})`).sort().join(' '),
+    icon: (TOOLS[calls[0].function] || [])[1],
     words: [...new Set(calls.flatMap((tc) => Object.values(tc.args || {}).flatMap(words)))],
   };
 }
@@ -533,7 +607,7 @@ function learn(text, toolCalls) {
   text = text.trim().replace(/[.!]+$/, '');
   if (!action || !text || text.length > 90) return;
   const all = store.get(SHORTCUTS, {});
-  const item = all[action.key] ||= {uses: [], texts: {}, words: action.words};
+  const item = all[action.key] ||= {uses: [], texts: {}, words: action.words, icon: action.icon};
   item.uses = [...item.uses, Date.now()].slice(-20);
   item.texts[text] = (item.texts[text] || 0) + 1;
   const ranked = Object.entries(all).sort((a, b) => score(b[1]) - score(a[1]));
@@ -559,27 +633,30 @@ function wording(item) {
   return Object.entries(item.texts).sort(([a, n], [b, m]) => m - n || named(b) - named(a))[0][0];
 }
 
-function renderShortcuts() {
-  const box = $('shortcuts');
-  if (cmd.value.trim()) { box.innerHTML = ''; return; }
-  const all = store.get(SHORTCUTS, {});
-  const best = Object.entries(all)
+function bestShortcuts() {
+  return Object.entries(store.get(SHORTCUTS, {}))
     .filter(([, v]) => v.uses.length >= 2)
     .map(([k, v]) => [k, v, score(v)])
     .filter(([, , s]) => s > 0.5)
     .sort((a, b) => b[2] - a[2])
     .slice(0, 6);
-  box.innerHTML = best.map(([k, v]) => `<button class="chip" data-key="${esc(k)}">${esc(wording(v))}</button>`).join('');
 }
 
-$('shortcuts').addEventListener('click', (e) => {
-  const chip = e.target.closest('.chip');
+// Above the field during a conversation, on the home screen otherwise
+function renderShortcuts() {
+  const best = cmd.value.trim() ? [] : bestShortcuts();
+  $('shortcuts').innerHTML = best.map(([k, v]) => `<button class="chip" data-key="${esc(k)}">${esc(wording(v))}</button>`).join('');
+  if (app.classList.contains('at-home')) render();
+}
+
+function sendShortcut(e) {
+  const chip = e.target.closest('[data-key]');
   if (!chip) return;
   const item = store.get(SHORTCUTS, {})[chip.dataset.key];
   if (item) { vibrate(10); sendText(wording(item)); }
-});
-$('shortcuts').addEventListener('contextmenu', (e) => {
-  const chip = e.target.closest('.chip');
+}
+function forgetShortcut(e) {
+  const chip = e.target.closest('[data-key]');
   if (!chip) return;
   e.preventDefault();
   if (!confirm(`Retirer « ${chip.textContent} » des raccourcis ?`)) return;
@@ -587,7 +664,11 @@ $('shortcuts').addEventListener('contextmenu', (e) => {
   delete all[chip.dataset.key];
   store.set(SHORTCUTS, all);
   renderShortcuts();
-});
+}
+for (const box of [$('shortcuts'), thread]) {
+  box.addEventListener('click', sendShortcut);
+  box.addEventListener('contextmenu', forgetShortcut);
+}
 
 // ---------------------------------------------------------------- Voice: the phone as a satellite
 // The microphone streams 16 kHz 16-bit mono to the server over a WebSocket; the server's VAD, the
@@ -710,7 +791,7 @@ async function startVoice(followUp = false) {
 
   const url = new URL('api/listen', location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.search = new URLSearchParams(withSite(followUp ? {follow_up: '1'} : {}));
+  url.search = new URLSearchParams(tagged(followUp ? {follow_up: '1'} : {}));
   const ws = session.ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
   const early = [];
@@ -841,7 +922,7 @@ let live = {timers: [], music: null};
 
 async function refreshLive() {
   try {
-    const r = await fetch('api/state?' + new URLSearchParams(withSite()));
+    const r = await fetch('api/state?' + new URLSearchParams(tagged()));
     if (!r.ok) return;
     const state = await r.json();
     const now = Date.now();
@@ -892,10 +973,10 @@ $('live').addEventListener('click', async (e) => {
     if (cancel) {
       live.timers = live.timers.filter((t) => t.id !== cancel.dataset.cancel);
       renderLive();
-      await post('api/timers/cancel', withSite({id: cancel.dataset.cancel}));
+      await post('api/timers/cancel', tagged({id: cancel.dataset.cancel}));
     } else if (music) {
       vibrate(10);
-      const r = await post('api/music', withSite({action: music.dataset.music}));
+      const r = await post('api/music', tagged({action: music.dataset.music}));
       live.music = r.music;
       renderLive();
     }
@@ -953,6 +1034,7 @@ document.addEventListener('visibilitychange', () => {
     clearInterval(poller);
     if (voice.session) endVoice(voice.session);
   } else {
+    shownAt = Date.now();
     loadSites();
     startPolling();
     renderShortcuts();  // ranked for the time it is now: the app may have slept since last night
@@ -961,6 +1043,7 @@ document.addEventListener('visibilitychange', () => {
 addEventListener('online', poll);
 
 setVoice('idle');
+showView(view);
 renderShortcuts();
 loadSites().then(startPolling);
 // The launcher's « Parler » shortcut

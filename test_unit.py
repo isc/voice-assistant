@@ -2097,7 +2097,7 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
     async def test_speech_heard_answered_and_logged(self):
         client = await self.client()
         with patch("web_ui.SpeechEnd", FakeSpeech):
-            ws = await client.ws_connect("/api/listen")
+            ws = await client.ws_connect("/api/listen?client=phone42")
             for _ in range(3):
                 await ws.send_bytes(bytes(2048))
             messages = [await ws.receive_json() for _ in range(4)]
@@ -2107,6 +2107,7 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((reply["response"], reply["audio"]), ("C'est fait.", "tts/reply_1.flac"))
         self.assertTrue(reply["follow_up"])
         entry = self.server.exchange_log.entries[-1]
+        self.assertEqual(entry["client"], "phone42")  # its own conversation, for the page (AD-060)
         self.assertEqual(
             (entry["source"], entry["input"], entry["tool_calls"][0]["function"]),
             ("app", "ferme les volets", "close_cover"),
@@ -2158,10 +2159,11 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
 
     async def test_typed_request_without_spoken_reply(self):
         client = await self.client()
-        reply = await (await client.post("/api/send", json={"text": "ferme les volets"})).json()
+        reply = await (await client.post("/api/send", json={"text": "ferme les volets", "client": "<b>"})).json()
         self.assertEqual((reply["response"], reply["tts_url"]), ("C'est fait.", None))
         self.server.text_to_speech_file.assert_not_awaited()
-        self.assertEqual(self.server.exchange_log.entries[-1]["source"], "web")
+        entry = self.server.exchange_log.entries[-1]
+        self.assertEqual((entry["source"], entry["client"]), ("web", None))  # not an id a browser makes
 
     async def test_exchanges_unchanged_answer_304(self):
         client = await self.client()

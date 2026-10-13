@@ -1767,9 +1767,18 @@ class VoiceAssistantServer:
 
     # === WEB APP ===
 
-    async def answer(self, text: str, source: str, timings: dict, speak: bool, audio: Optional[str] = None) -> dict:
+    async def answer(
+        self,
+        text: str,
+        source: str,
+        timings: dict,
+        speak: bool,
+        audio: Optional[str] = None,
+        client: Optional[str] = None,
+    ) -> dict:
         """Answer a request of the web app, typed or heard by the phone (AD-059): the LLM, then, if it is to be
-        spoken, the reply's audio; logged. Returns the reply, whose `response` is None when the LLM gave none."""
+        spoken, the reply's audio; logged with the browser it came from (`client`, its conversation is the one
+        it shows, AD-060). Returns the reply, whose `response` is None when the LLM gave none."""
         t0 = time.time()
         response_text = await self.process_with_llm(None, text)
         timings["llm"] = round(time.time() - t0, 2)
@@ -1790,6 +1799,7 @@ class VoiceAssistantServer:
             conversation_id=self.conversation.id,
             audio=audio,
             site=self.site.name,
+            client=client,
         )
         return {
             "input": text,
@@ -1802,7 +1812,12 @@ class VoiceAssistantServer:
         }
 
     async def answer_recording(
-        self, audio: bytes, heard: bool, follow_up: bool, on_transcript: Callable[[str], Awaitable]
+        self,
+        audio: bytes,
+        heard: bool,
+        follow_up: bool,
+        on_transcript: Callable[[str], Awaitable],
+        client: Optional[str] = None,
     ) -> Optional[dict]:
         """Answer a request the phone heard (AD-059): recorded, transcribed unless the VAD heard no speech
         (AD-036), told to `on_transcript`, answered. None when nothing was said; errors are logged and raised."""
@@ -1816,13 +1831,22 @@ class VoiceAssistantServer:
             timings["stt"] = round(time.time() - t0, 2)
             await on_transcript(entry["transcript"])
             if entry["transcript"]:
-                reply = await self.answer(entry["transcript"], "app", timings, speak=True, audio=entry["audio"])
+                reply = await self.answer(
+                    entry["transcript"], "app", timings, speak=True, audio=entry["audio"], client=client
+                )
                 entry.update(response=reply["response"], tool_calls=reply["tool_calls"])
                 return reply
             if heard or not follow_up:  # a follow-up nobody spoke in is how conversations end
                 entry["response"] = NOTHING_HEARD
                 self.exchange_log.add(
-                    "app", "", "", NOTHING_HEARD, timings=timings, audio=entry["audio"], site=self.site.name
+                    "app",
+                    "",
+                    "",
+                    NOTHING_HEARD,
+                    timings=timings,
+                    audio=entry["audio"],
+                    site=self.site.name,
+                    client=client,
                 )
             return None
         except Exception as e:
@@ -1836,6 +1860,7 @@ class VoiceAssistantServer:
                 timings=timings,
                 audio=entry["audio"],
                 site=self.site.name,
+                client=client,
             )
             raise
         finally:

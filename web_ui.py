@@ -8,6 +8,7 @@ import logging
 import os
 import socket
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -158,6 +159,12 @@ async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[
     return bytes(recording), speech.heard
 
 
+def _client(params) -> Optional[str]:
+    """The id a browser gives itself (`client`), so that its page shows its own conversation (AD-060)."""
+    client = params.get("client")
+    return client if isinstance(client, str) and 0 < len(client) <= 40 and client.isalnum() else None
+
+
 def _json_error(error: type[web.HTTPException], message: str) -> web.HTTPException:
     return error(text=json.dumps({"error": message}), content_type="application/json")
 
@@ -217,9 +224,11 @@ class ExchangeLog:
         conversation_id=None,
         audio=None,
         site=None,
+        client=None,
     ):
         entry = {
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            # With its offset: the page compares it with the phone's clock, wherever the phone is
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
             "source": source,
             "input": input_text,
             "transcript": transcript,
@@ -230,6 +239,7 @@ class ExchangeLog:
             "conversation_id": conversation_id,
             "audio": audio,
             "site": site,
+            "client": client,  # the browser that sent it, for its own conversation (AD-060)
         }
         self.entries.append(entry)
         self._added += 1
@@ -307,7 +317,8 @@ def setup_routes(app, server):
 
     async def handle_web_send(request):
         """A request typed in the web app: its reply is read, not spoken."""
-        reply = await server.answer(await read_text(request), "web", {}, speak=False)
+        text = await read_text(request)
+        reply = await server.answer(text, "web", {}, speak=False, client=_client(await _read_body(request)))
         if not reply["response"]:
             return web.json_response({"error": "LLM returned no response"}, status=500)
         return web.json_response(reply)
@@ -328,7 +339,8 @@ def setup_routes(app, server):
         speech (someone speaks), heard (stop sending), transcript, then reply or error. A text
         message from the page means the user is done speaking; closing drops the request.
 
-        ?site=… as for a typed request; ?follow_up=1 for the listening that follows a reply."""
+        ?site=… as for a typed request; ?client=… the browser's id (AD-060); ?follow_up=1 for the listening
+        that follows a reply."""
         await use_site(request, dict(request.query))
         follow_up = request.query.get("follow_up") == "1"
         ws = web.WebSocketResponse()
@@ -339,7 +351,10 @@ def setup_routes(app, server):
         await _send(ws, {"type": "heard"})
         try:
             reply = await server.answer_recording(
-                *heard, follow_up, lambda transcript: _send(ws, {"type": "transcript", "text": transcript})
+                *heard,
+                follow_up,
+                lambda transcript: _send(ws, {"type": "transcript", "text": transcript}),
+                _client(request.query),
             )
         except Exception:
             logger.exception("App request failed")

@@ -40,7 +40,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `images.py` | Pictures for the screen: Wikipedia article's lead image, else an Openverse photo; the screen loads the URL itself |
 | `recordings.py` | Each voice request kept as WAV + JSON (transcript, reply, tool calls, timings) for 90 days, root-only |
 | `web_ui.py` | Web app routes: the phone as a satellite (`/api/listen`, a WebSocket), typed requests, timers and music, exchange log with persistence (`exchanges.json`) |
-| `static/index.html` | The web app, a PWA: voice and typed requests, the conversation, timers and music now, shortcuts, technical details on demand |
+| `static/index.html` | The web app, a PWA: voice and typed requests, this phone's conversation (AD-060), timers and music now, shortcuts, the history and technical details on demand |
 | `vad.py` | End of speech by Silero VAD, for the satellite's recordings and the phone's |
 | `requirements-linux.txt` / `requirements-mac.txt` | Base deps (`requirements.txt`) plus the STT backend: onnx-asr (server) or parakeet-mlx (Mac) |
 | `run.sh` | Mac dev launcher: sources `.env`, reads secrets from the macOS Keychain, starts llama-server unless a cloud key is set |
