@@ -1892,6 +1892,16 @@ class TestVADFrames(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.vad.process.call_count, 2)  # 2100 bytes: two frames of 1024
         self.assertTrue(server.vad_has_speech)
 
+    async def test_each_recording_gets_a_fresh_vad(self):
+        """Silero keeps its state between windows: the previous request's must not carry over."""
+        server = make_server()
+        server.recording_task = None
+        await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
+        first = server.vad
+        server._end_recording()
+        await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
+        self.assertIsNot(server.vad, first)
+
 
 class TestTimers(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_the_only_timer_without_its_name(self):

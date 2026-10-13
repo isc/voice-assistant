@@ -201,6 +201,7 @@ This document tracks all architecture and technology decisions made for this pro
 - **Decision**: `process_voice_pipeline` skips STT when the VAD never flagged speech in the recording, and takes the existing empty-transcript path (follow-up: end quietly; wake word: error LED).
 - **Also**: no `STT_VAD_END` for such a recording. ESPHome 2025.6.2 handles `STT_VAD_END` by moving to `STOP_MICROPHONE` (then `AWAITING_RESPONSE` on its next loop) and ignores a `RUN_END` that arrives in `STOP_MICROPHONE`; with STT skipped, the `RUN_END` followed within a millisecond and the ESP stayed stuck "thinking", LEDs blinking. While the ESP is still `STREAMING_MICROPHONE`, `RUN_END` takes it back to idle.
 - **Trade-off**: Speech too quiet for Silero VAD (threshold 0.5) is now dropped instead of transcribed; so far the VAD has caught every real request, and a hallucinated answer is worse than a red LED.
+- **2026-10-13**: two requests in a row got the red LED, one plainly spoken (« Mercredi la semaine prochaine… »). The server kept one Silero instance for its lifetime, and Silero carries its state from window to window with no reset: replayed after the previous evening's request, the recording peaked at 0.26; through a fresh instance, 0.99. Each recording now gets a new instance (27 ms).
 
 ## 2026-10-10: Spotify
 

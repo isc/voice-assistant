@@ -34,6 +34,7 @@ from aioesphomeapi import (
 from aioesphomeapi.core import TimeoutAPIError
 from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
+from silero_vad_lite import SileroVAD
 
 import onnx_gpu
 from ha_client import LOCAL_CONFIG, asks_whole_house, compact, is_whole_house, normalize
@@ -664,6 +665,9 @@ class VoiceAssistantServer:
         self.vad_speech_frames = 0
         self.vad_silence_frames = 0
         self.vad_has_speech = False
+        # Silero's state carries from one window to the next, and has no reset: kept from the
+        # previous request, it scored a clear request 0.26 instead of 0.99 (red LED)
+        self.vad = SileroVAD(16000)
         # In follow-up mode, skip initial audio to avoid picking up TTS echo
         self.skip_audio_until = time.time() + 0.5 if self.is_followup else 0
 
@@ -831,11 +835,6 @@ class VoiceAssistantServer:
         Frames are cut from the whole recording, not from each chunk: the satellite's chunks have no
         fixed size since ESPHome 2026.6, and a chunk's leftover would be lost."""
         import array
-
-        from silero_vad_lite import SileroVAD
-
-        if not hasattr(self, "vad"):
-            self.vad = SileroVAD(16000)
 
         frame_size = 512 * 2  # 32 ms at 16 kHz, int16
 
