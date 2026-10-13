@@ -509,17 +509,33 @@ async function sendText(text) {
 
 // ---------------------------------------------------------------- Shortcuts
 // What this phone asks often, at about this time of day, one tap away. Learnt from requests that did
-// something (a tool other than goodbye), kept in this browser only
-const SHORTCUTS = 'va.shortcuts';
-const keyOf = (text) => text.toLowerCase().replace(/[.,;:!?…«»"]/g, ' ').replace(/\s+/g, ' ').trim();
+// something (a tool other than goodbye, and none failed), grouped by what they did however they were
+// worded, kept in this browser only
+const SHORTCUTS = 'va.actions';
+const STOPWORDS = new Set(['le', 'la', 'les', 'l', 'de', 'du', 'des', 'd', 'chez', 'dans', 'a', 'au', 'aux', 'un', 'une', 'en', 'sur', 'pour']);
+// Accents, articles and plurals aside: « les Volets de la chambre de Zoé » and « volet chambre Zoé » are alike
+const words = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+  .split(/[^a-z0-9]+/).filter((w) => w && !STOPWORDS.has(w)).map((w) => (w.length > 3 ? w.replace(/[sx]$/, '') : w));
+
+// What a request did: its calls with their arguments. Null if it did nothing, or something failed
+function actionOf(toolCalls) {
+  const calls = (toolCalls || []).filter((tc) => tc.function !== 'end_conversation');
+  if (!calls.length || calls.some((tc) => tc.failed || tc.error)) return null;
+  const args = (tc) => Object.entries(tc.args || {}).sort().map(([k, v]) => `${k}=${words(v).join(' ')}`);
+  return {
+    key: calls.map((tc) => `${tc.function}(${args(tc)})`).sort().join(' '),
+    words: [...new Set(calls.flatMap((tc) => Object.values(tc.args || {}).flatMap(words)))],
+  };
+}
 
 function learn(text, toolCalls) {
-  if (!(toolCalls || []).some((tc) => tc.function !== 'end_conversation')) return;
-  const key = keyOf(text);
-  if (!key || key.length > 90) return;
+  const action = actionOf(toolCalls);
+  text = text.trim().replace(/[.!]+$/, '');
+  if (!action || !text || text.length > 90) return;
   const all = store.get(SHORTCUTS, {});
-  const item = all[key] || {uses: []};
-  all[key] = {text: text.trim().replace(/[.!]+$/, ''), uses: [...item.uses, Date.now()].slice(-20)};
+  const item = all[action.key] ||= {uses: [], texts: {}, words: action.words};
+  item.uses = [...item.uses, Date.now()].slice(-20);
+  item.texts[text] = (item.texts[text] || 0) + 1;
   const ranked = Object.entries(all).sort((a, b) => score(b[1]) - score(a[1]));
   store.set(SHORTCUTS, Object.fromEntries(ranked.slice(0, 60)));
   renderShortcuts();
@@ -536,6 +552,13 @@ function score(item, now = new Date()) {
   }, 0);
 }
 
+// The wording sent again: the most used, else the one naming most of what was done, so that « Éteins le
+// plafonnier des invités » wins over « tu peux l'éteindre », which needed its conversation
+function wording(item) {
+  const named = (text) => words(text).filter((w) => item.words.includes(w)).length;
+  return Object.entries(item.texts).sort(([a, n], [b, m]) => m - n || named(b) - named(a))[0][0];
+}
+
 function renderShortcuts() {
   const box = $('shortcuts');
   if (cmd.value.trim()) { box.innerHTML = ''; return; }
@@ -546,14 +569,14 @@ function renderShortcuts() {
     .filter(([, , s]) => s > 0.5)
     .sort((a, b) => b[2] - a[2])
     .slice(0, 6);
-  box.innerHTML = best.map(([k, v]) => `<button class="chip" data-key="${esc(k)}">${esc(v.text)}</button>`).join('');
+  box.innerHTML = best.map(([k, v]) => `<button class="chip" data-key="${esc(k)}">${esc(wording(v))}</button>`).join('');
 }
 
 $('shortcuts').addEventListener('click', (e) => {
   const chip = e.target.closest('.chip');
   if (!chip) return;
   const item = store.get(SHORTCUTS, {})[chip.dataset.key];
-  if (item) { vibrate(10); sendText(item.text); }
+  if (item) { vibrate(10); sendText(wording(item)); }
 });
 $('shortcuts').addEventListener('contextmenu', (e) => {
   const chip = e.target.closest('.chip');
