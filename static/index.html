@@ -72,11 +72,11 @@
   .card.done { border-color: var(--accent); }
 
   /* The conversation */
-  #thread { flex: 1; overflow-y: auto; padding: 4px 16px 12px; overscroll-behavior: contain; scroll-behavior: auto; }
+  #thread { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 4px 16px 12px; overscroll-behavior: contain; scroll-behavior: auto; }
   .day { text-align: center; font-size: 12.5px; font-weight: 600; color: var(--text-3); margin: 18px 0 6px; }
   .conv { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; }
   .conv + .conv { border-top: 1px dashed var(--line); margin-top: 6px; padding-top: 12px; }
-  .msg { display: flex; flex-direction: column; max-width: 86%; }
+  .msg { display: flex; flex-direction: column; min-width: 0; max-width: 86%; }
   .msg.user { align-self: flex-end; align-items: flex-end; margin-top: 6px; }
   .msg.bot { align-self: flex-start; align-items: flex-start; }
   .who { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-3); margin: 0 6px 3px; }
@@ -88,11 +88,10 @@
   .bot .bubble { background: var(--surface); box-shadow: var(--shadow); border: 1px solid var(--line); border-bottom-left-radius: 6px; }
   .bot .bubble.failed { background: transparent; box-shadow: none; color: var(--text-2); font-style: italic; }
   .acts { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 2px 0; }
-  .act { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 9px 3px 7px; border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: 12.5px; line-height: 1.3; }
+  .act { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; padding: 3px 9px 3px 7px; border-radius: 12px; background: var(--surface-2); color: var(--text-2); font-size: 12.5px; line-height: 1.3; }
   .act .i { width: 14px; height: 14px; }
-  .act span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .act span { min-width: 0; overflow-wrap: anywhere; }
   .act.warn { background: var(--warn-soft); color: var(--warn); }
-  .act.warn span { white-space: normal; }
   .typing { display: inline-flex; gap: 4px; padding: 14px 16px; }
   .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); animation: blink 1.2s infinite both; }
   .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
@@ -933,6 +932,7 @@ document.addEventListener('visibilitychange', () => {
   } else {
     loadSites();
     startPolling();
+    renderShortcuts();  // ranked for the time it is now: the app may have slept since last night
   }
 });
 addEventListener('online', poll);
