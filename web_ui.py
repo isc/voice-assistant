@@ -132,13 +132,15 @@ async def _send(ws: web.WebSocketResponse, message: dict) -> None:
 
 
 async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[bytes, bool]]:
-    """Take the app's audio until speech ends, the page says the user is done, or time is up, with the
-    satellite's limits. Returns the recording and whether it holds speech; None if the page went away."""
-    recording, speech = bytearray(), SpeechEnd()
+    """Take the app's audio until speech ends, the page says the user is done (« end »), or time is up, with
+    the satellite's limits. Once the page says « hold » (the mic button held down), only « end » (released)
+    or the 30 s end it: no silence, no wait for speech (AD-062). Returns the recording and whether it holds
+    speech; None if the page went away."""
+    recording, speech, held = bytearray(), SpeechEnd(), False
     loop = asyncio.get_running_loop()
     start = loop.time()
     while len(recording) < _MAX_RECORDING:
-        limit = MAX_SECONDS if speech.heard else WAIT_FOR_FOLLOW_UP if follow_up else WAIT_FOR_SPEECH
+        limit = MAX_SECONDS if speech.heard or held else WAIT_FOR_FOLLOW_UP if follow_up else WAIT_FOR_SPEECH
         if (wait := limit - (loop.time() - start)) <= 0:
             break
         try:
@@ -148,12 +150,14 @@ async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[
         if message.type == WSMsgType.BINARY:
             heard = speech.heard
             recording.extend(message.data)
-            if speech.read(recording):
+            if speech.read(recording) and not held:
                 break
             if speech.heard and not heard:
                 await _send(ws, {"type": "speech"})
-        elif message.type == WSMsgType.TEXT:  # the user tapped: done speaking
-            break
+        elif message.type == WSMsgType.TEXT:
+            if message.data != "hold":  # « end »: done speaking
+                break
+            held = True
         else:
             return None
     return bytes(recording), speech.heard
@@ -335,8 +339,8 @@ def setup_routes(app, server):
     async def handle_listen(request):
         """The app as a satellite (AD-059): its microphone, 16 kHz 16-bit mono in binary messages,
         heard by the satellite's VAD; the reply is the phone's to play. To the page, in order:
-        speech (someone speaks), heard (stop sending), transcript, then reply or error. A text
-        message from the page means the user is done speaking; closing drops the request.
+        speech (someone speaks), heard (stop sending), transcript, then reply or error. From the page,
+        « end » when the user is done speaking, « hold » while the button is held; closing drops the request.
 
         ?site=… as for a typed request; ?client=… the browser's id (AD-060); ?follow_up=1 for the listening
         that follows a reply."""

@@ -2128,6 +2128,20 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         with wave.open(str(self.server.recordings.path(entry["audio"]))) as recording:
             self.assertEqual(recording.getnframes(), 3 * 1024)
 
+    async def test_held_the_end_of_speech_waits_for_the_release(self):
+        """A pause, then a child's question: held, it is the release that ends the request (AD-062)."""
+        client = await self.client()
+        with patch("web_ui.SpeechEnd", FakeSpeech):  # speech ended by the third chunk
+            ws = await client.ws_connect("/api/listen")
+            await ws.send_str("hold")
+            for _ in range(5):
+                await ws.send_bytes(bytes(2048))
+            self.assertEqual(await ws.receive_json(), {"type": "speech"})
+            await ws.send_str("end")
+            self.assertEqual(await ws.receive_json(), {"type": "heard"})
+            await ws.receive_json()  # the transcript
+        self.server.stt.transcribe.assert_awaited_once_with(bytes(5 * 2048))
+
     async def test_a_follow_up_nobody_spoke_in_ends_quietly(self):
         client = await self.client()
         ws = await client.ws_connect("/api/listen?follow_up=1")

@@ -101,9 +101,7 @@
   .debug .call { color: var(--text); }
   .debug button { margin: 6px 6px 0 0; padding: 4px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--line); font: 12px system-ui, sans-serif; color: var(--text-2); }
   .hello { text-align: center; color: var(--text-2); padding: 12vh 12px 0; }
-  .hello .mark { width: 64px; height: 64px; border-radius: 20px; margin: 0 auto 14px; display: grid; place-items: center; background: var(--soft); color: var(--accent); }
-  .hello .mark .i { width: 30px; height: 30px; }
-  .hello h2 { color: var(--text); font-size: 22px; margin: 0 0 6px; }
+  .hello h2 { color: var(--text); font-size: 26px; margin: 0 0 6px; }
   .hello p { margin: 0 0 18px; }
   .hello button[data-example] { display: block; margin: 8px auto; padding: 8px 14px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); color: var(--text-2); font-size: 14.5px; }
   .suggest { text-align: left; margin: 26px auto 0; max-width: 420px; }
@@ -118,8 +116,8 @@
   .history #history-btn, .history #live, .history .dock, .history .net { display: none; }
   .at-home #shortcuts { display: none; }
 
-  /* Dock: shortcuts, composer, voice */
-  .dock { padding: 6px 12px calc(10px + env(safe-area-inset-bottom)); position: relative; }
+  /* Dock: shortcuts, the mic, the field */
+  .dock { display: flex; flex-direction: column; padding: 6px 12px calc(10px + env(safe-area-inset-bottom)); position: relative; }
   #shortcuts { display: flex; gap: 6px; overflow-x: auto; padding: 2px 4px 8px; scrollbar-width: none; }
   #shortcuts::-webkit-scrollbar { display: none; }
   #shortcuts:empty { display: none; }
@@ -129,21 +127,24 @@
   .composer:focus-within { border-color: var(--accent); }
   .composer input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 16px; padding: 10px 0; }
   .composer input::placeholder { color: var(--text-3); }
-  #go { width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: var(--on-accent); flex: none; transition: transform .1s; }
-  #go:active { transform: scale(.94); }
-  #go .i { width: 22px; height: 22px; }
-  #go .send, .typed #go .mic { display: none; }
-  .typed #go .send { display: block; }
-  #go.nudge { animation: nudge 1s ease-in-out 3; }
-  @keyframes nudge { 50% { box-shadow: 0 0 0 10px color-mix(in srgb, var(--accent) 25%, transparent); } }
+  .composer { padding-left: 18px; }
+  #send { width: 46px; height: 46px; border-radius: 50%; display: none; place-items: center; background: var(--accent); color: var(--on-accent); flex: none; }
+  #send .i { width: 22px; height: 22px; }
+  .typed #send { display: grid; }
+  /* Typing, the keyboard up: the field needs the room, not the mic */
+  .dock:has(.composer:focus-within) .orb, .typed .orb { display: none; }
 
-  #voice { display: none; flex-direction: column; align-items: center; gap: 10px; padding: 6px 0 2px; }
-  .voicing #voice { display: flex; }
+  #voice-status { text-align: center; font-size: 15px; color: var(--text-2); min-height: 21px; font-weight: 500; margin-bottom: 6px; }
+  .dock:not(.voicing) #voice-status, .dock:not(.voicing) #voice-cancel { display: none; }
   .voicing #shortcuts, .voicing .composer { display: none; }
-  #voice-status { font-size: 15px; color: var(--text-2); min-height: 21px; font-weight: 500; }
-  .orb { position: relative; width: 96px; height: 96px; border-radius: 50%; display: grid; place-items: center; --level: 0; }
-  .orb .halo { position: absolute; inset: 6px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 22%, transparent); transform: scale(calc(1 + var(--level) * .5)); transition: transform 80ms linear; }
-  .orb .core { position: absolute; inset: 12px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: radial-gradient(circle at 34% 28%, #6cb2ff, var(--accent) 58%, var(--accent-2)); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 38%, transparent); transform: scale(calc(1 + var(--level) * .08)); transition: transform 80ms linear; }
+  .orb { position: relative; align-self: center; width: 88px; height: 88px; margin: 2px 0 10px; border-radius: 50%; display: grid; place-items: center; --level: 0; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+  [data-voice=idle] .orb .halo { opacity: 0; }
+  [data-voice=starting] .orb .core { opacity: .7; }
+  .orb:active .core { filter: brightness(1.08); }
+  .orb.nudge .core { animation: nudge 1s ease-in-out 3; }
+  @keyframes nudge { 50% { box-shadow: 0 0 0 12px color-mix(in srgb, var(--accent) 25%, transparent); } }
+  .orb .halo { position: absolute; inset: 4px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 22%, transparent); transform: scale(calc(1 + var(--level) * .5)); transition: transform 80ms linear; }
+  .orb .core { position: absolute; inset: 8px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: radial-gradient(circle at 34% 28%, #6cb2ff, var(--accent) 58%, var(--accent-2)); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 38%, transparent); transform: scale(calc(1 + var(--level) * .08)); transition: transform 80ms linear; }
   .orb .core .i { width: 30px; height: 30px; }
   .orb .core .i:not(.now) { display: none; }
   .orb .ring { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); pointer-events: none; }
@@ -154,7 +155,8 @@
   [data-voice=thinking] .orb .core::after { content: ""; position: absolute; inset: -7px; border-radius: 50%; border: 3px solid transparent; border-top-color: var(--accent); animation: spin .8s linear infinite; }
   @keyframes breathe { 50% { transform: scale(1.18); opacity: .6; } }
   @keyframes spin { to { transform: rotate(360deg); } }
-  #voice-cancel { height: 34px; padding: 0 16px; border-radius: 17px; color: var(--text-2); font-size: 14.5px; font-weight: 500; }
+  /* As tall as the field it replaces: the mic stays under the finger that holds it */
+  #voice-cancel { align-self: center; height: 54px; padding: 0 16px; border-radius: 17px; color: var(--text-2); font-size: 14.5px; font-weight: 500; }
   #voice-cancel:active { background: var(--surface-2); }
   [data-voice=thinking] #voice-cancel { visibility: hidden; }
 
@@ -233,26 +235,21 @@
   <footer class="dock" id="dock">
     <div id="toast" role="status"></div>
     <div id="shortcuts" aria-label="Raccourcis"></div>
-    <form class="composer" id="composer" autocomplete="off">
-      <input id="cmd" type="text" placeholder="Demandez quelque chose…" enterkeyhint="send" aria-label="Demande">
-      <button id="go" type="submit" aria-label="Parler">
-        <svg class="i mic"><use href="#i-mic"/></svg>
-        <svg class="i send"><use href="#i-send"/></svg>
-      </button>
-    </form>
-    <div id="voice">
-      <div id="voice-status" aria-live="assertive"></div>
-      <button class="orb" id="orb" aria-label="J'ai fini de parler">
+    <div id="voice-status" aria-live="assertive"></div>
+    <button class="orb" id="orb" type="button">
         <span class="halo"></span>
         <span class="core">
-          <svg class="i" data-for="listening hearing followup"><use href="#i-mic"/></svg>
+          <svg class="i" data-for="idle starting listening hearing followup"><use href="#i-mic"/></svg>
           <svg class="i fill" data-for="thinking"><use href="#i-dots"/></svg>
           <svg class="i fill" data-for="speaking"><use href="#i-stop"/></svg>
         </span>
         <svg class="ring" viewBox="0 0 100 100"><circle cx="50" cy="50" r="46"/></svg>
-      </button>
-      <button id="voice-cancel" type="button">Annuler</button>
-    </div>
+    </button>
+    <button id="voice-cancel" type="button">Annuler</button>
+    <form class="composer" id="composer" autocomplete="off">
+      <input id="cmd" type="text" placeholder="Ou écrivez votre demande…" enterkeyhint="send" aria-label="Demande écrite">
+      <button id="send" type="submit" aria-label="Envoyer"><svg class="i"><use href="#i-send"/></svg></button>
+    </form>
   </footer>
 </div>
 
@@ -494,8 +491,8 @@ function home() {
   const more = best.length
     ? `<div class="suggest"><h3>Vos raccourcis</h3>${best.map(([k, v]) => `<button data-key="${esc(k)}">${icon(v.icon || 'tool')}${esc(wording(v))}</button>`).join('')}</div>`
     : examples.map((x) => `<button data-example="${esc(x)}">« ${esc(x)} »</button>`).join('');
-  return `<div class="hello"><div class="mark">${icon('mic')}</div><h2>${hour >= 18 || hour < 5 ? 'Bonsoir' : 'Bonjour'}</h2>
-    <p>Touchez le micro et parlez, ou écrivez votre demande.</p>${more}</div>`;
+  return `<div class="hello"><h2>${hour >= 18 || hour < 5 ? 'Bonsoir' : 'Bonjour'}</h2>
+    <p>Touchez le micro, ou maintenez-le le temps de votre phrase.</p>${more}</div>`;
 }
 
 function showView(name) {
@@ -562,7 +559,6 @@ composer.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = cmd.value.trim();
   if (text) { cmd.value = ''; composerChanged(); sendText(text); }
-  else if (e.submitter) startVoice();  // the mic button, not Enter in an empty field
 });
 
 async function sendText(text) {
@@ -758,15 +754,18 @@ function earcon(up) {
 }
 
 const STATUS = {
-  listening: 'Je vous écoute', hearing: 'Je vous écoute', followup: 'Autre chose ?',
+  starting: '…', listening: 'Je vous écoute', hearing: 'Je vous écoute', followup: 'Autre chose ?',
   thinking: 'Je réfléchis…', speaking: 'Touchez pour couper',
+};
+const LABELS = {
+  idle: 'Parler : touchez, ou maintenez le temps de la phrase', speaking: 'Couper la réponse', thinking: 'Réponse en cours',
 };
 function setVoice(state) {
   dock.classList.toggle('voicing', state !== 'idle');
   dock.dataset.voice = state;
-  $('voice-status').textContent = STATUS[state] || '';
+  $('voice-status').textContent = voice.session?.held && state !== 'thinking' ? 'Relâchez quand vous avez fini' : STATUS[state] || '';
   for (const svg of document.querySelectorAll('.orb [data-for]')) svg.classList.toggle('now', svg.dataset.for.split(' ').includes(state));
-  orb.setAttribute('aria-label', state === 'speaking' ? 'Couper la réponse' : "J'ai fini de parler");
+  orb.setAttribute('aria-label', LABELS[state] || "J'ai fini de parler");
   if (state === 'idle') renderShortcuts();
   else animate();
 }
@@ -781,30 +780,35 @@ async function startVoice(followUp = false) {
     await startAudio();
   } catch {
     toast('Touchez le micro pour parler');
-    $('go').classList.add('nudge');
-    setTimeout(() => $('go').classList.remove('nudge'), 3000);
+    orb.classList.add('nudge');
+    setTimeout(() => orb.classList.remove('nudge'), 3000);
     return;
   }
-  const session = voice.session = {followUp, closeMic: null, pending: null, player: null, analyser: null};
-  setVoice(followUp ? 'followup' : 'listening');
-  if (!followUp) { earcon(true); vibrate(15); }
+  const session = voice.session = {followUp, closeMic: null, pending: null, player: null, analyser: null, held: false, early: []};
+  setVoice('starting');
+  if (press) press.session = session;
+  if (press?.held) hold(session);  // held before the socket was there
 
   const url = new URL('api/listen', location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.search = new URLSearchParams(tagged(followUp ? {follow_up: '1'} : {}));
   const ws = session.ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
-  const early = [];
-  ws.onopen = () => { early.forEach((pcm) => ws.send(pcm)); early.length = 0; };
+  ws.onopen = () => { session.early.forEach((message) => ws.send(message)); session.early = []; };
   ws.onmessage = (m) => onVoiceMessage(session, JSON.parse(m.data));
   ws.onclose = () => { toast('Connexion perdue'); endVoice(session); };
 
   try {
     const close = await openMic((pcm, rms) => {
+      // The cue when the microphone really captures, not at the tap: a few hundred milliseconds before,
+      // « Ferme les volets » lost its first sound and came out « Femme les volets » (2026-10-13)
+      if (dock.dataset.voice === 'starting' && voice.session === session) {
+        setVoice(followUp ? 'followup' : 'listening');
+        if (!followUp) { earcon(true); vibrate(15); }
+      }
       // 0 at -50 dBFS, 1 at -10 dBFS
       voice.target = Math.max(0, Math.min(1, (20 * Math.log10(rms + 1e-6) + 50) / 40));
-      if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
-      else if (ws.readyState === WebSocket.CONNECTING) early.push(pcm);
+      say(session, pcm);
     });
     if (voice.session !== session || dock.dataset.voice === 'thinking') close();  // ended, or heard, meanwhile
     else session.closeMic = close;
@@ -812,6 +816,12 @@ async function startVoice(followUp = false) {
     endVoice(session);
     toast(err.name === 'NotAllowedError' ? "L'accès au micro est refusé" : 'Micro indisponible');
   }
+}
+
+// To the server, or kept until the socket opens: audio, « hold », « end »
+function say(session, message) {
+  if (session.ws.readyState === WebSocket.OPEN) session.ws.send(message);
+  else if (session.ws.readyState === WebSocket.CONNECTING) session.early.push(message);
 }
 
 function closeMic(session) {
@@ -885,13 +895,48 @@ async function speak(session, audio) {
   }
 }
 
-orb.addEventListener('click', () => {
-  const session = voice.session;
+// The orb is the microphone. Touched, it listens until the server hears the end of speech, and a touch while
+// listening ends it sooner. Held, it listens until released, whatever is said around: the end of speech
+// was missed under 0.9 s of pause, and a child's question taken as the rest of the request (AD-062)
+const HOLD_MS = 300;
+let press = null;
+orb.addEventListener('pointerdown', (e) => {
+  if (e.button > 0 || press) return;
+  try { orb.setPointerCapture(e.pointerId); } catch {}  // the release comes here, wherever the finger went
   const state = dock.dataset.voice;
-  if (!session) return;
-  if (state === 'speaking') endVoice(session);
-  // Done speaking: the server takes what it has
-  else if (state !== 'thinking' && session.ws.readyState === WebSocket.OPEN) session.ws.send('end');
+  if (state === 'speaking') { endVoice(voice.session); return; }
+  if (state === 'thinking') return;
+  press = {session: voice.session, starts: state === 'idle', held: false};
+  press.timer = setTimeout(() => {
+    press.held = true;
+    if (press.session) hold(press.session);
+  }, HOLD_MS);
+  if (press.starts) startVoice();
+});
+function hold(session) {
+  session.held = true;
+  say(session, 'hold');
+  setVoice(dock.dataset.voice);
+  vibrate(10);
+}
+function release() {
+  if (!press) return;
+  clearTimeout(press.timer);
+  const {session, starts, held} = press;
+  press = null;
+  // The touch that started listening listens on; any other release means done speaking
+  if (session && voice.session === session && (held || !starts)) say(session, 'end');
+}
+orb.addEventListener('pointerup', release);
+orb.addEventListener('pointercancel', release);
+orb.addEventListener('contextmenu', (e) => e.preventDefault());
+orb.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  const state = dock.dataset.voice;
+  if (state === 'idle') startVoice();
+  else if (state === 'speaking') endVoice(voice.session);
+  else if (state !== 'thinking') say(voice.session, 'end');
 });
 $('voice-cancel').addEventListener('click', () => { if (voice.session) endVoice(voice.session); });
 
