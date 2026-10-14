@@ -1737,6 +1737,46 @@ class TestSpotifyMoves(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.stops(), (0, []))
 
 
+class TestMoveMedia(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """« Passe le son sur la Sonos », France Inter on the Google Home: music_control started Spotify on the Sonos,
+    the radio going on (2026-10-14, AD-063)."""
+
+    URL = "https://icecast.radiofrance.fr/franceinter-midfi.mp3"
+
+    def setUp(self):
+        super().setUp()
+        ha = self.server.ha_client
+        for eid, name in (("media_player.sonos_paris", "Sonos Paris"), ("media_player.google_home", "Google Home")):
+            ha.entities[eid] = {"friendly_name": name, "domain": "media_player", "area_name": "", "attributes": {}}
+        ha.reachable = AsyncMock(side_effect=lambda ids: ids)
+        ha.get_entity_state = AsyncMock(return_value={"state": "playing", "attributes": {"media_content_id": self.URL}})
+        self.server.new_request()
+
+    async def move(self):
+        await self.server.execute_function("play_radio", {"station": "france inter", "room": "Google Home"})
+        return await self.server.execute_function("move_media", {"room": "sonos"})
+
+    async def test_the_radio_moves_and_the_previous_speaker_stops(self):
+        self.assertEqual(await self.move(), "France Inter passée de Google Home à Sonos Paris")
+        calls = self.server.ha_client.call_service.call_args_list
+        self.assertEqual([(c.args[2], c.kwargs["media_content_id"]) for c in calls if c.args[1] == "play_media"][-1],
+                         ("media_player.sonos_paris", self.URL))  # fmt: skip
+        self.assertEqual(await self.stops(), (0, ["media_player.google_home"]))
+        self.assertEqual(self.server.site.radio[0], self.SONOS)
+        self.assertIn("Radio lancée sur Sonos Paris : France Inter", await self.server._music_for_prompt())
+
+    async def test_the_same_station_asked_elsewhere_moves_too(self):
+        await self.server.execute_function("play_radio", {"station": "france inter", "room": "Google Home"})
+        result = await self.server.execute_function("play_radio", {"station": "France Inter", "room": "sonos"})
+        self.assertEqual(result, "France Inter passée de Google Home à Sonos Paris")
+        self.assertEqual(await self.stops(), (0, ["media_player.google_home"]))
+
+    async def test_a_radio_stopped_since_is_not_brought_back(self):
+        self.server.ha_client.get_entity_state.return_value = {"state": "idle", "attributes": {}}
+        self.assertIn("Rien n'a été fait", await self.move())
+        self.assertEqual(await self.stops(), (0, []))
+
+
 class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
     """The Nest Hub showed « Default Media Receiver » and « Live » over the music."""
 

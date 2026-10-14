@@ -55,6 +55,8 @@ class Site:
     # neither see it nor be kept alive by it (AD-047)
     dry_run: Conversation = field(default_factory=Conversation)
     last_media_target: Optional[tuple[str, str]] = None
+    # The radio last started here: its speaker, station and URL, for « passe le son sur la Sonos » (AD-063)
+    radio: Optional[tuple[tuple[str, str], str, str]] = None
 
     @property
     def label(self) -> str:

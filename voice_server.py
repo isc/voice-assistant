@@ -1036,6 +1036,8 @@ class VoiceAssistantServer:
             return await self._execute_music_function(function_name, arguments)
         if function_name in ("play_radio", "stop_media", "set_volume", "change_volume"):
             return await self._execute_media_function(function_name, arguments)
+        if function_name == "move_media":
+            return await self._move_media(arguments.get("room"))
 
         if not self.ha_client:
             return "Home Assistant non disponible"
@@ -1197,12 +1199,22 @@ class VoiceAssistantServer:
             if not station:
                 return f"Station {station_name} inconnue"
             display_name, url = station
+            # The same station asked on another speaker is a move: France Inter went on on the Google Home
+            # under the Sonos's (2026-10-14)
+            previous = self.site.radio
+            moved = previous and previous[1:] == (display_name, url) and previous[0] != target
             await self._media_play_url(target, url)
+            self.site.radio = (target, display_name, url)
             self._after_media_change(target)
+            if moved and await self._still_plays(*previous):
+                self._in_background(self._media_command(previous[0], MediaPlayerCommand.STOP, ha_service="media_stop"))
+                return f"{display_name} passée de {self._speaker_name(previous[0])} à {self._speaker_name(target)}"
             return f"{display_name} en cours de lecture"
 
         if function_name == "stop_media":
             await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop")
+            if self.site.radio and self.site.radio[0] == target:
+                self.site.radio = None
             return "Lecture arrêtée"
 
         if function_name == "set_volume":
@@ -1276,23 +1288,26 @@ class VoiceAssistantServer:
             return "Spotify ne répond pas"
 
     async def _music_for_prompt(self) -> Optional[str]:
-        """What Spotify plays and where, so that "mets la musique sur la Sonos" moves it rather than replace it."""
-        if not self.spotify or not self.spotify.stream.listeners or not self._spotify_at:
+        """What Spotify plays and where, and the radio last started here, so that « passe le son sur la Sonos »
+        moves it rather than replace it."""
+        playing = []
+        if self.spotify and self.spotify.stream.listeners and self._spotify_at:
+            try:
+                track = await self.spotify.playing()
+            except SpotifyError:
+                track = None
+            if track:
+                site, target = self._spotify_at
+                where = self._speaker_name(target, site)
+                if site is not self.site and site.name:
+                    where += f", à {site.name.capitalize()}"
+                playing.append(f"Musique Spotify en cours sur {where} : {track}.")
+        if radio := self.site.radio:
+            target, station, _ = radio
+            playing.append(f"Radio lancée sur {self._speaker_name(target)} : {station}.")
+        if not playing:
             return None
-        try:
-            track = await self.spotify.playing()
-        except SpotifyError:
-            return None
-        if not track:
-            return None
-        site, target = self._spotify_at
-        where = self._speaker_name(target, site)
-        if site is not self.site and site.name:
-            where += f", à {site.name.capitalize()}"
-        return (
-            f"Musique Spotify en cours sur {where} : {track}. Pour la mettre sur une autre enceinte, "
-            "music_control resume avec room : elle continue sans changer."
-        )
+        return " ".join(playing) + " Pour passer le son sur une autre enceinte : move_media avec room."
 
     async def music_now(self) -> Optional[dict]:
         """What Spotify plays and where, for the web app; None when no speaker listens to it."""
@@ -1305,6 +1320,44 @@ class VoiceAssistantServer:
             return None
         site, target = self._spotify_at
         return {**track, "speaker": self._speaker_name(target, site), "site": site.name}
+
+    async def _move_media(self, room: Optional[str]) -> str:
+        """« Passe le son sur la Sonos »: Spotify, or the radio, moved from its speaker to another, which stops.
+
+        music_control resume did it for Spotify alone: asked to move France Inter from the Google Home to
+        the Sonos, it started Spotify's last queue on the Sonos, France Inter going on (2026-10-14)."""
+        await self._restore_speakers()
+        target = self._resolve_media_target(room) if room else None
+        if not target:
+            return _no_speaker(room) if room else "Rien n'a été fait : la demande ne dit pas vers quelle enceinte"
+        if refusal := await self._offline_reply(target):
+            return refusal
+        name = self._speaker_name(target)
+        if self.spotify and self.spotify.stream.listeners and (source := self._spotify_here):
+            if source == target:
+                return f"La musique est déjà sur {name}"
+            if not await self._point_at_spotify(target):
+                return f"{name} ne répond pas"
+            self._after_media_change(target)
+            return f"Musique Spotify passée de {self._speaker_name(source)} à {name}"
+        if (radio := self.site.radio) and await self._still_plays(*radio):
+            source, station, url = radio
+            if source == target:
+                return f"{station} est déjà sur {name}"
+            await self._media_play_url(target, url)
+            self.site.radio = (target, station, url)
+            self._in_background(self._media_command(source, MediaPlayerCommand.STOP, ha_service="media_stop"))
+            self._after_media_change(target)
+            return f"{station} passée de {self._speaker_name(source)} à {name}"
+        return "Rien n'a été fait : ni radio ni musique en cours ici"
+
+    async def _still_plays(self, target: tuple[str, str], station: str, url: str) -> bool:
+        """Whether the speaker still plays that radio: not stopped, nor given something else, from its app."""
+        kind, ident = target
+        if kind == "esp":
+            return self._satellite_plays()
+        state = await self.ha_client.get_entity_state(ident) or {}
+        return state.get("state") == "playing" and state.get("attributes", {}).get("media_content_id", url) == url
 
     def _speaker_name(self, target: tuple[str, str], site: Optional[Site] = None) -> str:
         kind, ident = target
@@ -1361,6 +1414,8 @@ class VoiceAssistantServer:
         metadata: Cast's media metadata, what a screen shows (HA's cast integration passes it on)."""
         if self._spotify_here == target:
             self._spotify_at = None  # a radio or a picture takes it off the stream (the stream, once it joins, back)
+        if self.site.radio and self.site.radio[0] == target:
+            self.site.radio = None  # the same: play_radio sets it again
         kind, ident = target
         if kind == "esp":
             api = self.devices.get(ident)

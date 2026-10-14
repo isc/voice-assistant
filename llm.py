@@ -256,6 +256,19 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             },
         },
         {
+            "name": "move_media",
+            "description": (
+                "Passer le son en cours, radio ou musique, sur une autre enceinte, sans changer ce qui "
+                "joue ; l'ancienne s'arrête (ex: « passe le son sur la Sonos », « mets la radio dans le "
+                "salon plutôt », « transfère sur la Google Home »)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"room": {**media_room_param, "description": "Enceinte ou pièce où passer le son"}},
+                "required": ["room"],
+            },
+        },
+        {
             "name": "stop_media",
             "description": "Arrêter la lecture (radio, musique) en cours",
             "parameters": {
@@ -346,10 +359,9 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             {
                 "name": "music_control",
                 "description": (
-                    "Piloter la musique Spotify en cours : pause, reprendre, titre suivant ou "
-                    "précédent, ou savoir ce qui joue (« c'est quoi cette chanson ? »). "
-                    "Pour déplacer la musique en cours vers une autre enceinte (« mets la musique "
-                    "dans le salon »), action resume avec room : elle continue là où elle en était."
+                    "Piloter la musique Spotify : pause, reprendre (avec room, sur cette enceinte), titre "
+                    "suivant ou précédent, ou savoir ce qui joue (« c'est quoi cette chanson ? »). "
+                    "Pour passer la musique qui joue sur une autre enceinte : move_media."
                 ),
                 "parameters": {
                     "type": "object",

@@ -339,14 +339,18 @@ const TOOLS = {
   get_weather: ['Météo', 'sun'], find_place: ['Lieu', 'pin'],
   query_calendar: ['Agenda', 'cal'], create_event: ['Nouvel événement', 'cal'],
   play_music: ['Spotify', 'note'], music_control: ['Spotify', 'note'], play_radio: ['Radio', 'radio'],
-  stop_media: ['Stop', 'vol'], set_volume: ['Volume', 'vol'], change_volume: ['Volume', 'vol'],
+  stop_media: ['Stop', 'vol'], move_media: ['Son passé sur', 'vol'], set_volume: ['Volume', 'vol'], change_volume: ['Volume', 'vol'],
   show_image: ['Image', 'image'],
 };
 const ACTIONS = {pause: 'pause', resume: 'reprise', next: 'suivant', previous: 'précédent', current: 'en cours', up: 'plus fort', down: 'moins fort'};
 
+// « sonos_paris », « media_player.google_home »: the model sometimes writes ids, shown as names
+const asName = (v) => (typeof v === 'string' && /^[a-z0-9_.]+$/.test(v) && /[_.]/.test(v)
+  ? v.replace(/^[a-z_]+\./, '').split('_').map(cap).join(' ') : v);
+
 function describeCall(tc) {
   const [verb, ic] = TOOLS[tc.function] || [tc.function, 'tool'];
-  const a = tc.args || {};
+  const a = Object.fromEntries(Object.entries(tc.args || {}).map(([k, v]) => [k, asName(v)]));
   const pct = (v) => (v == null ? null : v + ' %');
   const target = [
     a.entity, a.room, a.query, a.station, a.location, a.title, a.label,
