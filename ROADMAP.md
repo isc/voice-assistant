@@ -28,21 +28,30 @@ Parakeet v3 already transcribes 25 European languages with automatic detection: 
 - The LLM answering in the language of the request: the system prompt is French and says nothing about it.
 - The TTS speaking that language: `ff_siwis` and the misaki G2P are set up for French. Kokoro has English voices; the reply's language has to pick the voice and the G2P, either detected on the reply text or stated by the LLM.
 
-## Pictures
+## Screen
+
+### Our own Cast receiver
+The Nest Hub runs Google's Default Media Receiver today: it plays one URL and shows the label it was given at launch, nothing more. A receiver of our own is a web page the Nest Hub shows full screen, holding a connection to the server, which tells it what to show after each request, with no reload in between:
+- the music playing, title and cover updated at each track: the Default Media Receiver shows new metadata only by loading the stream again, a cut at each track (AD-057);
+- `show_image`'s pictures, generated pictures and Immich slideshows below, run by the page instead of casting one picture at a time;
+- later: timers counting down, the week's weather, the day's calendar, a shop's hours and map, the last reply's text.
+
+First version: the music playing and `show_image`, the two uses of the Default Media Receiver today, to try the limits before going further. Needed: a Google Cast developer account (US$5, the family's Google account) for an app ID; the Nest Hub registered by its serial number while the app is unpublished; the page served over HTTPS; HA starts the app by its ID. To find out:
+- whether a page served over HTTPS may play the stream and read the server over plain HTTP, as the Paris relay serves them; otherwise both through HTTPS;
+- how long a receiver playing nothing stays on screen (HA's own Cast receiver loops a media to keep a dashboard up);
+- what touch a third-party receiver gets on a Nest Hub, likely little beyond the media controls: a screen driven by voice;
+- one app at a time: a cast from a phone, or "Hey Google", takes the screen back.
 
 ### Generated pictures
 "Dessine-moi un dragon" → generate the picture locally and show it on the Nest Hub, next to `show_image` (AD-038). charras already has `stable-diffusion.cpp` with Z-Image-Turbo q8 in `/opt/sd/` (~22 s per 1024² image; exact command in home-infra `charras/trellis/beast.sh`). Blocked by VRAM today: Z-Image needs ~6.3 GB beside the voice assistant's ~4 GB and `gemma4:12b`'s 8.1 GB on the 16 GB card. A second GPU is ordered for charras. Unlike web pictures, the result is a local file, so it must be served over HTTP, beside `/tts/`, which the Paris relay forwards.
 
 ### Family photos from Immich
-"Montre-moi des photos de Zoé", "les vacances en Bretagne l'été dernier", "Charlie à la plage" → find them in Immich and show them on the Nest Hub as a slideshow. Immich on charras (v2.7.5, port 2283) already has smart search (CLIP), facial recognition and reverse geocoding enabled, so: people for names, place and date for trips, smart search for descriptions. Cast shows one picture at a time, so a slideshow means casting every few seconds, with "suivante" and "arrête". Immich needs an API key and the Paris Nest cannot reach the charras LAN, so the server fetches each preview and serves it under `/tts/`. Prerequisites on the family's side: migrate the photos, name the face clusters.
+"Montre-moi des photos de Zoé", "les vacances en Bretagne l'été dernier", "Charlie à la plage" → find them in Immich and show them on the Nest Hub as a slideshow. Immich on charras (v2.7.5, port 2283) already has smart search (CLIP), facial recognition and reverse geocoding enabled, so: people for names, place and date for trips, smart search for descriptions. The Default Media Receiver shows one picture at a time, so a slideshow means casting every few seconds, or our own receiver (above), with "suivante" and "arrête". Immich needs an API key and the Paris Nest cannot reach the charras LAN, so the server fetches each preview and serves it under `/tts/`. Prerequisites on the family's side: migrate the photos, name the face clusters.
 
 ## Media
 
 ### Spotify started from a phone
 "Assistant vocal" is in the account's Spotify Connect device list, but music started from a phone plays to nobody until a speaker listens to the stream. Watch go-librespot's `/events` websocket and point the default speaker at the stream when playback starts from elsewhere.
-
-### The track playing on the screen
-The Nest Hub shows the title and cover of what was asked (AD-057), not of the following tracks: the Default Media Receiver shows new metadata only by loading the stream again. Two ways: load it again at each track change from go-librespot's `/events`, holding the FIFO meanwhile so that no music is lost, for a gap of a few seconds between tracks on screens; or a Cast receiver of our own (Google Cast developer account, US$5), which plays the stream and reads the track from the server, with no gap.
 
 ### Two rooms, two musics
 A single go-librespot is a single queue. Different music in two rooms needs a second player and a second Spotify account, as Spotify allows one stream per account.
