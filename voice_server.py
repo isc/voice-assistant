@@ -138,6 +138,37 @@ _NOTHING_DONE = re.compile(
     r"|ne répond(ent)? pas|hors ligne|inconnue?\b|n'est pas connecté|manquante?",
     re.IGNORECASE,
 )
+
+# What a shortcut of the web app runs again (AD-065), by kind: a state, not offered while in effect, or an
+# event, offered every time. Not the reads, whose results the model puts into words, nor an event at a date
+# gone by (create_event)
+_SHORTCUT_KINDS = {
+    **dict.fromkeys(
+        ("turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock")
+        + ("play_radio", "play_music", "move_media", "stop_media", "set_volume"),
+        "state",
+    ),
+    **dict.fromkeys(
+        ("set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image"), "event"
+    ),
+}
+
+
+def _shortcut_kind(function_name, arguments) -> Optional[str]:
+    if function_name == "music_control" and arguments.get("action") == "current":
+        return None  # « qu'est-ce qui passe ? », a read
+    return _SHORTCUT_KINDS.get(function_name)
+
+
+def _mark_outcome(tc_entry: dict, result: str) -> None:
+    """What the web app reads of a call in the log: that it did nothing, by its error or its result, else the
+    kind of shortcut it makes, if any."""
+    if "error" in tc_entry or _NOTHING_DONE.search(result):
+        tc_entry["failed"] = True
+    elif kind := _shortcut_kind(tc_entry["function"], tc_entry["args"]):
+        tc_entry["redo"] = kind
+
+
 # The exchange log's replies to requests that got none
 NOTHING_HEARD = "[Rien compris]"
 LLM_FAILED = "[Erreur LLM: pas de réponse]"
@@ -1545,7 +1576,6 @@ class VoiceAssistantServer:
         from llm import (
             chat_completion,
             claims_completed_action,
-            get_tool_definitions,
             parse_text_tool_call,
         )
 
@@ -1598,26 +1628,13 @@ class VoiceAssistantServer:
         if music_info := await self._music_for_prompt():
             context.append(music_info)
 
-        tools = get_tool_definitions(self.ha_client, self.calendar_client, music=self.spotify is not None)
+        tools = self._tools()
         # Only these run: a name the model made up (« unlock ») or a tool this house lacks does not
         offered = {tool["name"] for tool in tools}
 
         # A dry run reads and writes only its own conversation (AD-047)
         conversation = self.site.dry_run if dry_run else self.conversation
-
-        # Expire old conversation history
-        now = time.time()
-        if now - conversation.last_time > self.CONVERSATION_TIMEOUT:
-            if conversation.history:
-                logger.info("Conversation ended or expired, starting fresh")
-            conversation.history = []
-            conversation.id = None
-        conversation.last_time = now
-
-        # Assign conversation ID for first exchange in a conversation
-        if not conversation.id:
-            conversation.id = int(now)
-            conversation.shown_images.clear()
+        self._continue(conversation)
 
         # Build messages
         messages = [{"role": "system", "content": system_prompt}]
@@ -1710,23 +1727,16 @@ class VoiceAssistantServer:
                     logger.info(f"Dry run: {function_name}({function_args})")
                     tc_entry["result"] = self._unasked_sweep(function_name, function_args) or "OK"
                     return tc_entry, tc_entry["result"]
-                async with self._tool_semaphore:
-                    try:
-                        result = await self.execute_function(function_name, function_args)
-                        logger.info(f"Function result: {result}")
-                        tc_entry["result"] = done[key] = result
-                    except Exception as e:
-                        logger.error(f"Function execution error: {e}")
-                        result = f"Erreur: {e}"
-                        tc_entry["error"] = str(e)
+                result = await self._run_call(tc_entry)
+                if "error" not in tc_entry:
+                    done[key] = result
                 return tc_entry, result
 
             outcomes = await asyncio.gather(*(run_tool(tc) for tc in message["tool_calls"]))
 
             tool_messages = []
             for (tc_entry, result), tool_call in zip(outcomes, message["tool_calls"]):
-                if "error" in tc_entry or _NOTHING_DONE.search(result):
-                    tc_entry["failed"] = True
+                _mark_outcome(tc_entry, result)
                 self._last_tool_calls.append(tc_entry)
                 tool_messages.append(
                     {
@@ -1805,6 +1815,38 @@ class VoiceAssistantServer:
             save_to_history(content)
         return content if content else None
 
+    def _tools(self) -> list:
+        """The tools this house offers: the model is given these, and only these run."""
+        from llm import get_tool_definitions
+
+        return get_tool_definitions(self.ha_client, self.calendar_client, music=self.spotify is not None)
+
+    def _continue(self, conversation) -> None:
+        """A request goes on with its conversation, or starts a new one after a silence."""
+        now = time.time()
+        if now - conversation.last_time > self.CONVERSATION_TIMEOUT:
+            if conversation.history:
+                logger.info("Conversation ended or expired, starting fresh")
+            conversation.history = []
+            conversation.id = None
+        conversation.last_time = now
+        if not conversation.id:
+            conversation.id = int(now)
+            conversation.shown_images.clear()
+
+    async def _run_call(self, tc_entry: dict) -> str:
+        """Run one call, its result or its error written in its log entry; the result, as the model reads it."""
+        async with self._tool_semaphore:
+            try:
+                result = await self.execute_function(tc_entry["function"], tc_entry["args"])
+                logger.info(f"Function result: {result}")
+                tc_entry["result"] = result
+            except Exception as e:
+                logger.error(f"Function execution error: {e}")
+                result = f"Erreur: {e}"
+                tc_entry["error"] = str(e)
+        return result
+
     def _keep_llm_loaded(self) -> None:
         """Ask Ollama to keep the model loaded: it unloads after 5 idle minutes, and the next request
         then waited ~7 s (median of 10 cold requests, against 2.3 s warm). Sent with each request
@@ -1871,6 +1913,43 @@ class VoiceAssistantServer:
             # The phone listens again after the reply, unless it said goodbye or started music
             "follow_up": not (self._end_conversation or self._no_followup),
         }
+
+    async def redo(self, calls: list, label: str) -> Optional[dict]:
+        """A shortcut of the web app: what a request did, its calls run again as they were, without the model
+        (AD-065). Logged as the browser's request, worded as its button. None if a call is not one a
+        shortcut runs."""
+        offered = {tool["name"] for tool in self._tools()}
+        if not isinstance(calls, list) or not calls or not all(
+            isinstance(call, dict)
+            and call.get("function") in offered
+            and isinstance(args := call.get("args"), dict)
+            and _shortcut_kind(call["function"], args)
+            for call in calls
+        ):
+            return None
+        logger.info(f'Shortcut: "{label}"')
+        self._continue(self.conversation)
+        # The user's button, not the model's reading: « tout » is what it says
+        self._whole_house = True
+        t0 = time.time()
+        tool_calls = [{"function": call["function"], "args": call["args"]} for call in calls]
+        results = await asyncio.gather(*(self._run_call(tc_entry) for tc_entry in tool_calls))
+        for tc_entry, result in zip(tool_calls, results):
+            _mark_outcome(tc_entry, result)
+        response = ". ".join(results)
+        timings = {"total": round(time.time() - t0, 2)}
+        self.exchange_log.add(
+            "shortcut",
+            label,
+            label,
+            response,
+            timings=timings,
+            tool_calls=tool_calls,
+            conversation_id=self.conversation.id,
+            site=self.site.name,
+            client=self._client,
+        )
+        return {"input": label, "response": response, "timings": timings, "tool_calls": tool_calls}
 
     async def answer_recording(
         self,

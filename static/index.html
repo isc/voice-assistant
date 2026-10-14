@@ -105,7 +105,8 @@
   .hello p { margin: 0 0 18px; }
   .hello button[data-example] { display: block; margin: 8px auto; padding: 8px 14px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); color: var(--text-2); font-size: 14.5px; }
   .suggest { text-align: left; margin: 26px auto 0; max-width: 420px; }
-  .suggest h3 { font-size: 13px; font-weight: 600; color: var(--text-3); margin: 0 4px 8px; }
+  .suggest h3 { display: flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 600; color: var(--text-3); margin: 0 4px 8px; }
+  .suggest h3 .i { width: 15px; height: 15px; color: inherit; }
   .suggest button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 50px; margin-bottom: 8px; padding: 10px 14px; border-radius: 16px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); color: var(--text); font-size: 15.5px; text-align: left; }
   .suggest button:active { background: var(--soft); }
   .suggest .i { color: var(--accent); }
@@ -121,8 +122,13 @@
   #shortcuts { display: flex; gap: 6px; overflow-x: auto; padding: 2px 4px 8px; scrollbar-width: none; }
   #shortcuts::-webkit-scrollbar { display: none; }
   #shortcuts:empty { display: none; }
-  .chip { flex: none; max-width: 70vw; height: 34px; padding: 0 13px; border-radius: 17px; background: var(--surface); border: 1px solid var(--line); color: var(--text); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--shadow); }
-  .chip:active { background: var(--soft); }
+  /* Buttons, not messages: tinted, with what they act on as an icon, after a « Refaire » */
+  .redo-label { flex: none; display: inline-flex; align-items: center; gap: 4px; padding: 0 2px; font-size: 13px; font-weight: 600; color: var(--text-3); }
+  .redo-label .i { width: 15px; height: 15px; }
+  .chip { flex: none; display: inline-flex; align-items: center; gap: 6px; max-width: 70vw; height: 34px; padding: 0 13px 0 10px; border-radius: 17px; background: var(--soft); color: var(--on-soft); font-size: 14px; font-weight: 500; }
+  .chip span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip .i { width: 16px; height: 16px; color: var(--accent); }
+  .chip:active { filter: brightness(.94); }
   .composer { display: flex; align-items: center; gap: 6px; padding: 5px 5px 5px 18px; border-radius: 28px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); }
   .composer:focus-within { border-color: var(--accent); }
   .composer input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 16px; padding: 10px 0; }
@@ -214,6 +220,7 @@
   <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6.5 4h4v16h-4zM13.5 4h4v16h-4z"/></symbol>
   <symbol id="i-next" viewBox="0 0 24 24"><path d="M5 5v14l10-7zM17 5h2.5v14H17z"/></symbol>
   <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></symbol>
   <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></symbol>
   <symbol id="i-back" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
   <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="6" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="18" cy="12" r="2"/></symbol>
@@ -257,7 +264,7 @@
   <form method="dialog">
     <h2>Réglages</h2>
     <label class="row"><span><b>Détails techniques</b><small>Latences, appels d'outils, enregistrements, demandes vides</small></span><input type="checkbox" class="switch" id="opt-debug"></label>
-    <button type="button" class="row" id="opt-forget"><span><b>Oublier les raccourcis</b><small>Les demandes fréquentes proposées au-dessus du champ</small></span></button>
+    <button type="button" class="row" id="opt-forget"><span><b>Oublier les raccourcis</b><small>Les actions fréquentes de ce téléphone, à refaire d'un geste</small></span></button>
     <div id="health">…</div>
     <button class="done" value="close">Fermer</button>
   </form>
@@ -285,6 +292,9 @@ function toast(text) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
 }
+
+// A request that never reached the server
+const offline = (err) => !navigator.onLine || err instanceof TypeError;
 
 async function post(path, body) {
   const r = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
@@ -328,6 +338,7 @@ const SOURCES = {
   voice: ['speaker', 'Voice PE'],
   app: ['phone', 'Téléphone'],
   web: ['keys', 'Écrit'],
+  shortcut: ['redo', 'Raccourci'],
 };
 // Each tool as a verb, an icon, and what of its arguments names the target
 const TOOLS = {
@@ -342,14 +353,15 @@ const TOOLS = {
   stop_media: ['Stop', 'vol'], move_media: ['Son passé sur', 'vol'], set_volume: ['Volume', 'vol'], change_volume: ['Volume', 'vol'],
   show_image: ['Image', 'image'],
 };
+const toolOf = (name) => TOOLS[name] || [name, 'tool'];
 const ACTIONS = {pause: 'pause', resume: 'reprise', next: 'suivant', previous: 'précédent', current: 'en cours', up: 'plus fort', down: 'moins fort'};
 
 // « sonos_paris », « media_player.google_home »: the model sometimes writes ids, shown as names
 const asName = (v) => (typeof v === 'string' && /^[a-z0-9_.]+$/.test(v) && /[_.]/.test(v)
   ? v.replace(/^[a-z_]+\./, '').split('_').map(cap).join(' ') : v);
 
-function describeCall(tc) {
-  const [verb, ic] = TOOLS[tc.function] || [tc.function, 'tool'];
+// A call as words: its verb, then what it acted on
+function callText(tc) {
   const a = Object.fromEntries(Object.entries(tc.args || {}).map(([k, v]) => [k, asName(v)]));
   const pct = (v) => (v == null ? null : v + ' %');
   const target = [
@@ -358,9 +370,14 @@ function describeCall(tc) {
     ACTIONS[a.action] || ACTIONS[a.direction], pct(a.level), pct(a.position), pct(a.brightness),
     a.temperature != null && a.temperature + ' °C',
   ].filter(Boolean);
+  return [toolOf(tc.function)[0], ...target].join(' · ');
+}
+
+function describeCall(tc) {
+  const [verb, ic] = toolOf(tc.function);
   // Nothing done, by the server's reading of the result: shown, so that a reply claiming otherwise is caught
   const failed = tc.failed || tc.error;
-  const text = failed ? `${verb} · ${tc.result || 'erreur'}` : [verb, ...target].join(' · ');
+  const text = failed ? `${verb} · ${tc.result || 'erreur'}` : callText(tc);
   return `<span class="act${failed ? ' warn' : ''}" title="${esc(tc.result || '')}">${icon(failed ? 'warn' : ic)}<span>${esc(text)}</span></span>`;
 }
 
@@ -406,10 +423,10 @@ function visible(e) {
   return debug || e.input || e.response !== '[Rien compris]';
 }
 
-// time: null for none; mine: from this browser, where who asked goes without saying
+// time: null for none; mine: from this browser, where who asked goes without saying, not that it was a shortcut
 function userMsg(input, source, time, mine = false) {
   const [ic, label] = SOURCES[source] || SOURCES.web;
-  const who = time === null ? '' : `<div class="who">${mine ? esc(time) : `${icon(ic)}${esc(label)}${time ? ' · ' + time : ''}`}</div>`;
+  const who = time === null ? '' : `<div class="who">${mine && source !== 'shortcut' ? esc(time) : `${icon(ic)}${esc(label)}${time ? ' · ' + time : ''}`}</div>`;
   const bubble = input ? `<div class="bubble">${esc(input)}</div>` : '<div class="bubble unheard">rien entendu</div>';
   return `<div class="msg user${source === 'voice' ? ' from-voice' : ''}">${who}${bubble}</div>`;
 }
@@ -486,6 +503,7 @@ function render(toBottom = false) {
   if (html !== shown) { thread.innerHTML = shown = html; }
   if (toBottom) stick = true;
   if (stick) thread.scrollTop = thread.scrollHeight;
+  renderShortcuts();
 }
 
 function home() {
@@ -493,7 +511,7 @@ function home() {
   const best = bestShortcuts();
   const examples = ['Ferme les volets du séjour', 'Quel temps fera-t-il demain ?', 'Mets France Inter dans la cuisine', 'Un minuteur de 10 minutes pour les pâtes'];
   const more = best.length
-    ? `<div class="suggest"><h3>Vos raccourcis</h3>${best.map(([k, v]) => `<button data-key="${esc(k)}">${icon(v.icon || 'tool')}${esc(wording(v))}</button>`).join('')}</div>`
+    ? `<div class="suggest"><h3>${icon('redo')}Refaire d'un geste</h3>${best.map((x) => shortcutButton(x)).join('')}</div>`
     : examples.map((x) => `<button data-example="${esc(x)}">« ${esc(x)} »</button>`).join('');
   return `<div class="hello"><h2>${hour >= 18 || hour < 5 ? 'Bonsoir' : 'Bonjour'}</h2>
     <p>Touchez le micro, ou maintenez-le le temps de votre phrase.</p>${more}</div>`;
@@ -570,9 +588,9 @@ async function sendText(text) {
   try {
     // Typed, read: no spoken reply
     const reply = await post('api/send', tagged({text}));
-    learn(text, reply.tool_calls);
+    learn(reply.tool_calls);
   } catch (err) {
-    if (!navigator.onLine || err instanceof TypeError) {
+    if (offline(err)) {
       toast('Pas de connexion, demande non envoyée');
       if (!cmd.value) { cmd.value = text; composerChanged(); }
     }
@@ -581,38 +599,38 @@ async function sendText(text) {
 }
 
 // ---------------------------------------------------------------- Shortcuts
-// What this phone asks often, at about this time of day, one tap away. Learnt from requests that did
-// something (a tool other than goodbye, and none failed), grouped by what they did however they were
-// worded, kept in this browser only
-const SHORTCUTS = 'va.actions';
+// What this phone does often, at about this time of day, one tap to do again (AD-065). Learnt from the
+// requests that acted, none of their calls failing, grouped by what they did however they were worded,
+// and run again as they ran: their calls, not their words, which the microphone may have misheard
+// (« Femme les volets »). Kept in this browser only
+const SHORTCUTS = 'va.shortcuts';
+try { localStorage.removeItem('va.actions'); } catch {}  // the shortcuts before AD-065, worded as heard
 const STOPWORDS = new Set(['le', 'la', 'les', 'l', 'de', 'du', 'des', 'd', 'chez', 'dans', 'a', 'au', 'aux', 'un', 'une', 'en', 'sur', 'pour']);
 // Accents, articles and plurals aside: « les Volets de la chambre de Zoé » and « volet chambre Zoé » are alike
 const words = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
   .split(/[^a-z0-9]+/).filter((w) => w && !STOPWORDS.has(w)).map((w) => (w.length > 3 ? w.replace(/[sx]$/, '') : w));
+const argsKey = (tc) => Object.entries(tc.args || {}).sort().map(([k, v]) => `${k}=${words(v).join(' ')}`).join(',');
 
-// What a request did: its calls with their arguments. Null if it did nothing, or something failed
+// What a request did, at this home: its calls. Null if it did nothing, or not only what a shortcut runs
+// again, by the server's mark (`redo`: a state, or an event), which a failed call never has
 function actionOf(toolCalls) {
   const calls = (toolCalls || []).filter((tc) => tc.function !== 'end_conversation');
-  if (!calls.length || calls.some((tc) => tc.failed || tc.error)) return null;
-  const args = (tc) => Object.entries(tc.args || {}).sort().map(([k, v]) => `${k}=${words(v).join(' ')}`);
+  if (!calls.length || !calls.every((tc) => tc.redo)) return null;
   return {
-    key: calls.map((tc) => `${tc.function}(${args(tc)})`).sort().join(' '),
-    icon: (TOOLS[calls[0].function] || [])[1],
-    words: [...new Set(calls.flatMap((tc) => Object.values(tc.args || {}).flatMap(words)))],
+    key: [site || '', ...calls.map((tc) => `${tc.function}(${argsKey(tc)})`).sort()].join(' '),
+    calls: calls.map(({function: f, args, redo}) => ({function: f, args: args || {}, redo})),
   };
 }
 
-function learn(text, toolCalls) {
+function learn(toolCalls) {
   const action = actionOf(toolCalls);
-  text = text.trim().replace(/[.!]+$/, '');
-  if (!action || !text || text.length > 90) return;
+  if (!action) return;
   const all = store.get(SHORTCUTS, {});
-  const item = all[action.key] ||= {uses: [], texts: {}, words: action.words, icon: action.icon};
+  const item = all[action.key] ||= {uses: [], site};
+  item.calls = action.calls;  // its arguments as last written
   item.uses = [...item.uses, Date.now()].slice(-20);
-  item.texts[text] = (item.texts[text] || 0) + 1;
   const ranked = Object.entries(all).sort((a, b) => score(b[1]) - score(a[1]));
   store.set(SHORTCUTS, Object.fromEntries(ranked.slice(0, 60)));
-  renderShortcuts();
 }
 
 function score(item, now = new Date()) {
@@ -626,34 +644,63 @@ function score(item, now = new Date()) {
   }, 0);
 }
 
-// The wording sent again: the most used, else the one naming most of what was done, so that « Éteins le
-// plafonnier des invités » wins over « tu peux l'éteindre », which needed its conversation
-function wording(item) {
-  const named = (text) => words(text).filter((w) => item.words.includes(w)).length;
-  return Object.entries(item.texts).sort(([a, n], [b, m]) => m - n || named(b) - named(a))[0][0];
+// A state is in effect when the last one set on the same thing (entity, room) in the last 12 hours, from any
+// device of this home, is that very one: the shutters just opened are not offered to open; closed, they are.
+// An event (a timer, « plus fort ») is offered every time
+const target = (tc) => ['entity', 'room', 'label'].map((k) => words(tc.args?.[k]).join(' ')).join('|');
+function lastStates() {
+  const since = Date.now() - 12 * 3600e3, last = new Map();
+  for (const e of entries) {
+    if (!visible(e) || when(e) < since) continue;
+    for (const tc of e.tool_calls || []) if (tc.redo === 'state') last.set(target(tc), tc);
+  }
+  return last;
 }
+const inEffect = (item, last) => item.calls.every((tc) => {
+  const set = tc.redo === 'state' && last.get(target(tc));
+  return set?.function === tc.function && argsKey(set) === argsKey(tc);
+});
+
+// What the button says: what it does, as the reply's chips said it
+const shortcutText = (item) => item.calls.map(callText).join(' + ');
+const shortcutButton = ([key, item], cls = '') =>
+  `<button class="${cls}" data-key="${esc(key)}">${icon(toolOf(item.calls[0].function)[1])}<span>${esc(shortcutText(item))}</span></button>`;
 
 function bestShortcuts() {
+  const last = lastStates();
   return Object.entries(store.get(SHORTCUTS, {}))
-    .filter(([, v]) => v.uses.length >= 2)
+    .filter(([, v]) => v.uses.length >= 2 && !(site && v.site && v.site !== site) && !inEffect(v, last))
     .map(([k, v]) => [k, v, score(v)])
     .filter(([, , s]) => s > 0.5)
     .sort((a, b) => b[2] - a[2])
     .slice(0, 6);
 }
 
-// Above the field during a conversation, on the home screen otherwise
+// Above the field during a conversation; on the home screen, home() shows them
+let shownShortcuts = '';
 function renderShortcuts() {
-  const best = cmd.value.trim() ? [] : bestShortcuts();
-  $('shortcuts').innerHTML = best.map(([k, v]) => `<button class="chip" data-key="${esc(k)}">${esc(wording(v))}</button>`).join('');
-  if (app.classList.contains('at-home')) render();
+  const hidden = cmd.value.trim() || view === 'history' || app.classList.contains('at-home');
+  const best = hidden ? [] : bestShortcuts();
+  const html = best.length ? `<span class="redo-label">${icon('redo')}Refaire</span>${best.map((x) => shortcutButton(x, 'chip')).join('')}` : '';
+  if (html !== shownShortcuts) $('shortcuts').innerHTML = shownShortcuts = html;
+}
+
+async function redo(item) {
+  const label = shortcutText(item);
+  const p = addPending(label, 'shortcut');
+  try {
+    learn((await post('api/redo', tagged({calls: item.calls, label}))).tool_calls);
+  } catch (err) {
+    toast(offline(err) ? "Pas de connexion, rien n'a été fait" : 'Le raccourci a échoué');
+  }
+  await settle(p);
 }
 
 function sendShortcut(e) {
   const chip = e.target.closest('[data-key]');
   if (!chip) return;
   const item = store.get(SHORTCUTS, {})[chip.dataset.key];
-  if (item) { vibrate(10); sendText(wording(item)); }
+  if (item) { vibrate(10); redo(item); }
 }
 function forgetShortcut(e) {
   const chip = e.target.closest('[data-key]');
@@ -663,7 +710,7 @@ function forgetShortcut(e) {
   const all = store.get(SHORTCUTS, {});
   delete all[chip.dataset.key];
   store.set(SHORTCUTS, all);
-  renderShortcuts();
+  render();
 }
 for (const box of [$('shortcuts'), thread]) {
   box.addEventListener('click', sendShortcut);
@@ -862,7 +909,7 @@ async function onVoiceMessage(session, msg) {
     }
   } else if (msg.type === 'reply') {
     session.ws.onclose = null;  // the server closes it now, the session goes on
-    learn(msg.input, msg.tool_calls);
+    learn(msg.tool_calls);
     // The reply's audio loads while the log does
     const audio = msg.audio && !document.hidden && fetch(msg.audio).then((r) => r.arrayBuffer());
     settle(session.pending);
@@ -1040,9 +1087,9 @@ const menu = $('menu');
 $('opt-debug').checked = debug;
 $('opt-debug').addEventListener('change', (e) => { debug = e.target.checked; store.set('va.debug', debug); render(); });
 $('opt-forget').addEventListener('click', () => {
-  if (!confirm('Oublier toutes les demandes fréquentes de ce téléphone ?')) return;
+  if (!confirm('Oublier les raccourcis de ce téléphone ?')) return;
   store.set(SHORTCUTS, {});
-  renderShortcuts();
+  render();
   toast('Raccourcis oubliés');
 });
 menu.addEventListener('click', (e) => { if (e.target === menu) menu.close(); });  // the backdrop
@@ -1086,14 +1133,13 @@ document.addEventListener('visibilitychange', () => {
     shownAt = Date.now();
     loadSites();
     startPolling();
-    renderShortcuts();  // ranked for the time it is now: the app may have slept since last night
+    render();  // shortcuts ranked for the time it is now: the app may have slept since last night
   }
 });
 addEventListener('online', poll);
 
 setVoice('idle');
 showView(view);
-renderShortcuts();
 loadSites().then(startPolling);
 // The launcher's « Parler » shortcut
 if (new URLSearchParams(location.search).has('parler')) {

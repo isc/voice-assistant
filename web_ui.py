@@ -265,9 +265,13 @@ def setup_routes(app, server):
         text = body.get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise _json_error(web.HTTPBadRequest, "missing 'text' field")
-        await use_site(request, body)
-        server.new_request(_client(body))
+        await serve(request, body)
         return text
+
+    async def serve(request, params: dict) -> None:
+        """The request's site (use_site), and a request of its own, its browser's (AD-061)."""
+        await use_site(request, params)
+        server.new_request(_client(params))
 
     async def use_site(request, body: dict) -> None:
         """Serve the site the request names, else the one it comes from, for this request only: a
@@ -326,6 +330,19 @@ def setup_routes(app, server):
             return web.json_response({"error": "LLM returned no response"}, status=500)
         return web.json_response(reply)
 
+    async def handle_redo(request):
+        """A shortcut of the web app: what a request did, run again as it was, without the model (AD-065).
+
+        {"calls": [{"function": …, "args": {…}}], "label": what its button says, "site": …, "client": …}"""
+        body = await _read_body(request)
+        label = body.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise _json_error(web.HTTPBadRequest, "missing 'label' field")
+        await serve(request, body)
+        if not (reply := await server.redo(body.get("calls"), label.strip()[:200])):
+            raise _json_error(web.HTTPBadRequest, "not calls a shortcut runs")
+        return web.json_response(reply)
+
     async def handle_test_prompt(request):
         text = await read_text(request)
         logger.info(f'[TEST] Input: "{text}"')
@@ -344,11 +361,10 @@ def setup_routes(app, server):
 
         ?site=… as for a typed request; ?client=… the browser's id (AD-060); ?follow_up=1 for the listening
         that follows a reply."""
-        await use_site(request, dict(request.query))
+        await serve(request, dict(request.query))
         follow_up = request.query.get("follow_up") == "1"
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        server.new_request(_client(request.query))
         if not (heard := await _listen(ws, follow_up)):
             return ws
         await _send(ws, {"type": "heard"})
@@ -396,8 +412,7 @@ def setup_routes(app, server):
         body = await _read_body(request)
         if not isinstance(action := body.get("action"), str) or action not in CONTROLS:
             raise _json_error(web.HTTPBadRequest, f"action: one of {', '.join(CONTROLS)}")
-        await use_site(request, body)
-        server.new_request()
+        await serve(request, body)
         result = await server.execute_function("music_control", {"action": action})
         return web.json_response({"result": result, "music": await server.music_now()})
 
@@ -504,6 +519,7 @@ def setup_routes(app, server):
     # The patterns keep the path inside the recordings folder
     app.router.add_get(r"/recordings/{recording:[\d-]+/[\d_]+\.wav}", handle_recording)
     app.router.add_post("/api/send", handle_web_send)
+    app.router.add_post("/api/redo", handle_redo)
     app.router.add_post("/api/dry-run", handle_dry_run)
     app.router.add_post("/api/timers/cancel", handle_cancel_timer)
     app.router.add_post("/api/music", handle_music)

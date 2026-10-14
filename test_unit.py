@@ -142,6 +142,7 @@ def make_server(env=None):
     server._pending_service_calls = set()
     server._volume_lock = asyncio.Lock()
     server._spotify_at = None
+    server._tool_semaphore = asyncio.Semaphore(4)
     return server
 
 
@@ -1630,7 +1631,6 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.server = make_server()
         self.server.calendar_client = self.server.spotify = None
-        self.server._tool_semaphore = asyncio.Semaphore(4)
         self.server._keep_llm_loaded = lambda: None
         self.server.execute_function = AsyncMock(return_value="Il fait 18 degrés")
         call = {"id": "c1", "function": {"name": "get_weather", "arguments": '{"location": "Paris"}'}}
@@ -2248,6 +2248,33 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         self.server.text_to_speech_file.assert_not_awaited()
         entry = self.server.exchange_log.entries[-1]
         self.assertEqual((entry["source"], entry["client"]), ("web", None))  # not an id a browser makes
+
+    async def test_a_shortcut_runs_its_calls_again_without_the_model(self):
+        """A shortcut said and sent again « Femme les volets… », as misheard; now it runs what was done (AD-065)."""
+        server = self.server
+        server.ha_client, server.calendar_client, server.spotify = make_client(), None, MagicMock()
+        server.execute_function = AsyncMock(return_value="Volets Chambre Zoé en cours de fermeture")
+        server.process_with_llm = AsyncMock()
+        client = await self.client()
+        calls = [{"function": "close_cover", "args": {"entity": "volets", "room": "Chambre Zoé"}}]
+        label = "Fermer · volets · Chambre Zoé"
+        body = {"calls": calls, "label": label, "client": "phone42"}
+        reply = await (await client.post("/api/redo", json=body)).json()
+        self.assertEqual(reply["response"], "Volets Chambre Zoé en cours de fermeture")
+        server.execute_function.assert_awaited_once_with("close_cover", {"entity": "volets", "room": "Chambre Zoé"})
+        server.process_with_llm.assert_not_awaited()
+        entry = server.exchange_log.entries[-1]
+        self.assertEqual((entry["source"], entry["input"], entry["client"]), ("shortcut", label, "phone42"))
+        self.assertEqual(entry["tool_calls"][0]["redo"], "state")  # for the page: not offered while in effect
+        # Reads need the model to put them into words; a made-up function runs nowhere
+        current = {"function": "music_control", "args": {"action": "current"}}
+        for bad in ([{"function": "get_weather", "args": {}}], [current], [{"function": "unlock", "args": {}}], []):
+            response = await client.post("/api/redo", json={"calls": bad, "label": "x"})
+            self.assertEqual(response.status, 400, bad)
+        self.assertEqual(server.execute_function.await_count, 1)
+        server.execute_function.return_value = "Appareil volets non trouvé"
+        await client.post("/api/redo", json={"calls": calls, "label": label})
+        self.assertTrue(server.exchange_log.entries[-1]["tool_calls"][0]["failed"])
 
     async def test_exchanges_unchanged_answer_304(self):
         client = await self.client()
