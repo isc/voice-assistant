@@ -44,6 +44,13 @@ def normalize(text: str) -> str:
     return " ".join(w for w in fold(text).split() if w not in STOPWORDS)
 
 
+def without_home(name: str, home: str) -> str:
+    """A device's name without its home's (« Sonos Paris » at Paris → « Sonos »): a request is already that
+    home's, by the satellite it reaches or the phone's Wi-Fi or choice. A name that is only the home's stays."""
+    kept = [word for word in name.split() if fold(word) != fold(home)] if home else []
+    return " ".join(kept) if kept else name
+
+
 def compact(text: str) -> str:
     """normalize() without spaces or punctuation, for names said many ways ("Rire & Chansons")."""
     return "".join(c for c in normalize(text) if c.isalnum())
@@ -126,9 +133,10 @@ def cover_kind(info: dict) -> Optional[str]:
 class HAClient:
     """Home Assistant REST API client with area-based entity discovery."""
 
-    def __init__(self, base_url: str, token: str):
+    def __init__(self, base_url: str, token: str, home: str = ""):
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self.home_name = home  # the site's name, left out of device names
         # entity_id -> {friendly_name, domain, state, attributes, area_id, area_name}
         self.entities: dict[str, dict] = {}
         self.areas: dict[str, str] = {}  # area_id -> area_name
@@ -287,7 +295,7 @@ class HAClient:
             area_name = self.areas.get(area_id, "") if area_id else ""
 
             self.entities[entity_id] = {
-                "friendly_name": friendly_name.strip(),
+                "friendly_name": without_home(friendly_name.strip(), self.home_name),
                 "domain": domain,
                 "state": state["state"],
                 "attributes": state.get("attributes", {}),

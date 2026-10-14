@@ -396,7 +396,7 @@ class VoiceAssistantServer:
         if not site.ha_token:
             logger.info(f"Site {site.label}: no HA token configured, device control disabled")
             return
-        client = HAClient(site.ha_url, site.ha_token)
+        client = HAClient(site.ha_url, site.ha_token, site.name)
         if not await client.connect():
             await client.close()
             # A reload during an HA blip keeps the client that worked

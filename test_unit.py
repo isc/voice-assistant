@@ -28,7 +28,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from opening_hours import ParserError
 
-from ha_client import HAClient, asks_whole_house, cover_kind, normalize
+from ha_client import HAClient, asks_whole_house, cover_kind, normalize, without_home
 from images import is_about
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
@@ -188,6 +188,24 @@ class TestNormalize(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Tests: resolve_entity (single entity fuzzy match)
 # ---------------------------------------------------------------------------
+
+
+class TestWithoutHome(unittest.TestCase):
+    def test_the_home_name_left_out(self):
+        self.assertEqual(without_home("Sonos Paris", "paris"), "Sonos")
+        self.assertEqual(without_home("Sonos Paris Loudness", "paris"), "Sonos Loudness")
+        self.assertEqual(without_home("Paris", "paris"), "Paris")  # nothing would be left
+        self.assertEqual(without_home("Sonos Paris", ""), "Sonos Paris")  # a single, unnamed site
+        self.assertEqual(without_home("Lampe Parisienne", "paris"), "Lampe Parisienne")
+
+    def test_the_former_name_still_finds_it(self):
+        client = make_client()
+        client.entities["media_player.sonos_paris"] = {
+            "friendly_name": "Sonos", "domain": "media_player", "area_name": "", "area_id": None, "attributes": {}
+        }  # fmt: skip
+        self.assertEqual(
+            client.resolve_entity("Sonos Paris", domain_hints=["media_player"]), "media_player.sonos_paris"
+        )
 
 
 class TestResolveEntity(unittest.TestCase):
