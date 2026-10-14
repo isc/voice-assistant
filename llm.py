@@ -389,8 +389,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
     cover_entity_param = {
         "type": "string",
         "description": (
-            "Nom exact d'un volet ou d'une fenêtre ; ou « volets » / « fenêtres » avec room pour tous ceux "
-            "d'une pièce, d'un groupe ou de partout, en un seul appel"
+            "Nom exact d'un volet, d'une fenêtre ou d'une moustiquaire ; ou « volets » / « fenêtres » / "
+            "« moustiquaires » avec room pour tous ceux d'une pièce, d'un groupe ou de partout, en un seul appel"
         ),
     }
 
@@ -496,8 +496,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         {
             "name": "open_cover",
             "description": (
-                "Ouvrir un volet, un store ou une fenêtre. Volets et fenêtres sont des équipements "
-                "distincts : n'agir que sur celui qui est demandé."
+                "Ouvrir un volet, un store ou une fenêtre, ou remonter une moustiquaire. Volets, fenêtres et "
+                "moustiquaires sont des équipements distincts : n'agir que sur celui qui est demandé."
             ),
             "parameters": {
                 "type": "object",
@@ -511,8 +511,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
         {
             "name": "close_cover",
             "description": (
-                "Fermer entièrement un volet, un store ou une fenêtre. Volets et fenêtres sont des "
-                "équipements distincts : n'agir que sur celui qui est demandé."
+                "Fermer entièrement un volet, un store ou une fenêtre, ou baisser une moustiquaire. Volets, "
+                "fenêtres et moustiquaires sont des équipements distincts : n'agir que sur celui qui est demandé."
             ),
             "parameters": {
                 "type": "object",

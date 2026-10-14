@@ -108,6 +108,8 @@ def _area_matches(norm_area: str, norm_room: str) -> bool:
 # (opening a skylight when asked for a shutter lets the rain in).
 # The name's word comes first (« Volet salon » reported as window by Z-Wave JS); device_class
 # for names that say nothing (HomeKit Controller exposes Velux shutters with no class).
+# Mosquito screens have no device_class of their own: their name is all that tells them apart
+# (the Paris RFPlayer reports none), and « ferme les volets » must leave them up.
 COVER_KIND_BY_DEVICE_CLASS = {
     "window": "fenetre",
     "shutter": "volet",
@@ -119,11 +121,12 @@ COVER_KIND_BY_DEVICE_CLASS = {
 COVER_KIND_KEYWORDS = {
     "volet": ("volet", "volets", "store", "stores"),
     "fenetre": ("fenetre", "fenetres", "velux"),
+    "moustiquaire": ("moustiquaire", "moustiquaires"),
 }
 
 
 def cover_kind(info: dict) -> Optional[str]:
-    """Classify a cover as 'volet' or 'fenetre', None if undetermined.
+    """Classify a cover as 'volet', 'fenetre' or 'moustiquaire', None if undetermined.
 
     The name's word first: Z-Wave JS reports the Paris living-room shutters as device_class
     "window", and « Volet salon » says what it is. device_class for names that say nothing.
@@ -189,10 +192,13 @@ class HAClient:
     async def _render_template(self, template: str, timeout: Optional[float] = None) -> Optional[str]:
         """Render a template with HA's template API — the REST way into the registries. None on failure."""
         try:
+            # Never timeout=None: aiohttp reads it as no timeout at all, not the session's 10 s. On
+            # 2026-10-14 one call caught by a reboot of the Paris HA, through the SSH tunnel, waited
+            # 45 min, and every home's refresh with it.
             async with self._session.post(
                 f"{self.base_url}/api/template",
                 json={"template": template},
-                timeout=aiohttp.ClientTimeout(total=timeout) if timeout else None,
+                timeout=aiohttp.ClientTimeout(total=timeout) if timeout else self._session.timeout,
             ) as r:
                 if r.status != 200:
                     logger.warning(f"HA template API returned {r.status}")
@@ -340,10 +346,12 @@ class HAClient:
                 "media_player": "médias",
                 "lock": "serrures",
             }.get(info["domain"], info["domain"])
-            # Roof windows are covers too — list them apart so the LLM never
-            # offers a skylight when the user asked for a roller shutter.
-            if info["domain"] == "cover" and cover_kind(info) == "fenetre":
-                domain_label = "fenêtres"
+            # Roof windows and mosquito screens are covers too — list them apart so the LLM never
+            # offers a skylight, or a screen, when the user asked for a roller shutter.
+            if info["domain"] == "cover":
+                domain_label = {"fenetre": "fenêtres", "moustiquaire": "moustiquaires"}.get(
+                    cover_kind(info), domain_label
+                )
             by_area.setdefault(area, {}).setdefault(domain_label, []).append(info["friendly_name"])
 
         parts = []
@@ -361,13 +369,7 @@ class HAClient:
     # Generic names that mean "all entities of this domain in the room".
     # Keys are normalize()d; the second element narrows covers to a sub-kind.
     _GENERIC_NAMES = {
-        "volet": ("cover", "volet"),
-        "volets": ("cover", "volet"),
-        "store": ("cover", "volet"),
-        "stores": ("cover", "volet"),
-        "fenetre": ("cover", "fenetre"),
-        "fenetres": ("cover", "fenetre"),
-        "velux": ("cover", "fenetre"),
+        **{word: ("cover", kind) for kind, words in COVER_KIND_KEYWORDS.items() for word in words},
         "lumiere": ("light", None),
         "lumieres": ("light", None),
         "lampe": ("light", None),
@@ -396,7 +398,7 @@ class HAClient:
         return any(_area_matches(normalize(area), norm_room) for area in self.areas.values())
 
     def _filter_by_cover_kind(self, entity_ids: list[str], kind: Optional[str]) -> list[str]:
-        """Keep only covers of the requested kind (volet / fenetre)."""
+        """Keep only covers of the requested kind (volet / fenetre / moustiquaire)."""
         if not kind:
             return entity_ids
         covers = [e for e in entity_ids if self.entities[e]["domain"] == "cover"]

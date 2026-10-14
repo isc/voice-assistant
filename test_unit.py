@@ -496,6 +496,68 @@ class TestCoverKinds(unittest.TestCase):
         self.assertIn("volets: Volet Cuisine", prompt)
 
 
+class TestMosquitoScreens(unittest.TestCase):
+    """The Paris bedrooms: a shutter and a mosquito screen each, the screen with no device_class."""
+
+    def setUp(self):
+        self.client = make_client()
+        rooms = (("chambre_zoe", "Chambre Zoé", "Zoé"), ("chambre_charlie", "Chambre Charlie", "Charlie"))
+        for room_id, room, who in rooms:
+            self.client.entities[f"cover.moustiquaire_{room_id}"] = {
+                "friendly_name": f"Moustiquaire {who}",
+                "domain": "cover",
+                "state": "open",
+                "attributes": {},
+                "area_id": room_id,
+                "area_name": room,
+            }
+
+    def test_named_a_screen(self):
+        self.assertEqual(cover_kind({"friendly_name": "Moustiquaire Zoé", "attributes": {}}), "moustiquaire")
+
+    def test_shutters_leave_the_screen_up(self):
+        self.assertEqual(self.client.resolve_all_entities("volets", room="Chambre Zoé"), ["cover.volet_zoe"])
+
+    def test_every_screen_of_the_house(self):
+        """It was only Zoé's: « moustiquaires » was matched as one device's name."""
+        eids = self.client.resolve_all_entities("moustiquaires", room="partout")
+        self.assertEqual(sorted(eids), ["cover.moustiquaire_chambre_charlie", "cover.moustiquaire_chambre_zoe"])
+
+    def test_the_screen_of_a_room(self):
+        eids = self.client.resolve_all_entities("moustiquaire", room="Chambre Charlie")
+        self.assertEqual(eids, ["cover.moustiquaire_chambre_charlie"])
+
+    def test_sweep_leaves_the_screens(self):
+        eids = self.client.resolve_all_entities("tout", room="partout", domain_hints=["cover"])
+        self.assertIn("cover.volet_zoe", eids)
+        self.assertNotIn("cover.moustiquaire_chambre_zoe", eids)
+
+    def test_prompt_lists_screens_apart(self):
+        self.assertIn("moustiquaires: Moustiquaire Zoé", self.client.get_entity_list_for_prompt())
+
+
+class TestTemplateTimeout(unittest.IsolatedAsyncioTestCase):
+    async def test_no_timeout_given_keeps_the_sessions(self):
+        """timeout=None in aiohttp is no timeout at all: a hung HA must not hang the caller."""
+
+        async def hang(request):
+            await asyncio.sleep(5)
+            return web.Response(text="late")
+
+        app = web.Application()
+        app.router.add_post("/api/template", hang)
+        async with TestServer(app) as server:
+            client = make_client()
+            client.base_url = str(server.make_url("")).rstrip("/")
+            client._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=0.2))
+            try:
+                started = asyncio.get_running_loop().time()
+                self.assertIsNone(await client._render_template("{{ 1 }}"))
+                self.assertLess(asyncio.get_running_loop().time() - started, 2)
+            finally:
+                await client._session.close()
+
+
 # ---------------------------------------------------------------------------
 # Tests: detecting an action claimed without any function call
 # ---------------------------------------------------------------------------
