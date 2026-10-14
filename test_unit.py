@@ -2265,7 +2265,7 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         server.process_with_llm.assert_not_awaited()
         entry = server.exchange_log.entries[-1]
         self.assertEqual((entry["source"], entry["input"], entry["client"]), ("shortcut", label, "phone42"))
-        self.assertEqual(entry["tool_calls"][0]["redo"], "state")  # for the page: not offered while in effect
+        self.assertTrue(entry["tool_calls"][0]["redo"])  # the page learns shortcuts from it
         # Reads need the model to put them into words; a made-up function runs nowhere
         current = {"function": "music_control", "args": {"action": "current"}}
         for bad in ([{"function": "get_weather", "args": {}}], [current], [{"function": "unlock", "args": {}}], []):
@@ -2275,6 +2275,61 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         server.execute_function.return_value = "Appareil volets non trouvé"
         await client.post("/api/redo", json={"calls": calls, "label": label})
         self.assertTrue(server.exchange_log.entries[-1]["tool_calls"][0]["failed"])
+
+    async def test_shortcuts_in_effect_by_the_devices_state(self):
+        """The shutters open, whoever opened them, are not offered to open (AD-066)."""
+        server = self.server
+        server.ha_client, server.calendar_client = make_client(), None
+        states = {eid: {"state": info["state"], "attributes": {}} for eid, info in FAKE_ENTITIES.items()}
+        server.ha_client.get_entity_state = AsyncMock(side_effect=states.get)
+        client = await self.client()
+
+        def shortcut(function, **args):
+            return [{"function": function, "args": args}]
+
+        shortcuts = [
+            shortcut("open_cover", entity="volets", room="Chambre Zoé"),  # open
+            shortcut("close_cover", entity="volets", room="Chambre Zoé"),
+            shortcut("close_cover", entity="volets", room="partout"),  # one of four closed
+            shortcut("set_timer", duration_minutes=10),  # an event: offered every time
+            "close_cover",
+        ]
+        with self.assertNoLogs("ha_client", level="INFO"):  # asked every few seconds
+            reply = await (await client.post("/api/in-effect", json={"shortcuts": shortcuts})).json()
+        self.assertEqual(reply["in_effect"], [True, False, False, False, False])
+        read = [call.args[0] for call in server.ha_client.get_entity_state.await_args_list]
+        self.assertEqual(sorted(read), sorted(set(read)))  # each device once
+
+    async def test_a_move_in_effect_as_move_media_sees_it(self):
+        """Spotify on the Sonos, France Inter on the Google Home: « passe le son sur la Sonos » moves nothing."""
+        server = self.server
+        sonos, google = ("ha", "media_player.sonos"), ("ha", "media_player.google_home")
+        server.spotify = MagicMock(stream=MagicMock(listeners=1))
+        server._spotify_at = (server.site, sonos)
+        server.site.radio = (google, "France Inter", "http://inter")
+        server._resolve_media_target = lambda room: sonos if room == "Sonos" else google
+        state = AsyncMock(return_value={"state": "playing", "attributes": {"media_content_id": "http://inter"}})
+        self.assertTrue(await server._call_in_effect("move_media", {"room": "Sonos"}, state))
+        self.assertFalse(await server._call_in_effect("move_media", {"room": "Google Home"}, state))
+
+    def test_device_states_in_effect(self):
+        from voice_server import _device_in_effect
+
+        for function, args, value, attributes, expected in (
+            ("open_cover", {}, "open", {"current_position": 100}, True),
+            ("open_cover", {}, "open", {"current_position": 40}, False),  # half open: « ouvre » still acts
+            ("open_cover", {}, "opening", {}, True),
+            ("close_cover", {}, "open", {}, False),
+            ("set_cover_position", {"position": 50}, "open", {"current_position": 50}, True),
+            ("turn_on", {"brightness": 50}, "on", {"brightness": 128}, True),
+            ("turn_on", {"brightness": 50}, "on", {"brightness": 255}, False),
+            ("turn_on", {}, "unavailable", {}, False),
+            ("turn_off", {}, "standby", {}, True),  # a speaker
+            ("set_temperature", {"temperature": "20"}, "heat", {"temperature": 20.0}, True),
+            ("lock", {}, "unlocked", {}, False),
+        ):
+            state = {"state": value, "attributes": attributes}
+            self.assertEqual(_device_in_effect(function, args, state), expected, (function, args, value))
 
     async def test_exchanges_unchanged_answer_304(self):
         client = await self.client()

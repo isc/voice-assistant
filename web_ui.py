@@ -16,6 +16,7 @@ from aiohttp import WSMsgType, web
 from yarl import URL
 
 import onnx_gpu
+from ha_client import quiet
 from sites import Site, site_at_address
 from spotify import CONTROLS
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
@@ -343,6 +344,20 @@ def setup_routes(app, server):
             raise _json_error(web.HTTPBadRequest, "not calls a shortcut runs")
         return web.json_response(reply)
 
+    async def handle_in_effect(request):
+        """Which shortcuts of the web app do what is already the case, by the devices' state (AD-066).
+
+        {"shortcuts": [[{"function": …, "args": {…}}, …], …], "site": …} → {"in_effect": [true, …]}"""
+        body = await _read_body(request)
+        if not isinstance(shortcuts := body.get("shortcuts"), list) or len(shortcuts) > 20:
+            raise _json_error(web.HTTPBadRequest, "'shortcuts': up to 20 lists of calls")
+        await serve(request, body)
+        token = quiet.set(True)  # asked at each poll of the page: its resolutions stay out of the log
+        try:
+            return web.json_response({"in_effect": await server.in_effect(shortcuts)})
+        finally:
+            quiet.reset(token)
+
     async def handle_test_prompt(request):
         text = await read_text(request)
         logger.info(f'[TEST] Input: "{text}"')
@@ -520,6 +535,7 @@ def setup_routes(app, server):
     app.router.add_get(r"/recordings/{recording:[\d-]+/[\d_]+\.wav}", handle_recording)
     app.router.add_post("/api/send", handle_web_send)
     app.router.add_post("/api/redo", handle_redo)
+    app.router.add_post("/api/in-effect", handle_in_effect)
     app.router.add_post("/api/dry-run", handle_dry_run)
     app.router.add_post("/api/timers/cancel", handle_cancel_timer)
     app.router.add_post("/api/music", handle_music)

@@ -10,11 +10,16 @@ import logging
 import os
 import re
 import unicodedata
+from contextvars import ContextVar
 from typing import Optional
 
 import aiohttp
 
 logger = logging.getLogger(__name__)
+# Set by a request that only reads, every few seconds (the web app's shortcuts, AD-066): the resolutions it
+# runs stay out of the log, but for errors
+quiet: ContextVar[bool] = ContextVar("quiet", default=False)
+logger.addFilter(lambda record: record.levelno >= logging.ERROR or not quiet.get())
 
 # Domains we expose as LLM tools
 SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock"}

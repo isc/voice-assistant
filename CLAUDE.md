@@ -39,7 +39,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
 | `images.py` | Pictures for the screen: Wikipedia article's lead image, else an Openverse photo; the screen loads the URL itself |
 | `recordings.py` | Each voice request kept as WAV + JSON (transcript, reply, tool calls, timings) for 90 days, root-only |
-| `web_ui.py` | Web app routes: the phone as a satellite (`/api/listen`, a WebSocket), typed requests, shortcuts run again without the LLM (`/api/redo`, AD-065), timers and music, exchange log with persistence (`exchanges.json`) |
+| `web_ui.py` | Web app routes: the phone as a satellite (`/api/listen`, a WebSocket), typed requests, shortcuts run again without the LLM (`/api/redo`, AD-065) and offered unless already in effect by HA's state (`/api/in-effect`, AD-066), timers and music, exchange log with persistence (`exchanges.json`) |
 | `static/index.html` | The web app, a PWA: voice and typed requests, this phone's conversation (AD-060), timers and music now, shortcuts, the history and technical details on demand |
 | `vad.py` | End of speech by Silero VAD, for the satellite's recordings and the phone's |
 | `requirements-linux.txt` / `requirements-mac.txt` | Base deps (`requirements.txt`) plus the STT backend: onnx-asr (server) or parakeet-mlx (Mac) |

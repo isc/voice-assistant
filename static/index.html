@@ -531,6 +531,7 @@ $('back').addEventListener('click', () => {
 addEventListener('popstate', () => showView(location.hash === '#historique' ? 'history' : 'now'));
 
 // The log, unchanged most of the time (a 304); true when it changed
+let changedAt = 0;
 async function fetchLog() {
   let body;
   try {
@@ -544,6 +545,7 @@ async function fetchLog() {
   }
   if (body === lastBody) return false;
   lastBody = body;
+  changedAt = Date.now();
   entries = JSON.parse(body);
   return true;
 }
@@ -612,13 +614,13 @@ const words = (v) => String(v ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g
 const argsKey = (tc) => Object.entries(tc.args || {}).sort().map(([k, v]) => `${k}=${words(v).join(' ')}`).join(',');
 
 // What a request did, at this home: its calls. Null if it did nothing, or not only what a shortcut runs
-// again, by the server's mark (`redo`: a state, or an event), which a failed call never has
+// again, by the server's mark (`redo`), which a failed call never has
 function actionOf(toolCalls) {
   const calls = (toolCalls || []).filter((tc) => tc.function !== 'end_conversation');
   if (!calls.length || !calls.every((tc) => tc.redo)) return null;
   return {
     key: [site || '', ...calls.map((tc) => `${tc.function}(${argsKey(tc)})`).sort()].join(' '),
-    calls: calls.map(({function: f, args, redo}) => ({function: f, args: args || {}, redo})),
+    calls: calls.map((tc) => ({function: tc.function, args: tc.args || {}})),
   };
 }
 
@@ -644,36 +646,40 @@ function score(item, now = new Date()) {
   }, 0);
 }
 
-// A state is in effect when the last one set on the same thing (entity, room) in the last 12 hours, from any
-// device of this home, is that very one: the shutters just opened are not offered to open; closed, they are.
-// An event (a timer, « plus fort ») is offered every time
-const target = (tc) => ['entity', 'room', 'label'].map((k) => words(tc.args?.[k]).join(' ')).join('|');
-function lastStates() {
-  const since = Date.now() - 12 * 3600e3, last = new Map();
-  for (const e of entries) {
-    if (!visible(e) || when(e) < since) continue;
-    for (const tc of e.tool_calls || []) if (tc.redo === 'state') last.set(target(tc), tc);
-  }
-  return last;
-}
-const inEffect = (item, last) => item.calls.every((tc) => {
-  const set = tc.redo === 'state' && last.get(target(tc));
-  return set?.function === tc.function && argsKey(set) === argsKey(tc);
-});
-
 // What the button says: what it does, as the reply's chips said it
 const shortcutText = (item) => item.calls.map(callText).join(' + ');
 const shortcutButton = ([key, item], cls = '') =>
   `<button class="${cls}" data-key="${esc(key)}">${icon(toolOf(item.calls[0].function)[1])}<span>${esc(shortcutText(item))}</span></button>`;
 
-function bestShortcuts() {
-  const last = lastStates();
+// Those likely now: used at least twice, at this home, about this time of day
+function candidates() {
   return Object.entries(store.get(SHORTCUTS, {}))
-    .filter(([, v]) => v.uses.length >= 2 && !(site && v.site && v.site !== site) && !inEffect(v, last))
+    .filter(([, v]) => v.uses.length >= 2 && !(site && v.site && v.site !== site))
     .map(([k, v]) => [k, v, score(v)])
     .filter(([, , s]) => s > 0.5)
     .sort((a, b) => b[2] - a[2])
-    .slice(0, 6);
+    .slice(0, 12);
+}
+
+// Not what is already the case, by the devices' state, which the server reads (AD-066): the shutters open,
+// whoever opened them, are not offered to open. Shown once it has said so
+const effects = new Map();  // shortcut → in effect
+const bestShortcuts = () => candidates().filter(([k]) => effects.get(k) === false).slice(0, 6);
+// Asked at each poll for a minute after the page is shown or the log changes (a device then moves), every
+// 30 s after: a shutter closed by hand shows within half a minute
+let checking = false, checkedAt = 0;
+async function checkEffects() {
+  const list = candidates(), now = Date.now();
+  const due = now - Math.max(shownAt, changedAt) < 60e3 || now - checkedAt >= 30e3 || list.some(([k]) => !effects.has(k));
+  if (checking || !due || !list.length || view === 'history') return;
+  checking = true;
+  try {
+    const {in_effect: done} = await post('api/in-effect', tagged({shortcuts: list.map(([, v]) => v.calls)}));
+    checkedAt = Date.now();
+    const changed = list.filter(([k], i) => effects.get(k) !== done[i]);
+    list.forEach(([k], i) => effects.set(k, done[i]));
+    if (changed.length) render();
+  } catch {} finally { checking = false; }
 }
 
 // Above the field during a conversation; on the home screen, home() shows them
@@ -1123,7 +1129,7 @@ addEventListener('appinstalled', () => { installBtn.hidden = true; });
 // ---------------------------------------------------------------- Polling, visibility
 // Every 3 s while shown, nothing while hidden: often on mobile data. The log answers 304 when unchanged
 let poller = null;
-function poll() { refresh(); refreshLive(); }
+function poll() { refresh(); refreshLive(); checkEffects(); }
 function startPolling() { clearInterval(poller); poll(); poller = setInterval(poll, 3000); }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {

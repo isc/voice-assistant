@@ -139,34 +139,73 @@ _NOTHING_DONE = re.compile(
     re.IGNORECASE,
 )
 
-# What a shortcut of the web app runs again (AD-065), by kind: a state, not offered while in effect, or an
-# event, offered every time. Not the reads, whose results the model puts into words, nor an event at a date
-# gone by (create_event)
-_SHORTCUT_KINDS = {
-    **dict.fromkeys(
-        ("turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock")
-        + ("play_radio", "play_music", "move_media", "stop_media", "set_volume"),
-        "state",
-    ),
-    **dict.fromkeys(
-        ("set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image"), "event"
-    ),
-}
+# What a shortcut of the web app runs again (AD-065): actions. Not the reads, whose results the model puts into
+# words, nor an event at a date gone by (create_event)
+_REDOABLE = {
+    "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock",
+    "play_radio", "play_music", "move_media", "stop_media", "set_volume",
+    "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image",
+}  # fmt: skip
 
 
-def _shortcut_kind(function_name, arguments) -> Optional[str]:
-    if function_name == "music_control" and arguments.get("action") == "current":
-        return None  # « qu'est-ce qui passe ? », a read
-    return _SHORTCUT_KINDS.get(function_name)
+def _redoable(function_name, arguments) -> bool:
+    asks_current = function_name == "music_control" and arguments.get("action") == "current"
+    return function_name in _REDOABLE and not asks_current  # « qu'est-ce qui passe ? » is a read
+
+
+def _near(value, wanted, tolerance: float = 1, scale: float = 1) -> bool:
+    """Whether a device's value is the one asked, `scale` times: a brightness asked in % is out of 255 in HA."""
+    try:
+        return abs(float(value) - float(wanted) * scale) <= tolerance
+    except (TypeError, ValueError):
+        return False
+
+
+def _device_in_effect(function_name: str, arguments: dict, state: dict) -> bool:
+    """Whether a device, by its state in HA, is already what the call would make it (AD-066)."""
+    value, attributes = state.get("state"), state.get("attributes", {})
+    if function_name == "open_cover":
+        # Half open, « ouvre » still has something to do
+        return value == "opening" or (value == "open" and attributes.get("current_position", 100) == 100)
+    if function_name == "close_cover":
+        return value in ("closed", "closing")
+    if function_name == "set_cover_position":
+        return _near(attributes.get("current_position"), arguments.get("position"))
+    if function_name == "turn_on":
+        brightness = arguments.get("brightness")
+        lit = brightness is None or _near(attributes.get("brightness"), brightness, 3, scale=255 / 100)
+        return value not in ("off", "standby", "unavailable", "unknown", None) and lit
+    if function_name == "turn_off":
+        return value in ("off", "standby")
+    if function_name == "set_temperature":
+        return _near(attributes.get("temperature"), arguments.get("temperature"), 0.1)
+    if function_name == "lock":
+        return value in ("locked", "locking")
+    return False
+
+
+def _shortcut_calls(calls, offered: set) -> bool:
+    """Whether a shortcut of the web app is calls a shortcut runs: a list of {"function", "args"}, offered here."""
+    return (
+        isinstance(calls, list)
+        and bool(calls)
+        and all(
+            isinstance(call, dict)
+            and call.get("function") in offered
+            and isinstance(args := call.get("args"), dict)
+            and _redoable(call["function"], args)
+            for call in calls
+        )
+    )
 
 
 def _mark_outcome(tc_entry: dict, result: str) -> None:
-    """What the web app reads of a call in the log: that it did nothing, by its error or its result, else the
-    kind of shortcut it makes, if any."""
+    """What the web app reads of a call in the log: that it did nothing, by its error or its result, else
+    whether a shortcut may run it again."""
     if "error" in tc_entry or _NOTHING_DONE.search(result):
         tc_entry["failed"] = True
-    elif kind := _shortcut_kind(tc_entry["function"], tc_entry["args"]):
-        tc_entry["redo"] = kind
+    elif _redoable(tc_entry["function"], tc_entry["args"]):
+        tc_entry["redo"] = True
 
 
 # The exchange log's replies to requests that got none
@@ -268,6 +307,8 @@ class VoiceAssistantServer:
 
     # The HA speakers turned down while a request is heard: their site and own volumes (AD-049)
     _ducked: Optional[tuple[Site, dict[str, float]]] = None
+    # What Spotify was last asked to play (normalized), for the web app's shortcuts (AD-066)
+    _spotify_query: Optional[str] = None
 
     # Per home, read from the active site (sites.py)
     ha_client = _site_attribute("ha_client")
@@ -506,6 +547,11 @@ class VoiceAssistantServer:
     def _spotify_here(self) -> Optional[tuple[str, str]]:
         """The speaker playing the Spotify stream, if it is at this site."""
         return self._spotify_at[1] if self._spotify_at and self._spotify_at[0] is self.site else None
+
+    @property
+    def _spotify_heard_here(self) -> Optional[tuple[str, str]]:
+        """That speaker, while it listens to the stream."""
+        return self._spotify_here if self.spotify and self.spotify.stream.listeners else None
 
     def _recover_media_target(self) -> None:
         """Pick up, per site, the HA speaker a previous run left on a radio or on the Spotify stream.
@@ -1307,6 +1353,7 @@ class VoiceAssistantServer:
                 return f"{self._speaker_name(target)} ne répond pas"
             if found:
                 await self.spotify.play(found.uri, shuffle=bool(arguments.get("shuffle")))
+                self._spotify_query = normalize(arguments.get("query", ""))
                 result = f"Lecture sur Spotify : {found.description}"
             else:
                 result = await self.spotify.control("resume")
@@ -1364,7 +1411,7 @@ class VoiceAssistantServer:
         if refusal := await self._offline_reply(target):
             return refusal
         name = self._speaker_name(target)
-        if self.spotify and self.spotify.stream.listeners and (source := self._spotify_here):
+        if source := self._spotify_heard_here:
             if source == target:
                 return f"La musique est déjà sur {name}"
             if not await self._point_at_spotify(target):
@@ -1382,12 +1429,13 @@ class VoiceAssistantServer:
             return f"{station} passée de {self._speaker_name(source)} à {name}"
         return "Rien n'a été fait : ni radio ni musique en cours ici"
 
-    async def _still_plays(self, target: tuple[str, str], station: str, url: str) -> bool:
-        """Whether the speaker still plays that radio: not stopped, nor given something else, from its app."""
+    async def _still_plays(self, target: tuple[str, str], station: str, url: str, read=None) -> bool:
+        """Whether the speaker still plays that radio: not stopped, nor given something else, from its app.
+        read: how to read an HA device's state, get_entity_state by default."""
         kind, ident = target
         if kind == "esp":
             return self._satellite_plays()
-        state = await self.ha_client.get_entity_state(ident) or {}
+        state = await (read or self.ha_client.get_entity_state)(ident) or {}
         return state.get("state") == "playing" and state.get("attributes", {}).get("media_content_id", url) == url
 
     def _speaker_name(self, target: tuple[str, str], site: Optional[Site] = None) -> str:
@@ -1918,14 +1966,7 @@ class VoiceAssistantServer:
         """A shortcut of the web app: what a request did, its calls run again as they were, without the model
         (AD-065). Logged as the browser's request, worded as its button. None if a call is not one a
         shortcut runs."""
-        offered = {tool["name"] for tool in self._tools()}
-        if not isinstance(calls, list) or not calls or not all(
-            isinstance(call, dict)
-            and call.get("function") in offered
-            and isinstance(args := call.get("args"), dict)
-            and _shortcut_kind(call["function"], args)
-            for call in calls
-        ):
+        if not _shortcut_calls(calls, {tool["name"] for tool in self._tools()}):
             return None
         logger.info(f'Shortcut: "{label}"')
         self._continue(self.conversation)
@@ -1950,6 +1991,69 @@ class VoiceAssistantServer:
             client=self._client,
         )
         return {"input": label, "response": response, "timings": timings, "tool_calls": tool_calls}
+
+    async def in_effect(self, shortcuts: list) -> list[bool]:
+        """For each shortcut of the web app (its calls), whether what it does is already the case, by the
+        devices' state: shutters open are not offered to open, whoever opened them (AD-066). An event (a
+        timer, « plus fort ») never is, nor what nothing says."""
+        offered = {tool["name"] for tool in self._tools()}
+        states: dict[str, asyncio.Future] = {}
+
+        async def read(entity_id: str) -> Optional[dict]:
+            try:
+                return await asyncio.wait_for(self.ha_client.get_entity_state(entity_id), 2)
+            except asyncio.TimeoutError:
+                return None
+
+        def state(entity_id: str) -> asyncio.Future:
+            """Each device read once, however many shortcuts name it."""
+            if entity_id not in states:
+                states[entity_id] = asyncio.ensure_future(read(entity_id))
+            return states[entity_id]
+
+        async def done(calls) -> bool:
+            if not _shortcut_calls(calls, offered):
+                return False
+            return all(await asyncio.gather(*(self._call_in_effect(c["function"], c["args"], state) for c in calls)))
+
+        return list(await asyncio.gather(*map(done, shortcuts)))
+
+    async def _call_in_effect(self, function_name: str, arguments: dict, state) -> bool:
+        if function_name in self._DEVICE_DOMAINS:
+            domains = self._DEVICE_DOMAINS[function_name]
+            ids = self.ha_client.resolve_all_entities(arguments.get("entity", ""), arguments.get("room"), domains)
+            found = await asyncio.gather(*map(state, ids))
+            return bool(ids) and all(st and _device_in_effect(function_name, arguments, st) for st in found)
+        if not (target := self._resolve_media_target(arguments.get("room"))):
+            return False
+        kind, ident = target
+        radio = self.site.radio
+        if function_name == "play_radio":
+            station = _resolve_station(arguments.get("station", ""))
+            playing = radio and station and radio[0] == target and radio[2] == station[1]
+            return bool(playing and await self._still_plays(*radio, read=state))
+        if function_name in ("stop_media", "set_volume"):
+            if kind == "esp":  # its volume unknown here
+                return function_name == "stop_media" and not self._satellite_plays()
+            speaker = await state(ident) or {}
+            if function_name == "stop_media":
+                return speaker.get("state") not in (None, "unavailable", "unknown", "playing")
+            return _near(speaker.get("attributes", {}).get("volume_level"), arguments.get("level"), 0.02, scale=0.01)
+        if function_name == "move_media":
+            # Already there, or nothing to move: what _move_media moves, Spotify first, else the radio
+            source = self._spotify_heard_here
+            if not source and radio and await self._still_plays(*radio, read=state):
+                source = radio[0]
+            return source in (None, target)
+        if function_name == "play_music":
+            # That music, playing there
+            if self._spotify_heard_here != target or self._spotify_query != normalize(arguments.get("query", "")):
+                return False
+            try:
+                return bool(await self.spotify.playing())
+            except SpotifyError:
+                return False
+        return False
 
     async def answer_recording(
         self,
