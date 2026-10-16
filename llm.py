@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # field strictly, so there it is only sent when explicitly configured.
 REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "")
 
+# What the text fallback may run: not unlock, whose button needs the call's log entry (AD-068)
 _TOOL_NAMES = {
     "turn_on",
     "turn_off",
@@ -64,8 +65,9 @@ def claims_completed_action(text: str) -> bool:
     return bool(_ACTION_CLAIM.search(re.sub(r"[^.!?]*\?", "", flat)))
 
 
-def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
-    """Return LLM tool definitions."""
+def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(), locks=False) -> list:
+    """Return LLM tool definitions. `homes`: the homes' names, which the door tools and get_state may name
+    when there are several (AD-068); `locks`: whether some home has a lock."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -432,32 +434,52 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
             }
         ]
 
-    # Locking only: a voice can't be trusted to open the door, the assistant knows no
-    # voices and hears the radio too. No lock, no tool.
+    # Another home, named in the request: its door from this one, its state (AD-068)
+    elsewhere = {}
+    if len(homes) > 1:
+        elsewhere["home"] = {
+            "type": "string",
+            "enum": list(homes),
+            "description": (
+                "La maison, seulement si la demande en nomme une (« la porte de Charras », « à Paris »). Ses "
+                "appareils ne sont pas dans la liste : entity tel que la demande le dit (« porte »)"
+            ),
+        }
+
+    # No lock, no tool. Unlocking only proposes: a tap in the web app confirms, and the satellite refuses (AD-068)
     lock_tools = []
-    if any(info["domain"] == "lock" for info in ha_client.entities.values()):
+    if locks:
+        door_params = {
+            "type": "object",
+            "properties": {
+                "entity": {"type": "string", "description": "Nom de la serrure, ou « porte »"},
+                "room": room_param,
+                **elsewhere,
+            },
+            "required": ["entity"],
+        }
         lock_tools = [
             {
                 "name": "lock",
-                # Both halves measured on gemma4:12b (AD-041): without the second, « déverrouille
-                # la porte » called lock and answered « j'ai déverrouillé »; without « à chaque
-                # demande », a door locked earlier in the conversation got the unlock refusal
+                # « à chaque demande » measured on gemma4:12b (AD-041): without it, a door locked earlier
+                # in the conversation got no call. The last sentence keeps « ouvre la porte » off lock
                 "description": (
                     "Verrouiller une porte, la fermer à clé (« ferme la porte », « tu peux fermer "
                     "la porte ? », « verrouille la porte »). Appelle-la à chaque demande, même si la "
                     "porte a déjà été verrouillée plus tôt : quelqu'un a pu la rouvrir depuis. "
-                    "Aucune fonction n'ouvre ni ne déverrouille une porte : ça se fait avec la clé "
-                    "ou l'application."
+                    "Jamais pour ouvrir ou déverrouiller : c'est unlock."
                 ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "entity": {"type": "string", "description": "Nom de la serrure, ou « porte »"},
-                        "room": room_param,
-                    },
-                    "required": ["entity"],
-                },
-            }
+                "parameters": door_params,
+            },
+            {
+                "name": "unlock",
+                "description": (
+                    "Ouvrir ou déverrouiller une porte (« ouvre la porte », « déverrouille la porte »). "
+                    "N'ouvre rien tout de suite : le résultat dit si une confirmation est demandée dans "
+                    "l'application ou si c'est refusé. Répète-le sans dire que la porte est ouverte."
+                ),
+                "parameters": door_params,
+            },
         ]
 
     return [
@@ -567,6 +589,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False) -> list:
                 "properties": {
                     "entity": {"type": "string", "description": "Nom de l'appareil"},
                     "room": room_param,
+                    **elsewhere,
                 },
                 "required": ["entity"],
             },

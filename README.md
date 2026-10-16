@@ -12,7 +12,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 
 ### Home automation
 - Home Assistant control via REST API: lights, switches, covers, climate, entity states
-- Door locks: locked by voice ("ferme la porte à clé") and read ("la porte est verrouillée ?"), never unlocked
+- Door locks: locked by voice ("ferme la porte à clé") and read ("la porte est verrouillée ?"), the other home's too ("ferme la porte de Charras"); unlocked only from the phone app, by a tap on the « Déverrouiller » button its request shows
 - Fuzzy entity resolution scoped by room ("la lumière du salon"), room groups ("éteins tout", "ferme les volets des enfants")
 - Roller shutters and roof windows told apart, partial positions ("ouvre les volets à 50%")
 - Sensor search by keyword ("quelle est la température de la piscine ?")

@@ -344,6 +344,16 @@ def setup_routes(app, server):
             raise _json_error(web.HTTPBadRequest, "not calls a shortcut runs")
         return web.json_response(reply)
 
+    async def handle_unlock(request):
+        """The app's « Déverrouiller », the button a request proposing to unlock a door shows (AD-068).
+
+        {"offer": the button's id, "client": the browser that asked, "site": its page's home}"""
+        body = await _read_body(request)
+        await serve(request, body)
+        if not isinstance(offer := body.get("offer"), str) or not (reply := await server.confirm_unlock(offer)):
+            raise _json_error(web.HTTPGone, "no such offer: expired, used, or another browser's")
+        return web.json_response(reply)
+
     async def handle_in_effect(request):
         """Which shortcuts of the web app do what is already the case, by the devices' state (AD-066).
 
@@ -535,6 +545,7 @@ def setup_routes(app, server):
     app.router.add_get(r"/recordings/{recording:[\d-]+/[\d_]+\.wav}", handle_recording)
     app.router.add_post("/api/send", handle_web_send)
     app.router.add_post("/api/redo", handle_redo)
+    app.router.add_post("/api/unlock", handle_unlock)
     app.router.add_post("/api/in-effect", handle_in_effect)
     app.router.add_post("/api/dry-run", handle_dry_run)
     app.router.add_post("/api/timers/cancel", handle_cancel_timer)

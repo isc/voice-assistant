@@ -93,6 +93,9 @@
   .act .i { width: 14px; height: 14px; }
   .act span { min-width: 0; overflow-wrap: anywhere; }
   .act.warn { background: var(--warn-soft); color: var(--warn); }
+  .confirm { display: inline-flex; align-items: center; gap: 10px; min-height: 48px; margin: 8px 2px 0; padding: 8px 20px 8px 16px; border-radius: 24px; background: var(--accent); color: var(--on-accent); font-size: 16px; font-weight: 600; text-align: left; line-height: 1.25; }
+  .confirm small { display: block; font-size: 13px; font-weight: 400; opacity: .85; }
+  .confirm:active { background: var(--accent-2); }
   .typing { display: inline-flex; gap: 4px; padding: 14px 16px; }
   .typing i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); animation: blink 1.2s infinite both; }
   .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
@@ -203,6 +206,7 @@
   <symbol id="i-blinds" viewBox="0 0 24 24"><path d="M3 3h18M5 3v18M19 3v18M5 7h14M5 11h14M5 15h14"/></symbol>
   <symbol id="i-thermo" viewBox="0 0 24 24"><path d="M14 14.8V4a2 2 0 1 0-4 0v10.8a4 4 0 1 0 4 0z"/></symbol>
   <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+  <symbol id="i-unlock" viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 7.8-1.3"/></symbol>
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4M3.3 19a10 10 0 1 1 17.4 0"/></symbol>
   <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M10 2h4"/></symbol>
@@ -339,12 +343,13 @@ const SOURCES = {
   app: ['phone', 'Téléphone'],
   web: ['keys', 'Écrit'],
   shortcut: ['redo', 'Raccourci'],
+  confirm: ['unlock', 'Confirmation'],
 };
 // Each tool as a verb, an icon, and what of its arguments names the target
 const TOOLS = {
   turn_on: ['Allumer', 'bulb'], turn_off: ['Éteindre', 'bulb'],
   open_cover: ['Ouvrir', 'blinds'], close_cover: ['Fermer', 'blinds'], set_cover_position: ['Régler', 'blinds'],
-  set_temperature: ['Chauffage', 'thermo'], lock: ['Verrouiller', 'lock'],
+  set_temperature: ['Chauffage', 'thermo'], lock: ['Verrouiller', 'lock'], unlock: ['Déverrouiller', 'unlock'],
   get_state: ['État', 'eye'], get_sensor: ['Capteur', 'gauge'],
   set_timer: ['Minuteur', 'timer'], set_alarm: ['Alarme', 'alarm'], cancel_timer: ['Annuler', 'timer'],
   get_weather: ['Météo', 'sun'], find_place: ['Lieu', 'pin'],
@@ -365,7 +370,7 @@ function callText(tc) {
   const a = Object.fromEntries(Object.entries(tc.args || {}).map(([k, v]) => [k, asName(v)]));
   const pct = (v) => (v == null ? null : v + ' %');
   const target = [
-    a.entity, a.room, a.query, a.station, a.location, a.title, a.label,
+    a.entity, a.room, a.home && cap(a.home), a.query, a.station, a.location, a.title, a.label,
     a.duration_minutes && a.duration_minutes + ' min', a.time, shortDate(a.start_date), shortDate(a.start_datetime),
     ACTIONS[a.action] || ACTIONS[a.direction], pct(a.level), pct(a.position), pct(a.brightness),
     a.temperature != null && a.temperature + ' °C',
@@ -439,7 +444,28 @@ function botMsg(e) {
   else bubble = `<div class="bubble">${esc(r)}</div>`;
   const calls = (e.tool_calls || []).filter((tc) => tc.function !== 'end_conversation');
   const acts = calls.length ? `<div class="acts">${calls.map(describeCall).join('')}</div>` : '';
-  return `<div class="msg bot">${bubble}${acts}${debug ? fmtDebug(e) : ''}</div>`;
+  const unlock = offers(e).map(({confirm: c}) => `<button class="confirm" data-unlock="${esc(c.id)}" data-door="${esc(c.door)}">${icon('unlock')}<span>Déverrouiller<small>${esc(c.door)}</small></span></button>`).join('');
+  return `<div class="msg bot">${bubble}${acts}${unlock}${debug ? fmtDebug(e) : ''}</div>`;
+}
+
+// A door a request of this browser proposed to unlock: a tap here unlocks it, the model never does. The
+// button lasts as long as the server keeps its offer, and goes once tapped (AD-068)
+const tapped = new Set();
+const offers = (e) => (e.client === client
+  ? (e.tool_calls || []).filter(({confirm: c}) => c && !c.done && !tapped.has(c.id) && Date.now() - when(e) < c.seconds * 1e3) : []);
+
+async function unlock(button) {
+  const id = button.dataset.unlock;
+  tapped.add(id);
+  vibrate(30);
+  const p = addPending(`Déverrouiller · ${button.dataset.door}`, 'confirm');
+  try {
+    await post('api/unlock', tagged({offer: id}));
+  } catch (err) {
+    if (offline(err)) tapped.delete(id);
+    toast(offline(err) ? 'Pas de connexion : porte non déverrouillée' : 'Trop tard : redemandez');
+  }
+  await settle(p);
 }
 
 const typing = '<div class="msg bot"><div class="bubble typing" aria-label="Réponse en cours"><i></i><i></i><i></i></div></div>';
@@ -571,9 +597,14 @@ thread.addEventListener('click', (e) => {
     const a = new Audio(play.dataset.play);
     a.play().catch(() => toast('Audio introuvable'));
   }
+  const door = e.target.closest('[data-unlock]');
+  if (door) unlock(door);
   const example = e.target.closest('[data-example]');
   if (example) { cmd.value = example.dataset.example; composerChanged(); cmd.focus(); }
 });
+// A button of the thread leaves the field focused: its blur brought the mic back, which moved the button away
+// between press and release, and the click was lost (« Déverrouiller » right after a typed request)
+thread.addEventListener('mousedown', (e) => { if (e.target.closest('button')) e.preventDefault(); });
 
 // ---------------------------------------------------------------- Typed requests
 const composer = $('composer');

@@ -10,6 +10,7 @@ import locale
 import logging
 import os
 import re
+import secrets
 import signal
 import socket
 import sys
@@ -37,7 +38,7 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 import onnx_gpu
-from ha_client import LOCAL_CONFIG, asks_whole_house, compact, is_whole_house, normalize
+from ha_client import LOCAL_CONFIG, asks_whole_house, compact, fold, is_whole_house, normalize
 from images import find_image
 from places import find_place
 from recordings import Recordings
@@ -131,6 +132,11 @@ def _speaker_left_on(entities: dict, urls: set[str]) -> Optional[tuple[str, str]
 
 # The result of an action on several rooms that the request did not say (AD-058)
 _WHICH_ROOM = "Rien n'a été fait : la demande ne dit pas dans quelle pièce. Demande laquelle."
+# A door is unlocked from the web app alone, by a tap on the button its request shows, this long (AD-068)
+_UNLOCK_FROM_APP_ONLY = (
+    "Rien n'a été fait : l'enceinte n'ouvre aucune porte, il faut le demander dans l'application du téléphone"
+)
+UNLOCK_CONFIRM_SECONDS = 120
 # Tool results saying nothing was done (« Appareil volet non trouvé », « Sonos ne répond pas (hors ligne) »):
 # flagged in the log, so that the web app shows them beside a reply that may claim otherwise
 _NOTHING_DONE = re.compile(
@@ -276,6 +282,17 @@ class _Request:
     client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
 
 
+@dataclass
+class _UnlockOffer:
+    """A door the model proposed to unlock, waiting for a tap on the web app's button (AD-068)."""
+
+    site: Site
+    entity_id: str
+    client: str  # the browser that asked: its tap alone confirms
+    expires: float
+    call: dict  # the call in the exchange log, whose button it is
+
+
 _current_request: ContextVar[_Request] = ContextVar("current_request")
 
 
@@ -375,6 +392,7 @@ class VoiceAssistantServer:
         self._pending_service_calls: set = set()
         self._background_tasks: set = set()  # held until done, not awaited at shutdown
         self._volume_lock = asyncio.Lock()  # turning speakers down and back up, in turn
+        self._unlock_offers: dict[str, _UnlockOffer] = {}  # by id, the button's
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -1030,8 +1048,36 @@ class VoiceAssistantServer:
         "set_cover_position": ["cover"],
         "set_temperature": ["climate"],
         "lock": ["lock"],
+        "unlock": ["lock"],
         "get_state": None,
     }
+    # The calls that may name another home: its door from this one, its states (AD-068)
+    _ANY_HOME = {"lock", "unlock", "get_state"}
+
+    def _home_named(self, arguments: dict) -> Optional[tuple[Site, dict]]:
+        """The home a call names, and its arguments as read there: its `home`, else a home's name said in
+        its entity or room (« la porte de Charras »), which is left out of them (AD-068)."""
+        named = arguments.get("home")
+        said = {key: value for key in ("entity", "room") if isinstance(value := arguments.get(key), str)}
+        words = fold(" ".join(said.values())).split()
+        home = (self.site_named(named) if isinstance(named, str) else None) or next(
+            (site for site in self.sites if site.name and site.name in words), None
+        )
+        if not home:
+            return None
+        there = {key: value for key, value in arguments.items() if key != "home"}
+        for key, value in said.items():
+            kept = " ".join(word for word in value.split() if fold(word) != home.name)
+            there[key] = kept if normalize(kept) else ""
+        return home, there
+
+    async def _at(self, site: Site, work: Awaitable) -> Any:
+        """`work` done at another home, which it serves meanwhile; this request's home after."""
+        token = _current_site.set(site)
+        try:
+            return await work
+        finally:
+            _current_site.reset(token)
 
     def _unasked_sweep(self, function_name: str, arguments: dict) -> Optional[str]:
         """The result of an action on every room that the request did not ask for, else None (AD-058)."""
@@ -1042,8 +1088,9 @@ class VoiceAssistantServer:
         logger.warning(f"Whole house not asked for: {function_name}({arguments}) not run")
         return _WHICH_ROOM
 
-    async def execute_function(self, function_name: str, arguments: dict) -> str:
-        """Execute a function call from the LLM."""
+    async def execute_function(self, function_name: str, arguments: dict, call: Optional[dict] = None) -> str:
+        """Execute a function call from the LLM. `call`: its entry in the exchange log, where an unlock
+        writes its button (AD-068)."""
         if function_name == "end_conversation":
             self._end_conversation = True
             # Over: the next request starts a new one, as after a silence; this one keeps its id for the log
@@ -1116,6 +1163,12 @@ class VoiceAssistantServer:
         if function_name == "move_media":
             return await self._move_media(arguments.get("room"))
 
+        if function_name in self._ANY_HOME and (named := self._home_named(arguments)):
+            home, arguments = named
+            if home is not self.site:
+                result = await self._at(home, self.execute_function(function_name, arguments, call))
+                return f"{result} ({home.name.capitalize()})"
+
         if not self.ha_client:
             return "Home Assistant non disponible"
 
@@ -1134,6 +1187,9 @@ class VoiceAssistantServer:
             return f"Fonction {function_name} inconnue"
         if unasked := self._unasked_sweep(function_name, arguments):
             return unasked
+        if function_name == "unlock" and not self._client:  # a browser of the web app, where the button shows
+            logger.warning(f"Unlock refused, not from the web app: {arguments}")
+            return _UNLOCK_FROM_APP_ONLY
         domains = self._DEVICE_DOMAINS[function_name]
 
         entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
@@ -1152,6 +1208,9 @@ class VoiceAssistantServer:
         if not (reachable := await self.ha_client.reachable(entity_ids)):
             return self.ha_client.offline_reply(entity_ids)
         entity_ids = reachable
+
+        if function_name == "unlock":
+            return self._offer_unlock(entity_ids, call)
 
         extra = {}
         if function_name == "set_temperature" and "temperature" in arguments:
@@ -1203,6 +1262,44 @@ class VoiceAssistantServer:
             self.ha_client.entities.get(entity_ids[0], {}).get("friendly_name", entity_ids[0]),
             extra,
         )
+
+    def _offer_unlock(self, entity_ids: list[str], call: dict) -> str:
+        """A door proposed for unlocking: the web app shows a button on this call, and a tap on it alone
+        unlocks (confirm_unlock). The model unlocks nothing (AD-068)."""
+        if len(entity_ids) > 1:
+            return f"Précise quelle porte : {', '.join(map(self.ha_client.display_name, entity_ids))}"
+        now = time.time()
+        self._unlock_offers = {key: offer for key, offer in self._unlock_offers.items() if offer.expires > now}
+        offer_id = secrets.token_urlsafe(12)
+        expires = now + UNLOCK_CONFIRM_SECONDS
+        self._unlock_offers[offer_id] = _UnlockOffer(self.site, entity_ids[0], self._client, expires, call)
+        door = self.ha_client.display_name(entity_ids[0])
+        # What the button says under « Déverrouiller », and how long the page shows it
+        where = f"{door} · {self.site.name.capitalize()}" if len(self.sites) > 1 else door
+        call["confirm"] = {"id": offer_id, "door": where, "seconds": UNLOCK_CONFIRM_SECONDS}
+        logger.info(f"Unlock offered: {entity_ids[0]} ({self.site.label})")
+        return (
+            f"Rien n'est fait : {door} reste fermée tant que l'utilisateur n'a pas touché le bouton "
+            "« Déverrouiller » affiché sous ta réponse. Dis-lui de le toucher pour confirmer (aucune notification "
+            "n'est envoyée)"
+        )
+
+    async def confirm_unlock(self, offer_id: str) -> Optional[dict]:
+        """A tap on the web app's « Déverrouiller »: the door its request proposed, unlocked if the tap comes
+        from the browser that asked, in time, once (AD-068). Logged as that browser's request, at the home its
+        page is on, which may not be the door's. None if no such offer waits."""
+        offer = self._unlock_offers.get(offer_id)
+        if not offer or offer.client != self._client or offer.expires < time.time():
+            return None
+        del self._unlock_offers[offer_id]
+        logger.info(f"Unlock confirmed: {offer.entity_id} ({offer.site.label})")
+        self._continue(self.conversation)
+        ha_client = offer.site.ha_client
+        result = await ha_client.unlock(offer.entity_id) if ha_client else "Home Assistant non disponible"
+        offer.call["confirm"]["done"] = True
+        tool_calls = [{"function": "unlock", "args": offer.call["args"], "result": result}]
+        label = f"Déverrouiller · {offer.call['confirm']['door']}"  # as the button said it
+        return self._log_app_action("confirm", label, tool_calls, [result])
 
     # === MEDIA PLAYER ===
 
@@ -1867,7 +1964,16 @@ class VoiceAssistantServer:
         """The tools this house offers: the model is given these, and only these run."""
         from llm import get_tool_definitions
 
-        return get_tool_definitions(self.ha_client, self.calendar_client, music=self.spotify is not None)
+        homes = [site.name for site in self.sites if site.name]
+        locks = any(
+            info["domain"] == "lock"
+            for site in self.sites
+            if site.ha_client
+            for info in site.ha_client.entities.values()
+        )
+        return get_tool_definitions(
+            self.ha_client, self.calendar_client, music=self.spotify is not None, homes=homes, locks=locks
+        )
 
     def _continue(self, conversation) -> None:
         """A request goes on with its conversation, or starts a new one after a silence."""
@@ -1886,7 +1992,7 @@ class VoiceAssistantServer:
         """Run one call, its result or its error written in its log entry; the result, as the model reads it."""
         async with self._tool_semaphore:
             try:
-                result = await self.execute_function(tc_entry["function"], tc_entry["args"])
+                result = await self.execute_function(tc_entry["function"], tc_entry["args"], tc_entry)
                 logger.info(f"Function result: {result}")
                 tc_entry["result"] = result
             except Exception as e:
@@ -1975,12 +2081,18 @@ class VoiceAssistantServer:
         t0 = time.time()
         tool_calls = [{"function": call["function"], "args": call["args"]} for call in calls]
         results = await asyncio.gather(*(self._run_call(tc_entry) for tc_entry in tool_calls))
+        return self._log_app_action("shortcut", label, tool_calls, results, {"total": round(time.time() - t0, 2)})
+
+    def _log_app_action(
+        self, source: str, label: str, tool_calls: list, results: list[str], timings: Optional[dict] = None
+    ) -> dict:
+        """A request of the web app that ran without the model (a shortcut, a tap on « Déverrouiller »): logged
+        as the browser's request, worded as its button, its calls' results as the reply. Returns that reply."""
         for tc_entry, result in zip(tool_calls, results):
             _mark_outcome(tc_entry, result)
         response = ". ".join(results)
-        timings = {"total": round(time.time() - t0, 2)}
         self.exchange_log.add(
-            "shortcut",
+            source,
             label,
             label,
             response,
@@ -1990,14 +2102,14 @@ class VoiceAssistantServer:
             site=self.site.name,
             client=self._client,
         )
-        return {"input": label, "response": response, "timings": timings, "tool_calls": tool_calls}
+        return {"input": label, "response": response, "timings": timings or {}, "tool_calls": tool_calls}
 
     async def in_effect(self, shortcuts: list) -> list[bool]:
         """For each shortcut of the web app (its calls), whether what it does is already the case, by the
         devices' state: shutters open are not offered to open, whoever opened them (AD-066). An event (a
         timer, « plus fort ») never is, nor what nothing says."""
         offered = {tool["name"] for tool in self._tools()}
-        states: dict[str, asyncio.Future] = {}
+        states: dict[str, asyncio.Future] = {}  # by home and device
 
         async def read(entity_id: str) -> Optional[dict]:
             try:
@@ -2006,10 +2118,11 @@ class VoiceAssistantServer:
                 return None
 
         def state(entity_id: str) -> asyncio.Future:
-            """Each device read once, however many shortcuts name it."""
-            if entity_id not in states:
-                states[entity_id] = asyncio.ensure_future(read(entity_id))
-            return states[entity_id]
+            """Each device read once, however many shortcuts name it; at its home, which a call may name."""
+            key = f"{self.site.name}/{entity_id}"
+            if key not in states:
+                states[key] = asyncio.ensure_future(read(entity_id))
+            return states[key]
 
         async def done(calls) -> bool:
             if not _shortcut_calls(calls, offered):
@@ -2019,6 +2132,10 @@ class VoiceAssistantServer:
         return list(await asyncio.gather(*map(done, shortcuts)))
 
     async def _call_in_effect(self, function_name: str, arguments: dict, state) -> bool:
+        if function_name in self._ANY_HOME and (named := self._home_named(arguments)):
+            home, arguments = named
+            if home is not self.site:
+                return await self._at(home, self._call_in_effect(function_name, arguments, state))
         if function_name in self._DEVICE_DOMAINS:
             domains = self._DEVICE_DOMAINS[function_name]
             ids = self.ha_client.resolve_all_entities(arguments.get("entity", ""), arguments.get("room"), domains)

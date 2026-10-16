@@ -685,7 +685,7 @@ class TestWholeHouseAsked(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: door lock, locked by voice but never unlocked
+# Tests: door lock, locked by voice, unlocked only by a tap in the web app
 # ---------------------------------------------------------------------------
 
 
@@ -718,9 +718,8 @@ class TestLock(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_tool_offered_only_with_a_lock(self):
-        self.assertIn("lock", {t["name"] for t in get_tool_definitions(self.client)})
-        del self.client.entities["lock.smart_lock_pro"]
-        self.assertNotIn("lock", {t["name"] for t in get_tool_definitions(self.client)})
+        self.assertLessEqual({"lock", "unlock"}, {t["name"] for t in get_tool_definitions(self.client, locks=True)})
+        self.assertFalse({"lock", "unlock"} & {t["name"] for t in get_tool_definitions(self.client)})
 
     def test_state_and_response(self):
         state = {"state": "unlocked", "attributes": {"friendly_name": "Smart Lock Pro"}}
@@ -733,9 +732,11 @@ class TestLock(unittest.IsolatedAsyncioTestCase):
         server = make_server()
         server.ha_client = self.client
         self.client.call_service = AsyncMock(return_value="ok")
-        for invented in ("unlock", "open", "lock_door"):
+        for invented in ("open", "lock_door"):
             result = await server.execute_function(invented, {"entity": "porte"})
             self.assertIn("inconnue", result)
+        server.new_request()  # the satellite's
+        self.assertIn("enceinte", await server.execute_function("unlock", {"entity": "porte"}, {}))
         await server.execute_function("lock", {"entity": "porte"})
         self.client.call_service.assert_awaited_once_with("lock", "lock", "lock.smart_lock_pro")
 
@@ -743,6 +744,138 @@ class TestLock(unittest.IsolatedAsyncioTestCase):
         for service in ("unlock", "open"):
             result = await self.client.call_service("lock", service, "lock.smart_lock_pro")  # no session: no HTTP
             self.assertIn("pas à la voix", result)
+
+
+class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
+    """A door unlocked from the web app alone, by a tap on the button its request shows; the door, or a
+    state, of the other home, named from this one (AD-068)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        from web_ui import ExchangeLog
+
+        server = self.server = make_server({"SITES": "paris,charras"})
+        server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
+        server.spotify, server.calendar_client = None, None
+        server._unlock_offers = {}
+        self.paris, self.charras = server.sites
+        for site, eid, name in (
+            (self.paris, "lock.smart_lock_pro", "Smart Lock Pro"),
+            (self.charras, "lock.entree_porte_d_entree", "Porte d'entrée"),
+        ):
+            site.ha_client = make_client()
+            site.ha_client.entities = {
+                eid: {"friendly_name": name, "domain": "lock", "state": "locked",
+                      "attributes": {}, "area_id": None, "area_name": ""},
+            }  # fmt: skip
+            site.ha_client.call_service = AsyncMock(return_value=f"{name} en cours de verrouillage")
+            site.ha_client.unlock = AsyncMock(return_value=f"{name} en cours de déverrouillage")
+        server.site = self.paris
+
+    async def client(self):
+        app = web.Application()
+        setup_routes(app, self.server)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        return client
+
+    async def offer(self, args: dict, browser: str = "phone42") -> dict:
+        """The app's request to unlock, at Paris: the call as the log keeps it."""
+        self.server.new_request(browser)
+        call = {"function": "unlock", "args": args}
+        call["result"] = await self.server.execute_function("unlock", args, call)
+        return call
+
+    async def test_the_satellite_refuses(self):
+        from voice_server import _NOTHING_DONE
+
+        self.server.new_request()
+        call = {"function": "unlock", "args": {"entity": "porte"}}
+        result = await self.server.execute_function("unlock", call["args"], call)
+        self.assertIn("l'enceinte n'ouvre aucune porte", result)
+        self.assertTrue(_NOTHING_DONE.search(result))  # the page shows it failed
+        self.assertNotIn("confirm", call)
+        self.assertEqual(self.server._unlock_offers, {})
+
+    async def test_the_app_proposes_and_a_tap_unlocks_once(self):
+        from voice_server import _NOTHING_DONE
+
+        call = await self.offer({"entity": "porte"})
+        self.assertIn("bouton « Déverrouiller »", call["result"])
+        self.assertIsNone(_NOTHING_DONE.search(call["result"]))  # not shown as failed
+        self.paris.ha_client.unlock.assert_not_awaited()
+        self.assertEqual(call["confirm"]["door"], "Smart Lock Pro · Paris")  # what the button says
+        client = await self.client()
+        offer_id = call["confirm"]["id"]
+        another = await client.post("/api/unlock", json={"offer": offer_id, "client": "tablet7"})
+        self.assertEqual(another.status, 410)  # another browser's tap
+        tap = await client.post("/api/unlock", json={"offer": offer_id, "client": "phone42", "site": "paris"})
+        self.assertEqual((await tap.json())["response"], "Smart Lock Pro en cours de déverrouillage")
+        self.paris.ha_client.unlock.assert_awaited_once_with("lock.smart_lock_pro")
+        self.paris.ha_client.call_service.assert_not_awaited()
+        self.assertTrue(call["confirm"]["done"])  # the page hides the button
+        entry = self.server.exchange_log.entries[-1]
+        self.assertEqual(
+            (entry["source"], entry["input"], entry["client"], entry["site"]),
+            ("confirm", "Déverrouiller · Smart Lock Pro · Paris", "phone42", "paris"),
+        )
+        again = await client.post("/api/unlock", json={"offer": offer_id, "client": "phone42"})
+        self.assertEqual(again.status, 410)
+        self.paris.ha_client.unlock.assert_awaited_once()
+
+    async def test_an_offer_expires(self):
+        call = await self.offer({"entity": "porte"})
+        self.server._unlock_offers[call["confirm"]["id"]].expires = 0
+        client = await self.client()
+        tap = await client.post("/api/unlock", json={"offer": call["confirm"]["id"], "client": "phone42"})
+        self.assertEqual(tap.status, 410)
+        self.paris.ha_client.unlock.assert_not_awaited()
+
+    async def test_the_door_of_the_other_home(self):
+        """From Paris: Charras's door, by the home the model names, or one said in the door's name or room."""
+        charras = self.charras.ha_client.call_service
+        for args in (
+            {"entity": "porte", "home": "charras"},
+            {"entity": "porte de Charras"},
+            {"entity": "porte", "room": "Charras"},
+        ):
+            self.server.new_request()
+            result = await self.server.execute_function("lock", args)
+            self.assertEqual(result, "Porte d'entrée en cours de verrouillage (Charras)", args)
+            charras.assert_awaited_with("lock", "lock", "lock.entree_porte_d_entree")
+            self.assertIs(self.server.site, self.paris)  # the request's home stays
+        self.paris.ha_client.call_service.assert_not_awaited()
+        await self.server.execute_function("lock", {"entity": "porte", "home": "paris"})
+        self.paris.ha_client.call_service.assert_awaited_once_with("lock", "lock", "lock.smart_lock_pro")
+
+    async def test_the_other_home_unlocked_from_this_one(self):
+        call = await self.offer({"entity": "porte", "home": "charras"})
+        self.assertEqual(call["confirm"]["door"], "Porte d'entrée · Charras")
+        self.server.new_request("phone42")
+        reply = await self.server.confirm_unlock(call["confirm"]["id"])
+        self.charras.ha_client.unlock.assert_awaited_once_with("lock.entree_porte_d_entree")
+        self.paris.ha_client.unlock.assert_not_awaited()
+        self.assertEqual(reply["input"], "Déverrouiller · Porte d'entrée · Charras")
+        self.assertEqual(self.server.exchange_log.entries[-1]["site"], "paris")  # the page's, where it was asked
+
+    async def test_the_other_home_in_effect(self):
+        state = AsyncMock(return_value={"state": "locked"})
+        self.assertTrue(await self.server._call_in_effect("lock", {"entity": "porte", "home": "charras"}, state))
+        state.assert_awaited_once_with("lock.entree_porte_d_entree")
+
+    def test_the_home_offered_where_another_may_be_named(self):
+        tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
+        for name in ("lock", "unlock", "get_state"):
+            self.assertEqual(tools[name]["home"]["enum"], ["paris", "charras"])
+        self.assertNotIn("home", tools["turn_on"])
+        del self.paris.ha_client.entities["lock.smart_lock_pro"]
+        self.assertIn("unlock", {t["name"] for t in self.server._tools()})  # Charras's door, from Paris
+        del self.charras.ha_client.entities["lock.entree_porte_d_entree"]
+        self.assertNotIn("unlock", {t["name"] for t in self.server._tools()})
+        one_home = get_tool_definitions(self.charras.ha_client, locks=True)
+        self.assertNotIn("home", next(t for t in one_home if t["name"] == "lock")["parameters"]["properties"])
 
 
 # ---------------------------------------------------------------------------
@@ -2323,7 +2456,8 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         body = {"calls": calls, "label": label, "client": "phone42"}
         reply = await (await client.post("/api/redo", json=body)).json()
         self.assertEqual(reply["response"], "Volets Chambre Zoé en cours de fermeture")
-        server.execute_function.assert_awaited_once_with("close_cover", {"entity": "volets", "room": "Chambre Zoé"})
+        server.execute_function.assert_awaited_once()
+        self.assertEqual(server.execute_function.await_args.args[:2], ("close_cover", calls[0]["args"]))
         server.process_with_llm.assert_not_awaited()
         entry = server.exchange_log.entries[-1]
         self.assertEqual((entry["source"], entry["input"], entry["client"]), ("shortcut", label, "phone42"))

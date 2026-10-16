@@ -575,7 +575,7 @@ class HAClient:
         logger.warning(f"No entity match for '{name}' (room={room})")
         return None
 
-    # Never by voice, whatever route a call takes to get here (AD-041)
+    # Never by voice, whatever route a call takes to get here (AD-041); unlocking is unlock()'s alone (AD-068)
     _FORBIDDEN_SERVICES = {("lock", "unlock"), ("lock", "open")}
 
     async def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
@@ -583,6 +583,13 @@ class HAClient:
         if (domain, service) in self._FORBIDDEN_SERVICES:
             logger.warning(f"Refused {domain}.{service} -> {entity_id}")
             return "Le déverrouillage ne se fait pas à la voix"
+        return await self._call_service(domain, service, entity_id, **kwargs)
+
+    async def unlock(self, entity_id: str) -> str:
+        """Unlock a door: only for a tap on the web app's confirmation button, never for the model (AD-068)."""
+        return await self._call_service("lock", "unlock", entity_id)
+
+    async def _call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
         payload = {"entity_id": entity_id}
         payload.update(kwargs)
 
@@ -746,6 +753,7 @@ class HAClient:
             ("media_player", "volume_up"): "Plus fort",
             ("media_player", "volume_down"): "Moins fort",
             ("lock", "lock"): f"{display_name} en cours de verrouillage",
+            ("lock", "unlock"): f"{display_name} en cours de déverrouillage",
         }
         return responses.get((domain, service), "C'est fait")
 
