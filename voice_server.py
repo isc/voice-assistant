@@ -1090,7 +1090,7 @@ class VoiceAssistantServer:
 
     async def execute_function(self, function_name: str, arguments: dict, call: Optional[dict] = None) -> str:
         """Execute a function call from the LLM. `call`: its entry in the exchange log, where an unlock
-        writes its button (AD-068)."""
+        writes its button (AD-068), a picture its URL (AD-069)."""
         if function_name == "end_conversation":
             self._end_conversation = True
             # Over: the next request starts a new one, as after a silence; this one keeps its id for the log
@@ -1162,6 +1162,8 @@ class VoiceAssistantServer:
             return await self._execute_media_function(function_name, arguments)
         if function_name == "move_media":
             return await self._move_media(arguments.get("room"))
+        if function_name == "show_image":
+            return await self._show_image(arguments.get("query", ""), arguments.get("room"), call)
 
         if function_name in self._ANY_HOME and (named := self._home_named(arguments)):
             home, arguments = named
@@ -1171,9 +1173,6 @@ class VoiceAssistantServer:
 
         if not self.ha_client:
             return "Home Assistant non disponible"
-
-        if function_name == "show_image":
-            return await self._show_image(arguments.get("query", ""))
 
         # Sensors are searched by keyword, not resolved like actionable entities
         if function_name == "get_sensor":
@@ -1645,24 +1644,32 @@ class VoiceAssistantServer:
 
     # === SCREEN ===
 
-    async def _show_image(self, query: str) -> str:
-        """Find a picture on the web and cast it to the screen."""
-        if not self.ha_client.screens:
-            return "Aucun écran disponible"
-        if not (screens := await self.ha_client.reachable(self.ha_client.screens)):
-            return self.ha_client.offline_reply(self.ha_client.screens)
+    async def _show_image(self, query: str, room: Optional[str], call: dict) -> str:
+        """Find a picture on the web: shown in the web app that asks, cast to a screen when the request
+        names one or comes from the satellite (AD-069). The picture goes in the call's log entry either way."""
+        screen = None
+        if room or not self._client:
+            # One screen per home (AD-038): whatever room the request names it by (« l'écran du salon » is Paris's,
+            # in its « Living Room »; Charras's is in none), the home's
+            if not self.ha_client or not self.ha_client.screens:
+                return "Aucun écran ici"
+            if not (screens := await self.ha_client.reachable(self.ha_client.screens)):
+                return self.ha_client.offline_reply(self.ha_client.screens)
+            screen = screens[0]
         picture = await find_image(query, exclude=self.conversation.shown_images)
         if not picture:
             return f"Aucune image trouvée pour {query}"
         self.conversation.shown_images.add(picture.url)
-        screen = screens[0]
-        await self._media_play_url(("ha", screen), picture.url, picture.content_type)
+        call["image"] = {"url": picture.url, "caption": picture.caption}
         if picture.from_article:
             shown = f"l'image de l'article Wikipédia « {picture.caption} »"
         else:
             # Matched on words, maybe not what was asked: the reply said « le plus grand arbre du
             # monde » over a photo titled « Nepal (11) - 26Sep10, Bardia (Nepal) », a field
             shown = f"une photo trouvée par mots-clés, titrée « {picture.caption} »"
+        if not screen:
+            return f"Image affichée dans l'application : {shown}"
+        await self._media_play_url(("ha", screen), picture.url, picture.content_type)
         return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {shown}"
 
     # === TIMER EVENTS ===
@@ -1938,14 +1945,15 @@ class VoiceAssistantServer:
 
         fn_name, fn_args = parse_text_tool_call(content)
         if fn_name in offered and fn_args and not dry_run:
-            try:
-                logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
-                result = await self.execute_function(fn_name, fn_args)
-                logger.info(f"Function result: {result}")
+            logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
+            # In the log like any call: the web app shows it, and a picture with it (AD-069)
+            tc_entry = {"function": fn_name, "args": fn_args}
+            result = await self._run_call(tc_entry)
+            if "error" not in tc_entry:
+                _mark_outcome(tc_entry, result)
+                self._last_tool_calls.append(tc_entry)
                 save_to_history(result)
                 return result
-            except Exception as e:
-                logger.warning(f"Failed to execute text tool call: {e}")
 
         # Last resort: never hand back a claim of an action that never ran. Safe
         # because we only get here with zero tool calls executed this turn.

@@ -29,7 +29,7 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from opening_hours import ParserError
 
 from ha_client import HAClient, asks_whole_house, cover_kind, normalize, without_home
-from images import is_about
+from images import Picture, is_about
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
 from recordings import Recordings
@@ -1005,14 +1005,68 @@ class TestIsAbout(unittest.TestCase):
         self.assertFalse(is_about("", "Tour Eiffel"))
 
 
-class TestScreenTool(unittest.TestCase):
-    def test_offered_only_with_a_screen(self):
-        client = make_client()
-        names = {t["name"] for t in get_tool_definitions(client)}
-        self.assertNotIn("show_image", names)
-        client.screens = ["media_player.google_home"]
-        names = {t["name"] for t in get_tool_definitions(client)}
-        self.assertIn("show_image", names)
+class TestShowImage(unittest.IsolatedAsyncioTestCase):
+    """Asked from the web app, a picture shows there; on the Nest Hub only when the request names it. The
+    satellite's go to the screen, as before (AD-069)."""
+
+    PICTURE = Picture("https://upload.wikimedia.org/eiffel.jpg", "image/jpeg", "Tour Eiffel", from_article=True)
+
+    def setUp(self):
+        self.client = make_client()
+        self.client.entities["media_player.google_home"] = {
+            "friendly_name": "Google Home", "domain": "media_player", "state": "idle",
+            "attributes": {}, "area_id": "living_room", "area_name": "Living Room",
+        }  # fmt: skip
+        self.client.screens = ["media_player.google_home"]
+        self.client.call_service = AsyncMock(return_value="ok")
+        self.server = make_server()
+        self.server.ha_client = self.client
+        patcher = patch("voice_server.find_image", AsyncMock(return_value=self.PICTURE))
+        self.find = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def show(self, args: dict, browser: str | None = "phone42") -> tuple[dict, str]:
+        """show_image asked by a browser of the app, or by the satellite (None): its log entry and result."""
+        self.server.new_request(browser)
+        call = {"function": "show_image", "args": args}
+        return call, await self.server.execute_function("show_image", args, call)
+
+    def cast(self) -> list[str]:
+        return [c.args[2] for c in self.client.call_service.call_args_list if c.args[1] == "play_media"]
+
+    def test_offered_without_a_screen_or_home_assistant(self):
+        for client in (make_client(), None):
+            self.assertIn("show_image", {t["name"] for t in get_tool_definitions(client)})
+
+    async def test_the_app_shows_it_itself(self):
+        call, result = await self.show({"query": "tour Eiffel"})
+        self.assertTrue(result.startswith("Image affichée dans l'application : l'image de l'article Wikipédia"))
+        self.assertEqual(call["image"], {"url": self.PICTURE.url, "caption": "Tour Eiffel"})
+        self.assertEqual(self.cast(), [])
+
+    async def test_the_app_names_the_screen(self):
+        for room in ("écran", "sur l'écran", "Living Room", "Google Home"):
+            self.client.call_service.reset_mock()
+            call, result = await self.show({"query": "tour Eiffel", "room": room})
+            self.assertEqual(self.cast(), ["media_player.google_home"], room)
+            self.assertTrue(result.startswith("Image affichée sur Google Home"), room)
+            self.assertIn("image", call)  # in the app too, as what the screen shows
+
+    async def test_a_room_the_screen_is_not_in(self):
+        """« L'écran du salon » at Paris, whose Google Home is in the « Living Room »: the home's screen."""
+        await self.show({"query": "tour Eiffel", "room": "salon"})
+        self.assertEqual(self.cast(), ["media_player.google_home"])
+
+    async def test_the_satellite_casts_it_as_before(self):
+        _, result = await self.show({"query": "tour Eiffel"}, browser=None)
+        self.assertEqual(self.cast(), ["media_player.google_home"])
+        self.assertTrue(result.startswith("Image affichée sur Google Home"))
+
+    async def test_no_screen_at_the_satellites_home(self):
+        self.client.screens = []
+        _, result = await self.show({"query": "tour Eiffel"}, browser=None)
+        self.assertEqual(result, "Aucun écran ici")
+        self.find.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

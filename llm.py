@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # field strictly, so there it is only sent when explicitly configured.
 REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "")
 
-# What the text fallback may run: not unlock, whose button needs the call's log entry (AD-068)
+# What the text fallback may run; its call has a log entry, for unlock's button (AD-068) as for a picture (AD-069)
 _TOOL_NAMES = {
     "turn_on",
     "turn_off",
@@ -40,6 +40,7 @@ _TOOL_NAMES = {
     "music_control",
     "show_image",
     "lock",
+    "unlock",
 }
 
 
@@ -379,7 +380,48 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
             },
         ]
 
-    standalone_tools = [weather_tool, place_tool, *timer_tools, *calendar_tools, *media_tools]
+    # Shown in the web app that asks, else cast to a screen (a Nest Hub): offered without one (AD-069)
+    image_tool = {
+        "name": "show_image",
+        "description": (
+            "Montrer une image : une photo de quelque chose ou de quelqu'un "
+            "(ex: « montre-moi la tour Eiffel », « à quoi ressemble un okapi ? », "
+            "« montre-moi un chat roux »). Pour une autre image du même sujet "
+            "(« une autre »), rappeler avec la même requête."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    # The name alone finds the Wikipedia article and its picture; with the
+                    # request's description around it (« La Joconde au Louvre », « l'Everest,
+                    # la plus haute montagne du monde »), the photo search showed a Monet, or nothing
+                    "type": "string",
+                    "description": (
+                        "Le nom de ce qu'il faut montrer, seul, comme le titre de son article "
+                        "Wikipédia : « tour Eiffel », « okapi », « Burj Khalifa » (pas « Burj "
+                        "Khalifa, le plus haut bâtiment du monde »). Une demande qui désigne une chose "
+                        "précise sans la nommer (un superlatif : « le plus haut bâtiment du monde », "
+                        "« le plus grand lac ») prend le nom de cette chose (« Burj Khalifa », "
+                        "« mer Caspienne ») ; si plusieurs conviennent, en choisir une et la nommer "
+                        "dans la réponse. "
+                        "Un mot de plus si le nom seul désigne autre chose (« Mercure planète »). "
+                        "Sans nom propre, quelques mots (« chat roux »)."
+                    ),
+                },
+                "room": {
+                    "type": "string",
+                    "description": (
+                        "L'écran où la montrer, seulement si la demande en nomme un : « écran » "
+                        "(« sur l'écran »), ou sa pièce (« sur l'écran du salon »). Sinon, rien"
+                    ),
+                },
+            },
+            "required": ["query"],
+        },
+    }
+
+    standalone_tools = [weather_tool, place_tool, *timer_tools, *calendar_tools, *media_tools, image_tool]
     if not ha_client:
         return standalone_tools
 
@@ -395,44 +437,6 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
             "« moustiquaires » avec room pour tous ceux d'une pièce, d'un groupe ou de partout, en un seul appel"
         ),
     }
-
-    # Pictures are cast to a HA screen (a Nest Hub): no screen, no tool
-    screen_tools = []
-    if ha_client.screens:
-        screen_tools = [
-            {
-                "name": "show_image",
-                "description": (
-                    "Montrer une image sur l'écran : une photo de quelque chose ou de quelqu'un "
-                    "(ex: « montre-moi la tour Eiffel », « à quoi ressemble un okapi ? », "
-                    "« montre-moi un chat roux »). Pour une autre image du même sujet "
-                    "(« une autre »), rappeler avec la même requête."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            # The name alone finds the Wikipedia article and its picture; with the
-                            # request's description around it (« La Joconde au Louvre », « l'Everest,
-                            # la plus haute montagne du monde »), the photo search showed a Monet, or nothing
-                            "type": "string",
-                            "description": (
-                                "Le nom de ce qu'il faut montrer, seul, comme le titre de son article "
-                                "Wikipédia : « tour Eiffel », « okapi », « Burj Khalifa » (pas « Burj "
-                                "Khalifa, le plus haut bâtiment du monde »). Une demande qui désigne une chose "
-                                "précise sans la nommer (un superlatif : « le plus haut bâtiment du monde », "
-                                "« le plus grand lac ») prend le nom de cette chose (« Burj Khalifa », "
-                                "« mer Caspienne ») ; si plusieurs conviennent, en choisir une et la nommer "
-                                "dans la réponse. "
-                                "Un mot de plus si le nom seul désigne autre chose (« Mercure planète »). "
-                                "Sans nom propre, quelques mots (« chat roux »)."
-                            ),
-                        },
-                    },
-                    "required": ["query"],
-                },
-            }
-        ]
 
     # Another home, named in the request: its door from this one, its state (AD-068)
     elsewhere = {}
@@ -620,7 +624,6 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
             },
         },
         *standalone_tools,
-        *screen_tools,
         *lock_tools,
         {
             "name": "end_conversation",

@@ -93,6 +93,10 @@
   .act .i { width: 14px; height: 14px; }
   .act span { min-width: 0; overflow-wrap: anywhere; }
   .act.warn { background: var(--warn-soft); color: var(--warn); }
+  .pic { margin: 8px 2px 0; max-width: 100%; }
+  .pic a { display: block; }
+  .pic img { display: block; max-width: 100%; max-height: 55vh; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
+  .pic figcaption { margin: 4px 6px 0; font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }
   .confirm { display: inline-flex; align-items: center; gap: 10px; min-height: 48px; margin: 8px 2px 0; padding: 8px 20px 8px 16px; border-radius: 24px; background: var(--accent); color: var(--on-accent); font-size: 16px; font-weight: 600; text-align: left; line-height: 1.25; }
   .confirm small { display: block; font-size: 13px; font-weight: 400; opacity: .85; }
   .confirm:active { background: var(--accent-2); }
@@ -444,8 +448,10 @@ function botMsg(e) {
   else bubble = `<div class="bubble">${esc(r)}</div>`;
   const calls = (e.tool_calls || []).filter((tc) => tc.function !== 'end_conversation');
   const acts = calls.length ? `<div class="acts">${calls.map(describeCall).join('')}</div>` : '';
+  // A picture show_image found: here, where the request came from the app, and on a screen if it named one (AD-069)
+  const pics = calls.filter((tc) => tc.image && !gone.has(tc.image.url)).map(({image: p}) => `<figure class="pic"><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(p.url)}" alt="${esc(p.caption)}" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a><figcaption>${esc(p.caption)}</figcaption></figure>`).join('');
   const unlock = offers(e).map(({confirm: c}) => `<button class="confirm" data-unlock="${esc(c.id)}" data-door="${esc(c.door)}">${icon('unlock')}<span>Déverrouiller<small>${esc(c.door)}</small></span></button>`).join('');
-  return `<div class="msg bot">${bubble}${acts}${unlock}${debug ? fmtDebug(e) : ''}</div>`;
+  return `<div class="msg bot">${bubble}${pics}${acts}${unlock}${debug ? fmtDebug(e) : ''}</div>`;
 }
 
 // A door a request of this browser proposed to unlock: a tap here unlocks it, the model never does. The
@@ -474,7 +480,16 @@ const typing = '<div class="msg bot"><div class="bubble typing" aria-label="Rép
 // timers, shortcuts or keyboard changing the thread's height
 let stick = true;
 thread.addEventListener('scroll', () => { stick = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 80; }, {passive: true});
-new ResizeObserver(() => { if (stick) thread.scrollTop = thread.scrollHeight; }).observe(thread);
+const follow = () => { if (stick) thread.scrollTop = thread.scrollHeight; };
+new ResizeObserver(follow).observe(thread);
+// A picture taller once loaded; one gone from the web since (a deleted Flickr photo), left out, and not asked for again
+const gone = new Set();
+thread.addEventListener('load', (e) => { if (e.target.tagName === 'IMG') follow(); }, true);
+thread.addEventListener('error', (e) => {
+  if (e.target.tagName !== 'IMG') return;
+  gone.add(e.target.getAttribute('src'));
+  e.target.closest('.pic')?.remove();
+}, true);
 
 // The page shows this browser's conversation while it goes on, the history on demand. A conversation
 // ends as the server's does: 10 minutes without a request, or a goodbye (shown until the page is left)
@@ -528,7 +543,7 @@ function render(toBottom = false) {
   app.classList.toggle('at-home', view === 'now' && !html.startsWith('<section'));
   if (html !== shown) { thread.innerHTML = shown = html; }
   if (toBottom) stick = true;
-  if (stick) thread.scrollTop = thread.scrollHeight;
+  follow();
   renderShortcuts();
 }
 
