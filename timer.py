@@ -30,6 +30,8 @@ class Timer:
     is_active: bool = True
     is_alarm: bool = False  # True for set_alarm (has a target time)
     target_time: str | None = None  # "HH:MM" for alarms
+    client: str | None = None  # the web app's browser that set it, told when it rings (AD-070)
+    satellite: bool = True  # shown and rung by its site's satellite: not when set from a phone away (AD-070)
     task: asyncio.Task | None = field(default=None, repr=False)
 
     @property
@@ -43,7 +45,14 @@ class TimerManager:
     def __init__(self):
         self.timers: dict[str, Timer] = {}
 
-    def start_timer(self, total_seconds: int, name: str | None, on_event: TimerCallback) -> Timer:
+    def start_timer(
+        self,
+        total_seconds: int,
+        name: str | None,
+        on_event: TimerCallback,
+        client: str | None = None,
+        satellite: bool = True,
+    ) -> Timer:
         """Create and start a new timer. Fires STARTED event immediately."""
         timer_id = uuid.uuid4().hex[:8]
         timer = Timer(
@@ -51,13 +60,22 @@ class TimerManager:
             name=name,
             total_seconds=total_seconds,
             fire_at=time.time() + total_seconds,
+            client=client,
+            satellite=satellite,
         )
         self.timers[timer_id] = timer
         timer.task = asyncio.create_task(self._run_timer(timer, on_event))
         logger.info(f"Timer started: id={timer_id} name={name} duration={total_seconds}s")
         return timer
 
-    def start_alarm(self, time_str: str, name: str | None, on_event: TimerCallback) -> Timer:
+    def start_alarm(
+        self,
+        time_str: str,
+        name: str | None,
+        on_event: TimerCallback,
+        client: str | None = None,
+        satellite: bool = True,
+    ) -> Timer:
         """Create a timer that fires at a specific time (HH:MM). Wraps to next day if past."""
         hour, minute = _parse_time(time_str)
         now = datetime.now()
@@ -69,28 +87,26 @@ class TimerManager:
         total_seconds = int(target.timestamp() - time.time())
         target_time_str = f"{hour:02d}:{minute:02d}"
         logger.info(f"Alarm for {target_time_str} -> {total_seconds}s from now")
-        timer = self.start_timer(total_seconds, name, on_event)
+        timer = self.start_timer(total_seconds, name, on_event, client=client, satellite=satellite)
         timer.is_alarm = True
         timer.target_time = target_time_str
         return timer
 
-    def cancel_timer(self, timer_id: str | None = None, name: str | None = None) -> Timer | None:
+    def cancel_timer(
+        self, timer_id: str | None = None, name: str | None = None, client: str | None = None
+    ) -> Timer | None:
         """Cancel an active timer by ID, or by name: a spoken one, so with neither or a name that
-        matches none, the only active timer (« annule le minuteur »). Returns the cancelled timer or None."""
+        matches none, the only active timer (« annule le minuteur ») that `client` sees (get_timers).
+        Returns the cancelled timer or None."""
         timer = None
         if timer_id:
             timer = self.timers.get(timer_id)
         else:
+            active = self.get_timers(client)
             if name:
-                name_lower = name.lower()
-                for t in self.timers.values():
-                    if t.is_active and t.name and t.name.lower() == name_lower:
-                        timer = t
-                        break
-            if not timer:
-                active = [t for t in self.timers.values() if t.is_active]
-                if len(active) == 1:
-                    timer = active[0]
+                timer = next((t for t in active if t.name and t.name.lower() == name.lower()), None)
+            if not timer and len(active) == 1:
+                timer = active[0]
 
         if timer and timer.is_active:
             timer.is_active = False
@@ -101,10 +117,11 @@ class TimerManager:
             return timer
         return None
 
-    def get_timers(self) -> list[Timer]:
-        """Return all active timers sorted by fire time."""
+    def get_timers(self, client: str | None = None) -> list[Timer]:
+        """Active timers by fire time, those `client` sees: its site's satellite's, and the ones that
+        browser of the web app set away from home (AD-070); with no client, the satellite's alone."""
         return sorted(
-            [t for t in self.timers.values() if t.is_active],
+            [t for t in self.timers.values() if t.is_active and (t.satellite or t.client == client)],
             key=lambda t: t.fire_at,
         )
 

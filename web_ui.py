@@ -80,6 +80,23 @@ def access_control(key: str):
     return middleware
 
 
+def _funnel_address(request) -> Optional[str]:
+    """The internet address a request came from through Funnel; None from the tailnet or this machine."""
+    if forwarded := request.headers.get("X-Forwarded-For"):
+        # The last address is the one Funnel's proxy added; any before it, the client wrote
+        return forwarded.rsplit(",", 1)[-1].strip()
+    return None
+
+
+def write_private(path: Path, text: str) -> None:
+    """Written whole to a temporary file then renamed: a crash mid-write left invalid JSON, read as empty
+    and overwritten. Mode 600: kept from other users."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
 def _is_our_host(request) -> bool:
     """The Host header names this server: an IP address, or one of its names. No header: no browser."""
     if "Host" not in request.headers:
@@ -207,13 +224,9 @@ class ExchangeLog:
         return []
 
     def _save(self):
-        """Written whole to a temporary file then renamed: a crash mid-write left invalid JSON, read as
-        empty and overwritten. Mode 600: transcripts and calendar answers, kept from other users."""
-        tmp = self.path.with_name(self.path.name + ".tmp")
+        """Private (write_private): transcripts and calendar answers."""
         try:
-            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-                f.write(json.dumps(self.entries, ensure_ascii=False, indent=1))
-            os.replace(tmp, self.path)
+            write_private(self.path, json.dumps(self.entries, ensure_ascii=False, indent=1))
         except Exception as e:
             logger.warning(f"Failed to save exchange log: {e}")
 
@@ -272,7 +285,7 @@ def setup_routes(app, server):
     async def serve(request, params: dict) -> None:
         """The request's site (use_site), and a request of its own, its browser's (AD-061)."""
         await use_site(request, params)
-        server.new_request(_client(params))
+        server.new_request(_client(params), _funnel_address(request))
 
     async def use_site(request, body: dict) -> None:
         """Serve the site the request names, else the one it comes from, for this request only: a
@@ -286,10 +299,8 @@ def setup_routes(app, server):
 
     async def here(request) -> Site | None:
         """The home a request came from through Funnel, by its internet address: a phone on its Wi-Fi."""
-        if not (forwarded := request.headers.get("X-Forwarded-For")):
-            return None
-        # The last address is the one Funnel's proxy added; any before it, the client wrote
-        return await site_at_address(server.sites, forwarded.rsplit(",", 1)[-1].strip())
+        address = _funnel_address(request)
+        return await site_at_address(server.sites, address) if address else None
 
     async def handle_sites(request):
         """The homes for the UI's selector, and the one the request comes from, which needs none."""
@@ -411,16 +422,19 @@ def setup_routes(app, server):
         return ws
 
     async def handle_state(request):
-        """What runs now at the page's home: its timers; and Spotify, wherever it plays (one for every home)."""
+        """What runs now at the page's home: the timers this browser sees, saying which it set; and Spotify,
+        wherever it plays (one for every home)."""
         await use_site(request, dict(request.query))
+        client = _client(request.query)
         timers = [
             {
                 "id": timer.id,
                 "name": timer.name,
                 "seconds_left": timer.seconds_left,
                 "alarm": timer.target_time if timer.is_alarm else None,
+                "mine": client is not None and timer.client == client,  # it rings on this phone (AD-070)
             }
-            for timer in server.timer_manager.get_timers()
+            for timer in server.timer_manager.get_timers(client)
         ]
         return web.json_response({"timers": timers, "music": await server.music_now()})
 
@@ -430,6 +444,22 @@ def setup_routes(app, server):
         await use_site(request, body)
         if not isinstance(timer_id := body.get("id"), str) or not await server.cancel_timer(timer_id):
             raise _json_error(web.HTTPNotFound, "no such timer")
+        return web.json_response({"status": "ok"})
+
+    async def handle_push_key(request):
+        """The key a browser subscribes to this server's pushes with (AD-070)."""
+        return web.json_response({"key": server.push.public_key})
+
+    async def handle_push_subscribe(request):
+        """A browser's push subscription, for its timers: {"client": …, "subscription": PushSubscription.toJSON()};
+        without "subscription", the browser's is forgotten."""
+        body = await _read_body(request)
+        if not (client := _client(body)):
+            raise _json_error(web.HTTPBadRequest, "missing 'client' field")
+        if body.get("subscription") is None:
+            server.push.unsubscribe(client)
+        elif not server.push.subscribe(client, body["subscription"], request.headers.get("Origin")):
+            raise _json_error(web.HTTPBadRequest, "not a push subscription")
         return web.json_response({"status": "ok"})
 
     async def handle_music(request):
@@ -487,7 +517,7 @@ def setup_routes(app, server):
                 "ha": site.ha_client is not None,
                 "entities": len(site.ha_client.entities) if site.ha_client else 0,
                 "esp": site.name in server.devices,
-                "timers": len(site.timer_manager.get_timers()),
+                "timers": len(site.timer_manager.timers),  # a phone's own too (AD-070)
             }
             for site in server.sites
         }
@@ -550,6 +580,8 @@ def setup_routes(app, server):
     app.router.add_post("/api/dry-run", handle_dry_run)
     app.router.add_post("/api/timers/cancel", handle_cancel_timer)
     app.router.add_post("/api/music", handle_music)
+    app.router.add_get("/api/push", handle_push_key)
+    app.router.add_post("/api/push", handle_push_subscribe)
     app.router.add_post("/api/reset-conversation", handle_reset_conversation)
     app.router.add_post("/test", handle_test_prompt)
     app.router.add_static("/static", STATIC_DIR)

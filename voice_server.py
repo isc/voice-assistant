@@ -41,8 +41,9 @@ import onnx_gpu
 from ha_client import LOCAL_CONFIG, asks_whole_house, compact, fold, is_whole_house, normalize
 from images import find_image
 from places import find_place
+from push import Push
 from recordings import Recordings
-from sites import Conversation, Site, load_sites
+from sites import Conversation, Site, load_sites, site_at_address
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
 from timer import Timer
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
@@ -240,6 +241,15 @@ def _format_duration(total_seconds: int) -> str:
     return f"{total_seconds} seconde{'s' if total_seconds > 1 else ''}"
 
 
+def _timer_finished_text(timer) -> str:
+    """What the satellite says, and the phone's notification, when a timer rings."""
+    if timer.is_alarm:
+        return f"Il est {timer.target_time}, c'est l'heure{f' : {timer.name}' if timer.name else ''} !"
+    if timer.name:
+        return f"Le timer {timer.name} est terminé !"
+    return f"Le timer de {_format_duration(timer.total_seconds)} est terminé !"
+
+
 def _describe_timer(timer) -> str:
     if timer.is_alarm and timer.target_time:
         return f"l'alarme de {timer.target_time}"
@@ -280,6 +290,7 @@ class _Request:
     no_followup: bool = False  # a media command: no follow-up, history kept (AD-035)
     whole_house: bool = False  # the request says tout, tous, partout…: an action may sweep every room (AD-058)
     client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
+    address: Optional[str] = None  # through Funnel, the internet address it came from (AD-050, AD-070)
 
 
 @dataclass
@@ -337,6 +348,7 @@ class VoiceAssistantServer:
     _no_followup = _request_attribute("no_followup")
     _whole_house = _request_attribute("whole_house")
     _client = _request_attribute("client")
+    _address = _request_attribute("address")
 
     def __init__(self):
         self.llm_config = (LLM_API_KEY, LLM_MODEL, LLM_URL)  # for /health
@@ -383,6 +395,8 @@ class VoiceAssistantServer:
         from web_ui import ExchangeLog
 
         self.exchange_log = ExchangeLog(Path(__file__).parent / "exchanges.json")
+        # The browsers a timer set from them rings on (AD-070)
+        self.push = Push(Path(__file__).parent / "push.json")
         self.recordings = Recordings()
         # Cap on concurrent tool calls: fast enough for a whole-house command while
         # staying gentle on the single HomeKit bridge relaying every Velux.
@@ -423,10 +437,10 @@ class VoiceAssistantServer:
         return True
 
     @staticmethod
-    def new_request(client: Optional[str] = None) -> None:
+    def new_request(client: Optional[str] = None, address: Optional[str] = None) -> None:
         """A request starts in this task: its own tool calls and follow-up flags; from a browser of the web app,
-        its own conversation."""
-        _current_request.set(_Request(client=client))
+        its own conversation, and through Funnel, where it comes from (AD-070)."""
+        _current_request.set(_Request(client=client, address=address))
 
     @property
     def conversation(self) -> Conversation:
@@ -810,7 +824,7 @@ class VoiceAssistantServer:
         self._in_background(self._restore_speakers())
 
     def _in_background(self, coro) -> None:
-        """Run an HA call without waiting for it; shutdown does, so that it still reaches HA."""
+        """Run an HA call, or a push, without waiting for it; shutdown does, so that it still gets through."""
         task = asyncio.ensure_future(coro)
         self._pending_service_calls.add(task)
         task.add_done_callback(self._pending_service_calls.discard)
@@ -1107,7 +1121,7 @@ class VoiceAssistantServer:
             if total_seconds <= 0:
                 return "Durée du timer manquante ou invalide"
             label = arguments.get("label")
-            timer = self.timer_manager.start_timer(total_seconds, label, partial(self._handle_timer_event, self.site))
+            self.timer_manager.start_timer(total_seconds, label, **await self._timer_owners())
             if label:
                 return f"Timer {label} de {_format_duration(total_seconds)} lancé"
             return f"Timer de {_format_duration(total_seconds)} lancé"
@@ -1115,13 +1129,13 @@ class VoiceAssistantServer:
         if function_name == "set_alarm":
             time_str = arguments.get("time", "")
             label = arguments.get("label")
-            timer = self.timer_manager.start_alarm(time_str, label, partial(self._handle_timer_event, self.site))
+            self.timer_manager.start_alarm(time_str, label, **await self._timer_owners())
             return f"Alarme programmée pour {time_str}"
 
         if function_name == "cancel_timer":
             if timer := await self.cancel_timer(name=arguments.get("label")):
                 return f"Annulé: {_describe_timer(timer)}"
-            if running := self.timer_manager.get_timers():
+            if running := self.timer_manager.get_timers(self._client):
                 names = ", ".join(map(_describe_timer, running))
                 return f"Plusieurs timers en cours ({names}) : lequel annuler ?"
             return "Aucun timer actif"
@@ -1674,9 +1688,20 @@ class VoiceAssistantServer:
 
     # === TIMER EVENTS ===
 
+    async def _timer_owners(self) -> dict:
+        """Who a new timer rings for: its site's satellite, and the browser that asks, if any; that browser
+        alone when it asks through Funnel from another internet connection than the home's (AD-070)."""
+        away = bool(
+            self._address
+            and self.site.public_host
+            and await site_at_address(self.sites, self._address) is not self.site
+        )
+        return {"on_event": partial(self._handle_timer_event, self.site), "client": self._client, "satellite": not away}
+
     async def _handle_timer_event(self, site: Site, event_type, timer):
-        """Forward timer events to the satellite of the site the timer was set at. On FINISHED, also announce it."""
-        api = self.devices.get(site.name)
+        """Forward timer events to the satellite of the site the timer was set at, unless it is a phone's
+        alone. On FINISHED, announce it there, and push it to the browser that set it (AD-070)."""
+        api = self.devices.get(site.name) if timer.satellite else None
         if api:
             try:
                 api.send_voice_assistant_timer_event(
@@ -1692,12 +1717,19 @@ class VoiceAssistantServer:
 
         from aioesphomeapi import VoiceAssistantTimerEventType
 
-        if event_type == VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_FINISHED and api:
-            await self._announce_timer_finished(api, timer, site)
+        if event_type != VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_FINISHED:
+            return
+        text = _timer_finished_text(timer)
+        if timer.client:
+            message = {"title": "Alarme" if timer.is_alarm else "Minuteur", "body": text, "tag": timer.id}
+            self._in_background(self.push.send(timer.client, message))
+        if api:
+            await self._announce_timer_finished(api, text, site)
 
     async def cancel_timer(self, timer_id: Optional[str] = None, name: Optional[str] = None) -> Optional[Timer]:
-        """Cancel a timer of this site by id or name (with neither, the only one), and its satellite's countdown."""
-        timer = self.timer_manager.cancel_timer(timer_id, name)
+        """Cancel a timer of this site by id or name (with neither, the only one the asker sees), and its
+        satellite's countdown."""
+        timer = self.timer_manager.cancel_timer(timer_id, name, self._client)
         if timer:
             from aioesphomeapi import VoiceAssistantTimerEventType
 
@@ -1705,15 +1737,8 @@ class VoiceAssistantServer:
             await self._handle_timer_event(self.site, cancelled, timer)
         return timer
 
-    async def _announce_timer_finished(self, api, timer, site: Site):
+    async def _announce_timer_finished(self, api, text: str, site: Site):
         """Generate TTS and play announcement when a timer finishes."""
-        if timer.is_alarm:
-            text = f"Il est {timer.target_time}, c'est l'heure{f' : {timer.name}' if timer.name else ''} !"
-        elif timer.name:
-            text = f"Le timer {timer.name} est terminé !"
-        else:
-            text = f"Le timer de {_format_duration(timer.total_seconds)} est terminé !"
-
         try:
             audio_url = await self.text_to_speech_file(text, site)
             logger.info(f"Timer finished announcement: {text}")
@@ -1775,7 +1800,7 @@ class VoiceAssistantServer:
         from timer import format_timers_for_prompt
 
         context = [f"Date et heure actuelles: {time.strftime('%A %d %B %Y, %H:%M')}."]
-        if timers_info := format_timers_for_prompt(self.timer_manager.get_timers()):
+        if timers_info := format_timers_for_prompt(self.timer_manager.get_timers(self._client)):
             context.append(timers_info)
         if music_info := await self._music_for_prompt():
             context.append(music_info)

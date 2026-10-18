@@ -1,5 +1,5 @@
-// Minimal service worker: makes the web UI an installable PWA and lets the
-// app shell load offline. Deliberately conservative — it never touches POST
+// Minimal service worker: makes the web UI an installable PWA, lets the
+// app shell load offline, and shows a timer's push. Deliberately conservative — it never touches POST
 // requests or api/* so the live UI keeps working against the network.
 // URLs are relative to this script: the app lives at / on the tailnet, at
 // /assistant/ through Funnel.
@@ -54,4 +54,33 @@ self.addEventListener("fetch", (event) => {
 
   // Static assets (icons, manifest): cache-first.
   event.respondWith(caches.match(req).then((res) => res || fetch(req)));
+});
+
+// A timer set from this phone rings (AD-070): the server's push, shown whether the app is open or not (a push
+// must show something). Silent while the app is shown: the page has chimed
+self.addEventListener("push", (event) => {
+  const message = event.data.json();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window" }).then((open) => {
+      const shown = open.some((c) => c.visibilityState === "visible");
+      return self.registration.showNotification(message.title, {
+        body: message.body,
+        tag: message.tag,
+        renotify: true,
+        icon: "static/icon-192.png",
+        lang: "fr",
+        ...(shown ? { silent: true } : { requireInteraction: true, vibrate: [300, 150, 300, 150, 600] }),
+      });
+    })
+  );
+});
+
+// A tap on it brings the app forward, or opens it
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((open) => (open.length ? open[0].focus() : self.clients.openWindow("./")))
+  );
 });

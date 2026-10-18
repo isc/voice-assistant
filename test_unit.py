@@ -2243,6 +2243,310 @@ class TestTimers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.get_timers(), [])
 
 
+class FakePushService:
+    """aiohttp.ClientSession as push.py uses it, answering every post with `status`."""
+
+    def __init__(self, status=201):
+        self.status, self.posts = status, []
+
+    def __call__(self, **kwargs):  # the session
+        return self
+
+    async def __aenter__(self):  # the session, then the response
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, data, headers):
+        self.posts.append((url, data, headers))
+        return self
+
+    async def text(self):
+        return "push service says no"
+
+
+def browser_keys() -> tuple:
+    """A browser's push keys: its private key, and its subscription as PushSubscription.toJSON() gives it."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    from push import _point, b64
+
+    key, auth = ec.generate_private_key(ec.SECP256R1()), os.urandom(16)
+    subscription = {"endpoint": "https://push.example.net/abc", "keys": {"p256dh": b64(_point(key)), "auth": b64(auth)}}
+    return key, auth, subscription
+
+
+class TestWebPush(unittest.TestCase):
+    """The pushes a timer set from a phone rings with (AD-070)."""
+
+    def test_encrypted_as_rfc_8291s_example(self):
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        from push import encrypt, unb64
+
+        sender = ec.derive_private_key(
+            int.from_bytes(unb64("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw"), "big"), ec.SECP256R1()
+        )
+        body = encrypt(
+            b"When I grow up, I want to be a watermelon",
+            unb64("BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4"),
+            unb64("BTBZMqHH6r4Tts7J_aSIgg"),
+            salt=unb64("DGv6ra1nlYgDCS1FRnbzlw"),
+            sender=sender,
+        )
+        expected = (
+            "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml"
+            "mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT"
+            "pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN"
+        )
+        self.assertEqual(body, unb64(expected))
+
+    def test_vapid_signed_with_the_key_the_browser_subscribed_with(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+
+        from push import unb64, vapid
+
+        key = ec.generate_private_key(ec.SECP256R1())
+        header = vapid(key, "https://fcm.googleapis.com/fcm/send/abc", "https://charras.example.ts.net")
+        token, public = header.removeprefix("vapid t=").split(", k=")
+        signed, signature = token.rsplit(".", 1)
+        raw = unb64(signature)
+        der = encode_dss_signature(int.from_bytes(raw[:32], "big"), int.from_bytes(raw[32:], "big"))
+        verifying = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), unb64(public))
+        verifying.verify(der, signed.encode(), ec.ECDSA(hashes.SHA256()))  # raises if not
+        self.assertEqual(verifying.public_numbers(), key.public_key().public_numbers())
+        claims = json.loads(unb64(signed.split(".")[1]))
+        self.assertEqual((claims["aud"], claims["sub"]), ("https://fcm.googleapis.com", "https://charras.example.ts.net"))
+        self.assertLess(claims["exp"], datetime.now().timestamp() + 24 * 3600)  # the most push services take
+
+    def test_key_and_subscriptions_kept(self):
+        from push import Push
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "push.json"
+            push = Push(path)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            subscription = browser_keys()[2]
+            self.assertTrue(push.subscribe("phone42", subscription, "https://charras.example.ts.net"))
+            self.assertFalse(push.subscribe("phone43", {**subscription, "endpoint": "http://lan/x"}, None))
+            self.assertFalse(push.subscribe("phone43", {"endpoint": "https://push.example.net/x"}, None))
+            again = Push(path)
+            self.assertEqual(again.public_key, push.public_key)
+            self.assertEqual(list(again.subscriptions), ["phone42"])
+            again.unsubscribe("phone42")
+            self.assertEqual(Push(path).subscriptions, {})
+            path.write_text("{not json")
+            self.assertNotEqual(Push(path).public_key, push.public_key)  # anew; browsers subscribe again
+
+    def test_sent_readable_by_the_browser_alone(self):
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        from push import Push, _point
+
+        browser, auth, subscription = browser_keys()
+        service = FakePushService()
+        with tempfile.TemporaryDirectory() as tmp, patch("push.aiohttp.ClientSession", service):
+            push = Push(Path(tmp) / "push.json")
+            push.subscribe("phone42", subscription, "https://charras.example.ts.net")
+            message = {"title": "Minuteur", "body": "Le timer pâtes est terminé !", "tag": "t1"}
+            self.assertTrue(asyncio.run(push.send("phone42", message)))
+            self.assertFalse(asyncio.run(push.send("phone43", message)))  # not subscribed
+        ((url, body, headers),) = service.posts
+        self.assertEqual(url, "https://push.example.net/abc")
+        self.assertEqual((headers["Content-Encoding"], headers["Urgency"]), ("aes128gcm", "high"))
+        self.assertTrue(headers["Authorization"].endswith(f"k={push.public_key}"))
+        # Read as the browser does (RFC 8291 §3.4)
+        salt, sender = body[:16], body[21:86]
+        shared = browser.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), sender))
+        ikm = HKDF(hashes.SHA256(), 32, auth, b"WebPush: info\x00" + _point(browser) + sender).derive(shared)
+        key = HKDF(hashes.SHA256(), 16, salt, b"Content-Encoding: aes128gcm\x00").derive(ikm)
+        nonce = HKDF(hashes.SHA256(), 12, salt, b"Content-Encoding: nonce\x00").derive(ikm)
+        plain = AESGCM(key).decrypt(nonce, body[86:], None)
+        self.assertEqual(json.loads(plain[:-1]), message)
+
+    def test_a_subscription_gone_is_forgotten(self):
+        from push import Push
+
+        with tempfile.TemporaryDirectory() as tmp:
+            push = Push(Path(tmp) / "push.json")
+            push.subscribe("phone42", browser_keys()[2], None)
+            with patch("push.aiohttp.ClientSession", FakePushService(403)):
+                self.assertFalse(asyncio.run(push.send("phone42", {"body": "…"})))
+            self.assertIn("phone42", push.subscriptions)  # refused: kept, maybe the service's error
+            with patch("push.aiohttp.ClientSession", FakePushService(410)):
+                self.assertFalse(asyncio.run(push.send("phone42", {"body": "…"})))
+            self.assertEqual(push.subscriptions, {})
+
+
+class TestTimersOnThePhone(unittest.IsolatedAsyncioTestCase):
+    """A timer set from the web app rings on the phone that set it; on the satellite too, unless that
+    phone is away from the home, through Funnel from another internet connection (AD-070)."""
+
+    HOME, ELSEWHERE = "82.67.150.147", "176.58.90.1"
+
+    async def asyncSetUp(self):
+        from aioesphomeapi import VoiceAssistantTimerEventType as Event
+
+        self.Event = Event
+        server = self.server = make_server({"SITES": "paris,charras", "PARIS_PUBLIC_HOST": "paris.box"})
+        self.paris = server.sites[0]
+
+        async def getaddrinfo(host, port):
+            return [(None, None, None, "", (self.HOME, 0))]
+
+        patcher = patch.object(asyncio.get_running_loop(), "getaddrinfo", getaddrinfo)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.esp = MagicMock()
+        server.devices = {"paris": self.esp}
+        server.push = MagicMock(send=AsyncMock(return_value=True))
+        server.text_to_speech_file = AsyncMock(return_value="http://192.168.1.10:8888/tts/timer.flac")
+        server._announce = AsyncMock()
+        self.addCleanup(self.paris.timer_manager.cancel_all)
+
+    async def set_timer(self, client=None, address=None):
+        self.server.new_request(client, address)
+        await self.server.execute_function("set_timer", {"duration_minutes": 5, "label": "pâtes"})
+        await asyncio.sleep(0)  # STARTED
+        (timer,) = self.paris.timer_manager.get_timers(client)
+        return timer
+
+    async def finish(self, timer):
+        await self.server._handle_timer_event(self.paris, self.Event.VOICE_ASSISTANT_TIMER_FINISHED, timer)
+        await asyncio.gather(*self.server._pending_service_calls)
+
+    async def test_from_the_satellite_it_rings_there_alone(self):
+        timer = await self.set_timer()
+        self.assertEqual((timer.client, timer.satellite), (None, True))
+        await self.finish(timer)
+        self.server._announce.assert_awaited_once()
+        self.server.push.send.assert_not_awaited()
+
+    async def test_from_a_phone_at_home_both_ring(self):
+        timer = await self.set_timer("phone42", self.HOME)
+        self.assertEqual((timer.client, timer.satellite), ("phone42", True))
+        started = self.esp.send_voice_assistant_timer_event.call_args[0][0]
+        self.assertEqual(started, self.Event.VOICE_ASSISTANT_TIMER_STARTED)
+        await self.finish(timer)
+        self.server._announce.assert_awaited_once()
+        self.server.push.send.assert_awaited_once_with(
+            "phone42", {"title": "Minuteur", "body": "Le timer pâtes est terminé !", "tag": timer.id}
+        )
+
+    async def test_on_the_tailnet_where_it_is_cannot_be_told(self):
+        self.assertTrue((await self.set_timer("phone42")).satellite)
+
+    async def test_from_a_phone_away_the_satellite_knows_nothing_of_it(self):
+        timer = await self.set_timer("phone42", self.ELSEWHERE)
+        self.assertFalse(timer.satellite)
+        self.assertIsNotNone(await self.server.cancel_timer(timer.id))
+        timer = await self.set_timer("phone42", self.ELSEWHERE)
+        await self.finish(timer)
+        self.esp.send_voice_assistant_timer_event.assert_not_called()  # no countdown, no cancel, no ring
+        self.server._announce.assert_not_awaited()
+        self.server.push.send.assert_awaited_once()
+
+    async def test_a_phone_away_has_its_timers_to_itself(self):
+        timer = await self.set_timer("phone42", self.ELSEWHERE)
+        for client in (None, "phone43"):  # the satellite, another phone of the home
+            self.server.new_request(client)
+            self.assertEqual(self.paris.timer_manager.get_timers(client), [])
+            self.assertEqual(await self.server.execute_function("cancel_timer", {}), "Aucun timer actif")
+        self.server.new_request("phone42")
+        self.assertEqual(self.paris.timer_manager.get_timers("phone42"), [timer])
+        self.assertTrue((await self.server.execute_function("cancel_timer", {})).startswith("Annulé"))
+
+    async def test_an_alarm_says_its_time(self):
+        self.server.new_request("phone42", self.ELSEWHERE)
+        await self.server.execute_function("set_alarm", {"time": "7h30"})
+        (alarm,) = self.paris.timer_manager.get_timers("phone42")
+        await self.finish(alarm)
+        self.server.push.send.assert_awaited_once_with(
+            "phone42", {"title": "Alarme", "body": "Il est 07:30, c'est l'heure !", "tag": alarm.id}
+        )
+
+
+class TestTimersOnThePhoneRoutes(unittest.IsolatedAsyncioTestCase):
+    """Away from home is through Funnel from another connection than the home's (AD-070); the page learns
+    which timers are its own, and subscribes to their pushes."""
+
+    async def asyncSetUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        from push import Push
+
+        server = self.server = make_server({"SITES": "paris,charras", "PARIS_PUBLIC_HOST": "paris.box"})
+        server.push = Push(Path(tmp.name) / "push.json")
+        server.spotify = None
+        self.paris = server.sites[0]
+        self.addCleanup(self.paris.timer_manager.cancel_all)
+        self.asked = []
+
+        async def answer(text, source, timings, speak):
+            self.asked.append((server._client, server._address))
+            return {"response": "OK"}
+
+        server.answer = answer
+
+        async def getaddrinfo(host, port):
+            return [(None, None, None, "", ("82.67.150.147", 0))]
+
+        patcher = patch.object(asyncio.get_running_loop(), "getaddrinfo", getaddrinfo)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        with patch.dict(os.environ, {"WEB_UI_KEY": "s3cret"}):
+            app = web.Application()
+            setup_routes(app, server)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def send(self, headers=None):
+        body = {"text": "minuteur 5 minutes", "site": "paris", "client": "phone42"}
+        response = await self.client.post("/api/send", json=body, headers=headers or {})
+        self.assertEqual(response.status, 200)
+        return self.asked[-1]
+
+    async def test_where_a_request_comes_from_through_funnel(self):
+        funnel = {"Tailscale-Funnel-Request": "?1", "Cookie": f"{KEY_COOKIE}=s3cret"}
+        # The last address is the proxy's: any before it, the client wrote
+        forwarded = {**funnel, "X-Forwarded-For": "82.67.150.147, 176.58.90.1"}
+        self.assertEqual(await self.send(forwarded), ("phone42", "176.58.90.1"))
+        self.assertEqual(await self.send(), ("phone42", None))  # the tailnet: where, unknown
+
+    async def test_the_page_knows_its_own_timers(self):
+        self.server.new_request("phone42")
+        await self.server.execute_function("set_timer", {"duration_minutes": 5})
+        self.server.new_request(None)
+        await self.server.execute_function("set_timer", {"duration_minutes": 10})
+        self.server.new_request("phone42", "176.58.90.1")  # away: its own alone
+        await self.server.execute_function("set_timer", {"duration_minutes": 15})
+        response = await self.client.get("/api/state?site=paris&client=phone42")
+        self.assertEqual([t["mine"] for t in (await response.json())["timers"]], [True, False, True])
+        response = await self.client.get("/api/state?site=paris")
+        self.assertEqual([t["mine"] for t in (await response.json())["timers"]], [False, False])
+
+    async def test_subscribed_and_unsubscribed(self):
+        response = await self.client.get("/api/push")
+        self.assertEqual((await response.json())["key"], self.server.push.public_key)
+        subscription = browser_keys()[2]
+        origin = {"Origin": "https://charras.example.ts.net"}
+        body = {"client": "phone42", "subscription": subscription}
+        response = await self.client.post("/api/push", json=body, headers=origin)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self.server.push.subscriptions["phone42"]["subject"], "https://charras.example.ts.net")
+        bad = await self.client.post("/api/push", json={"client": "phone42", "subscription": {"endpoint": "x"}})
+        self.assertEqual(bad.status, 400)
+        response = await self.client.post("/api/push", json={"client": "phone42", "subscription": None})
+        self.assertEqual((response.status, self.server.push.subscriptions), (200, {}))
+
+
 # ---------------------------------------------------------------------------
 # Tests: recordings of voice requests
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 aioesphomeapi>=44.0.0
 aiohttp>=3.13.3
+cryptography
 silero-vad-lite
 kokoro-onnx
 misaki

@@ -214,6 +214,7 @@
   <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
   <symbol id="i-gauge" viewBox="0 0 24 24"><path d="m12 14 4-4M3.3 19a10 10 0 1 1 17.4 0"/></symbol>
   <symbol id="i-timer" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M10 2h4"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.9 1.9 0 0 0 3.4 0"/></symbol>
   <symbol id="i-alarm" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3 2 6M22 6l-3-3"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
   <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 22s7-6.2 7-12a7 7 0 0 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="10" r="2.5"/></symbol>
@@ -272,6 +273,7 @@
   <form method="dialog">
     <h2>Réglages</h2>
     <label class="row"><span><b>Détails techniques</b><small>Latences, appels d'outils, enregistrements, demandes vides</small></span><input type="checkbox" class="switch" id="opt-debug"></label>
+    <label class="row" id="opt-push-row" hidden><span><b>Minuteurs sur ce téléphone</b><small id="opt-push-note">Une notification quand un minuteur demandé ici sonne, l'application fermée</small></span><input type="checkbox" class="switch" id="opt-push"></label>
     <button type="button" class="row" id="opt-forget"><span><b>Oublier les raccourcis</b><small>Les actions fréquentes de ce téléphone, à refaire d'un geste</small></span></button>
     <div id="health">…</div>
     <button class="done" value="close">Fermer</button>
@@ -841,19 +843,23 @@ async function openMic(onChunk) {
   };
 }
 
-function earcon(up) {
-  if (!ctx || ctx.state !== 'running') return;
-  const t = ctx.currentTime, osc = ctx.createOscillator(), gain = ctx.createGain();
-  const [a, b] = up ? [660, 990] : [880, 590];
-  osc.frequency.setValueAtTime(a, t);
-  osc.frequency.setValueAtTime(b, t + 0.07);
+// A beep at `t` of `length` seconds: its frequencies in turn, each from its offset
+function tone(t, frequencies, level, length) {
+  const osc = ctx.createOscillator(), gain = ctx.createGain();
+  for (const [offset, hz] of frequencies) osc.frequency.setValueAtTime(hz, t + offset);
   gain.gain.setValueAtTime(0, t);
-  gain.gain.linearRampToValueAtTime(0.1, t + 0.01);
-  gain.gain.setValueAtTime(0.1, t + 0.12);
-  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  gain.gain.linearRampToValueAtTime(level, t + 0.01);
+  gain.gain.setValueAtTime(level, t + length - 0.06);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + length);
   osc.connect(gain).connect(ctx.destination);
   osc.start(t);
-  osc.stop(t + 0.2);
+  osc.stop(t + length + 0.02);
+}
+
+function earcon(up) {
+  if (!ctx || ctx.state !== 'running') return;
+  const [a, b] = up ? [660, 990] : [880, 590];
+  tone(ctx.currentTime, [[0, a], [0.07, b]], 0.1, 0.18);
 }
 
 const STATUS = {
@@ -1065,8 +1071,70 @@ function animate() {
   });
 }
 
+// ---------------------------------------------------------------- Timers ringing on this phone (AD-070)
+// The app shown, a chime when one of its timers reaches 0; closed, the server's push. Push needs HTTPS (Funnel)
+// and, on an iPhone, the app installed on the home screen
+const pushable = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const canAskPush = () => pushable && Notification.permission === 'default';
+const pushWanted = () => pushable && Notification.permission === 'granted' && store.get('va.push', true);
+const b64bytes = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+
+// The server holds this browser's subscription, made with its present key: checked at each start, sent when new.
+// Its key and the subscriptions share a file: losing them, the server has a new key, and the page subscribes again
+async function syncPush() {
+  const [answer, reg] = await Promise.all([fetch('api/push').then((r) => r.json()), navigator.serviceWorker.ready]);
+  const key = b64bytes(answer.key);
+  let sub = await reg.pushManager.getSubscription();
+  const held = sub?.options?.applicationServerKey;
+  if (sub && held && String(new Uint8Array(held)) !== String(key)) { await sub.unsubscribe(); sub = null; }
+  sub ??= await reg.pushManager.subscribe({userVisibleOnly: true, applicationServerKey: key});
+  if (store.get('va.pushSent', null) === sub.endpoint) return;
+  await post('api/push', tagged({subscription: sub.toJSON()}));
+  store.set('va.pushSent', sub.endpoint);
+}
+
+async function enablePush() {
+  const asked = Notification.requestPermission();  // first thing in the tap: iOS asks only then
+  if (await asked === 'granted') {
+    store.set('va.push', true);
+    try { await syncPush(); toast('Ses minuteurs sonneront sur ce téléphone'); } catch { toast("Ça n'a pas marché"); }
+  } else {
+    toast('Notifications refusées');
+  }
+  renderPush();
+}
+
+async function disablePush() {
+  store.set('va.push', false);
+  store.set('va.pushSent', null);
+  try {
+    await (await (await navigator.serviceWorker.ready).pushManager.getSubscription())?.unsubscribe();
+    await post('api/push', tagged({subscription: null}));
+  } catch {}
+  renderPush();
+}
+
+function renderPush() {
+  $('opt-push-row').hidden = !pushable;
+  if (pushable) {
+    const denied = Notification.permission === 'denied';
+    $('opt-push').checked = pushWanted();
+    $('opt-push').disabled = denied;
+    if (denied) $('opt-push-note').textContent = 'Refusées : à autoriser dans les réglages du téléphone';
+  }
+  renderLive();
+}
+
+// Three bursts of four beeps, as a kitchen timer. Silent while the browser holds sound back (no tap yet)
+async function chime() {
+  try { await startAudio(); } catch { return; }
+  const t0 = ctx.currentTime + 0.05;
+  for (let i = 0; i < 12; i++) tone(t0 + Math.floor(i / 4) * 1.1 + (i % 4) * 0.18, [[0, 1320]], 0.25, 0.12);
+}
+
 // ---------------------------------------------------------------- What runs now
 let live = {timers: [], music: null};
+const rung = new Set();  // this phone's timers it chimed for
 
 async function refreshLive() {
   try {
@@ -1086,14 +1154,17 @@ function countdown(ms) {
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+const timerName = (t) => (t.alarm ? (t.name ? `${cap(t.name)} · ${t.alarm}` : `Alarme ${t.alarm}`) : t.name ? cap(t.name) : 'Minuteur');
+
 function renderLive() {
   const now = Date.now();
   let html = live.timers.map((t) => {
     const left = t.end - now;
-    const name = t.alarm ? (t.name ? `${cap(t.name)} · ${t.alarm}` : `Alarme ${t.alarm}`) : t.name ? cap(t.name) : 'Minuteur';
+    const name = timerName(t);
+    const bell = t.mine && canAskPush() ? `<button data-push aria-label="Sonner aussi l'application fermée">${icon('bell')}</button>` : '';
     return `<div class="card${left <= 0 ? ' done' : ''}">${icon(t.alarm ? 'alarm' : 'timer', 'ic')}
       <div class="what"><b>${esc(name)}</b><small class="count" data-end="${t.end}">${countdown(left)}</small></div>
-      <button data-cancel="${esc(t.id)}" aria-label="Annuler ${esc(name)}">${icon('x')}</button></div>`;
+      ${bell}<button data-cancel="${esc(t.id)}" aria-label="Annuler ${esc(name)}">${icon('x')}</button></div>`;
   }).join('');
   const m = live.music;
   if (m) {
@@ -1112,9 +1183,23 @@ setInterval(() => {
     el.textContent = countdown(left);
     el.closest('.card').classList.toggle('done', left <= 0);
   }
+  // This phone's, reached 0 just now, not while the app was hidden: its push told of it then
+  for (const t of live.timers) {
+    const left = t.end - Date.now();
+    if (!t.mine || left > 0 || left <= -5000 || rung.has(t.id)) continue;
+    rung.add(t.id);
+    if (document.hidden) continue;
+    chime();
+    vibrate([300, 150, 300, 150, 600]);
+    toast(`${timerName(t)} : terminé`);
+  }
 }, 1000);
 
+// A tap while a timer of this phone runs lets the chime play: the browser allows sound only after one
+addEventListener('pointerdown', () => { if (live.timers.some((t) => t.mine)) startAudio().catch(() => {}); });
+
 $('live').addEventListener('click', async (e) => {
+  if (e.target.closest('[data-push]')) return enablePush();
   const cancel = e.target.closest('[data-cancel]');
   const music = e.target.closest('[data-music]');
   try {
@@ -1138,6 +1223,7 @@ $('live').addEventListener('click', async (e) => {
 const menu = $('menu');
 $('opt-debug').checked = debug;
 $('opt-debug').addEventListener('change', (e) => { debug = e.target.checked; store.set('va.debug', debug); render(); });
+$('opt-push').addEventListener('change', (e) => (e.target.checked ? enablePush() : disablePush()));
 $('opt-forget').addEventListener('click', () => {
   if (!confirm('Oublier les raccourcis de ce téléphone ?')) return;
   store.set(SHORTCUTS, {});
@@ -1199,8 +1285,9 @@ if (new URLSearchParams(location.search).has('parler')) {
   startVoice();
 }
 
+renderPush();
 if ('serviceWorker' in navigator) {
-  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  addEventListener('load', () => navigator.serviceWorker.register('sw.js').then(() => pushWanted() && syncPush()).catch(() => {}));
 }
 </script>
 </body>
