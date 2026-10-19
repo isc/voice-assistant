@@ -355,7 +355,8 @@ const SOURCES = {
 const TOOLS = {
   turn_on: ['Allumer', 'bulb'], turn_off: ['Éteindre', 'bulb'],
   open_cover: ['Ouvrir', 'blinds'], close_cover: ['Fermer', 'blinds'], set_cover_position: ['Régler', 'blinds'],
-  set_temperature: ['Chauffage', 'thermo'], lock: ['Verrouiller', 'lock'], unlock: ['Déverrouiller', 'unlock'],
+  set_temperature: ['Chauffage', 'thermo'], set_heating: ['Chauffage', 'thermo'],
+  lock: ['Verrouiller', 'lock'], unlock: ['Déverrouiller', 'unlock'],
   get_state: ['État', 'eye'], get_sensor: ['Capteur', 'gauge'],
   set_timer: ['Minuteur', 'timer'], set_alarm: ['Alarme', 'alarm'], cancel_timer: ['Annuler', 'timer'],
   get_weather: ['Météo', 'sun'], find_place: ['Lieu', 'pin'],
@@ -371,17 +372,18 @@ const ACTIONS = {pause: 'pause', resume: 'reprise', next: 'suivant', previous: '
 const asName = (v) => (typeof v === 'string' && /^[a-z0-9_.]+$/.test(v) && /[_.]/.test(v)
   ? v.replace(/^[a-z_]+\./, '').split('_').map(cap).join(' ') : v);
 
-// A call as words: its verb, then what it acted on
+// A call as words: its verb, then what it acted on, but a word the verb already says (« Chauffage · chauffage »)
 function callText(tc) {
+  const verb = toolOf(tc.function)[0];
   const a = Object.fromEntries(Object.entries(tc.args || {}).map(([k, v]) => [k, asName(v)]));
   const pct = (v) => (v == null ? null : v + ' %');
   const target = [
     a.entity, a.room, a.home && cap(a.home), a.query, a.station, a.location, a.title, a.label,
     a.duration_minutes && a.duration_minutes + ' min', a.time, shortDate(a.start_date), shortDate(a.start_datetime),
-    ACTIONS[a.action] || ACTIONS[a.direction], pct(a.level), pct(a.position), pct(a.brightness),
+    ACTIONS[a.action] || ACTIONS[a.direction], a.mode, pct(a.level), pct(a.position), pct(a.brightness),
     a.temperature != null && a.temperature + ' °C',
-  ].filter(Boolean);
-  return [toolOf(tc.function)[0], ...target].join(' · ');
+  ].filter((t) => t && String(t).toLowerCase() !== verb.toLowerCase());
+  return [verb, ...target].join(' · ');
 }
 
 function describeCall(tc) {
