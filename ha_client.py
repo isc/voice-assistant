@@ -22,7 +22,7 @@ quiet: ContextVar[bool] = ContextVar("quiet", default=False)
 logger.addFilter(lambda record: record.levelno >= logging.ERROR or not quiet.get())
 
 # Domains we expose as LLM tools
-SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock"}
+SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock", "select"}
 
 # French stopwords to strip for fuzzy matching
 STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
@@ -123,6 +123,17 @@ COVER_KIND_KEYWORDS = {
     "fenetre": ("fenetre", "fenetres", "velux"),
     "moustiquaire": ("moustiquaire", "moustiquaires"),
 }
+
+
+def is_heating(state: dict) -> bool:
+    """Whether a select sets a heating's mode, as Charras's Ökofen circuits do (Off, Auto, Confort, Réduit): the
+    one kind kept. Others are settings, a sensor's sensitivity or a contact's kind of door (AD-071)."""
+    return any(fold(str(option)) in ("confort", "comfort") for option in state.get("attributes", {}).get("options", []))
+
+
+def _heating_name(name: str) -> str:
+    """A circuit's name without « mode »: « Radiateurs — mode » is the radiators, as a request says them."""
+    return re.sub(r"[\s—–-]*\bmode\b[\s—–-]*", " ", name, flags=re.IGNORECASE).strip() or name
 
 
 def cover_kind(info: dict) -> Optional[str]:
@@ -280,6 +291,10 @@ class HAClient:
                 continue
 
             friendly_name = state.get("attributes", {}).get("friendly_name", entity_id)
+            if domain == "select":
+                if not is_heating(state):
+                    continue
+                friendly_name = _heating_name(friendly_name)
 
             # Skip Fibaro sub-entities
             if "Basic" in friendly_name or "basic" in entity_id:
@@ -345,6 +360,7 @@ class HAClient:
                 "climate": "thermostats",
                 "media_player": "médias",
                 "lock": "serrures",
+                "select": "chauffage",
             }.get(info["domain"], info["domain"])
             # Roof windows and mosquito screens are covers too — list them apart so the LLM never
             # offers a skylight, or a screen, when the user asked for a roller shutter.
@@ -381,11 +397,19 @@ class HAClient:
         "serrure": ("lock", None),
         "serrures": ("lock", None),
         "verrou": ("lock", None),
+        "chauffage": ("select", None),
     }
+
+    # Kinds that are the home's, not a room's: « le chauffage » is every circuit of it, HA puts them nowhere (AD-071)
+    _HOME_WIDE = {"select"}
 
     def is_generic(self, name: str) -> bool:
         """Whether a name says a kind of device (« volets », « la lumière ») rather than one device."""
         return normalize(name) in self._GENERIC_NAMES
+
+    def needs_room(self, name: str) -> bool:
+        """Whether a name says a kind of device that only a room narrows (« les volets »), not the home's own."""
+        return self._GENERIC_NAMES.get(normalize(name), (None,))[0] not in (None, *self._HOME_WIDE)
 
     def knows_room(self, room: Optional[str]) -> bool:
         """Whether a room is one HA has, a group of them, or the whole house."""
@@ -416,11 +440,13 @@ class HAClient:
         words = normalize(name).split()
         if not room and len(words) > 1 and words[0] in self._GENERIC_NAMES:
             name, room = words[0], " ".join(words[1:])
+        # Generic name (e.g. "volet" -> all shutters in the room), with its cover sub-kind
+        target_domain, generic_kind = self._GENERIC_NAMES.get(normalize(name), (None, None))
+        if target_domain in self._HOME_WIDE and not room:
+            room = "tout"
         whole_house = is_whole_house(room)
         is_group = False
         rooms_to_search = [room]
-        # Generic name (e.g. "volet" -> all shutters in the room), with its cover sub-kind
-        target_domain, generic_kind = self._GENERIC_NAMES.get(normalize(name), (None, None))
         if target_domain:
             # A generic name of another kind names nothing this action can reach: « ferme la
             # porte » sent as a shutter must close no shutter, nor send a cover service to the lock
@@ -677,6 +703,14 @@ class HAClient:
             logger.error(f"Error getting state for {entity_id}: {e}")
             return None
 
+    @property
+    def heating_modes(self) -> list[str]:
+        """The modes this home's heating can be set to, as its selects list them (AD-071); none without one."""
+        selects = (
+            info["attributes"].get("options", []) for info in self.entities.values() if info["domain"] == "select"
+        )
+        return list(dict.fromkeys(mode for options in selects for mode in options))
+
     def display_name(self, entity_id: str) -> str:
         """The device's name for the reply, with its room for a generic one like "Plafonnier" or "Volet"."""
         info = self.entities.get(entity_id, {})
@@ -754,6 +788,7 @@ class HAClient:
             ("media_player", "volume_down"): "Moins fort",
             ("lock", "lock"): f"{display_name} en cours de verrouillage",
             ("lock", "unlock"): f"{display_name} en cours de déverrouillage",
+            ("select", "select_option"): f"{display_name} en mode {kwargs.get('option', '?')}",
         }
         return responses.get((domain, service), "C'est fait")
 
@@ -803,6 +838,9 @@ class HAClient:
 
         if domain == "switch":
             return f"{friendly} est {'allumé' if state == 'on' else 'éteint'}"
+
+        if domain == "select":  # a heating's mode, under the circuit's name as the prompt lists it
+            return f"{self.display_name(entity_id)} en mode {state}"
 
         if domain == "lock":
             state_map = {

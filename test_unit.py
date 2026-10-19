@@ -878,6 +878,97 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("home", next(t for t in one_home if t["name"] == "lock")["parameters"]["properties"])
 
 
+HEATING_MODES = ["Off", "Auto", "Confort", "Réduit"]
+
+
+def heating_select(name: str, state: str = "Off") -> dict:
+    """A circuit of Charras's Ökofen boiler, as refresh_entities keeps it."""
+    return {"friendly_name": name, "domain": "select", "state": state, "attributes": {"options": HEATING_MODES},
+            "area_id": None, "area_name": ""}  # fmt: skip
+
+
+class TestHeating(unittest.IsolatedAsyncioTestCase):
+    """Charras's heating, a mode per circuit of its boiler, set from either home; and its temperatures (AD-071)."""
+
+    def setUp(self):
+        server = self.server = make_server({"SITES": "paris,charras"})
+        server.spotify, server.calendar_client = None, None
+        self.paris, self.charras = server.sites
+        for site in server.sites:
+            site.ha_client = make_client()
+            site.ha_client.call_service = AsyncMock(side_effect=lambda domain, service, eid, **kw: f"{eid} {kw}")
+            site.ha_client.search_sensors = AsyncMock(return_value=f"Températures de {site.name}")
+        self.charras.ha_client.entities = {
+            "select.radiateurs_mode": heating_select("Radiateurs"),
+            "select.plancher_mode": heating_select("Plancher"),
+            "select.plancher_2_mode": heating_select("Plancher 2"),
+        }
+        server.site = self.paris
+        server.new_request("phone42")
+
+    def test_only_a_heating_mode_is_kept_of_the_selects(self):
+        from ha_client import _heating_name, is_heating
+
+        self.assertTrue(is_heating({"attributes": {"options": HEATING_MODES}}))
+        for options in (["low", "medium", "high"], ["slidedoor", "window", "externdoor"], []):
+            self.assertFalse(is_heating({"attributes": {"options": options}}), options)
+        self.assertEqual(_heating_name("Radiateurs — mode"), "Radiateurs")
+        self.assertEqual(_heating_name("Plancher 2 — mode"), "Plancher 2")
+
+    def test_the_heating_is_every_circuit_and_a_circuit_its_own(self):
+        client = self.charras.ha_client
+        self.assertEqual(len(client.resolve_all_entities("chauffage", None, ["select"])), 3)
+        self.assertEqual(client.resolve_all_entities("radiateurs", None, ["select"]), ["select.radiateurs_mode"])
+        self.assertIn("Autre (chauffage: Radiateurs, Plancher, Plancher 2)", client.get_entity_list_for_prompt())
+
+    async def test_set_at_the_other_home(self):
+        result = await self.server.execute_function("set_heating", {"entity": "chauffage", "mode": "auto",
+                                                                    "home": "charras"})  # fmt: skip
+        self.assertTrue(result.endswith("(Charras)"), result)
+        calls = self.charras.ha_client.call_service.await_args_list
+        self.assertEqual([c.args[:2] for c in calls], [("select", "select_option")] * 3)
+        self.assertEqual({c.kwargs["option"] for c in calls}, {"Auto"})  # the select's own spelling
+        self.paris.ha_client.call_service.assert_not_awaited()
+        self.assertIs(self.server.site, self.paris)
+
+    async def test_a_mode_it_has_not_nor_a_home_without_heating(self):
+        result = await self.server.execute_function("set_heating", {"entity": "chauffage", "mode": "Turbo",
+                                                                    "home": "charras"})  # fmt: skip
+        self.assertEqual(result, "Mode Turbo inconnu : Off, Auto, Confort, Réduit (Charras)")
+        for function in ("set_heating", "get_state"):  # not « which room? »: the heating is the home's
+            result = await self.server.execute_function(function, {"entity": "chauffage", "mode": "Auto"})
+            self.assertEqual(result, "Appareil chauffage non trouvé")
+        self.charras.ha_client.call_service.assert_not_awaited()
+
+    async def test_the_other_homes_temperatures(self):
+        search = self.server.execute_function
+        for args in ({"query": "température", "home": "charras"}, {"query": "température Charras"}):
+            self.assertEqual(await search("get_sensor", args), "Températures de charras (Charras)")
+        self.charras.ha_client.search_sensors.assert_awaited_with("température")
+        self.assertEqual(await search("get_sensor", {"query": "température"}), "Températures de paris")
+
+    async def test_in_effect_by_the_mode(self):
+        state = AsyncMock(return_value={"state": "Auto"})
+        args = {"entity": "chauffage", "mode": "auto", "home": "charras"}
+        self.assertTrue(await self.server._call_in_effect("set_heating", args, state))
+        self.assertFalse(await self.server._call_in_effect("set_heating", {**args, "mode": "Off"}, state))
+
+    def test_offered_where_some_home_has_heating(self):
+        tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
+        self.assertEqual(tools["set_heating"]["mode"]["enum"], HEATING_MODES)
+        self.assertEqual(tools["set_heating"]["home"]["enum"], ["paris", "charras"])
+        self.assertIn("home", tools["get_sensor"])
+        self.charras.ha_client.entities = {}
+        self.assertNotIn("set_heating", {t["name"] for t in self.server._tools()})
+
+    def test_its_state_and_reply(self):
+        client = self.charras.ha_client
+        state = {"state": "Off", "attributes": {"friendly_name": "Radiateurs — mode"}}
+        self.assertEqual(client.format_state_for_speech("select.radiateurs_mode", state), "Radiateurs en mode Off")
+        reply = client._build_response("select", "select_option", "Radiateurs", {"option": "Auto"})
+        self.assertEqual(reply, "Radiateurs en mode Auto")
+
+
 # ---------------------------------------------------------------------------
 # Tests: sensor search (read-only, kept out of the system prompt)
 # ---------------------------------------------------------------------------

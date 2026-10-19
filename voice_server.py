@@ -150,7 +150,7 @@ _NOTHING_DONE = re.compile(
 # words, nor an event at a date gone by (create_event)
 _REDOABLE = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock",
-    "play_radio", "play_music", "move_media", "stop_media", "set_volume",
+    "set_heating", "play_radio", "play_music", "move_media", "stop_media", "set_volume",
     "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image",
 }  # fmt: skip
 
@@ -188,6 +188,8 @@ def _device_in_effect(function_name: str, arguments: dict, state: dict) -> bool:
         return _near(attributes.get("temperature"), arguments.get("temperature"), 0.1)
     if function_name == "lock":
         return value in ("locked", "locking")
+    if function_name == "set_heating":
+        return fold(str(value)) == fold(str(arguments.get("mode", "")))
     return False
 
 
@@ -1053,7 +1055,7 @@ class VoiceAssistantServer:
 
     # === FUNCTION CALLING ===
 
-    # The device tools, each named after its HA service, and the domains they act on
+    # The device tools, each named after its HA service but set_heating, and the domains they act on
     _DEVICE_DOMAINS = {
         "turn_on": ["light", "switch", "media_player"],
         "turn_off": ["light", "switch", "media_player"],
@@ -1061,18 +1063,19 @@ class VoiceAssistantServer:
         "close_cover": ["cover"],
         "set_cover_position": ["cover"],
         "set_temperature": ["climate"],
+        "set_heating": ["select"],
         "lock": ["lock"],
         "unlock": ["lock"],
         "get_state": None,
     }
-    # The calls that may name another home: its door from this one, its states (AD-068)
-    _ANY_HOME = {"lock", "unlock", "get_state"}
+    # The calls that may name another home: its door from this one, its heating, its states (AD-068, AD-071)
+    _ANY_HOME = {"lock", "unlock", "set_heating", "get_state", "get_sensor"}
 
     def _home_named(self, arguments: dict) -> Optional[tuple[Site, dict]]:
         """The home a call names, and its arguments as read there: its `home`, else a home's name said in
-        its entity or room (« la porte de Charras »), which is left out of them (AD-068)."""
+        its entity, room or query (« la porte de Charras »), which is left out of them (AD-068)."""
         named = arguments.get("home")
-        said = {key: value for key in ("entity", "room") if isinstance(value := arguments.get(key), str)}
+        said = {key: value for key in ("entity", "room", "query") if isinstance(value := arguments.get(key), str)}
         words = fold(" ".join(said.values())).split()
         home = (self.site_named(named) if isinstance(named, str) else None) or next(
             (site for site in self.sites if site.name and site.name in words), None
@@ -1208,7 +1211,7 @@ class VoiceAssistantServer:
         entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
         if not entity_ids:
             # « ferme les volets » with no room HA knows (none said, or « parcourt »): not one of them at random
-            if self.ha_client.is_generic(entity_name) and not self.ha_client.knows_room(room):
+            if self.ha_client.needs_room(entity_name) and not self.ha_client.knows_room(room):
                 return _WHICH_ROOM
             return f"Appareil {entity_name} non trouvé"
 
@@ -1232,11 +1235,17 @@ class VoiceAssistantServer:
             extra["brightness"] = round(arguments["brightness"] * 255 / 100)
         if function_name == "set_cover_position" and "position" in arguments:
             extra["position"] = arguments["position"]
+        if function_name == "set_heating":
+            modes = {fold(mode): mode for mode in self.ha_client.heating_modes}
+            if not (mode := modes.get(fold(str(arguments.get("mode", ""))))):
+                return f"Mode {arguments.get('mode')} inconnu : {', '.join(modes.values())}"
+            extra["option"] = mode
 
-        calls = [self.ha_client.call_service(eid.split(".")[0], function_name, eid, **extra) for eid in entity_ids]
-        if function_name == "lock":
-            # Awaited, unlike the rest: whoever leaves on « porte verrouillée » must not
-            # be told so when HA could not reach the lock
+        service = "select_option" if function_name == "set_heating" else function_name
+        calls = [self.ha_client.call_service(eid.split(".")[0], service, eid, **extra) for eid in entity_ids]
+        if function_name in ("lock", "set_heating"):
+            # Awaited, unlike the rest: whoever leaves on « porte verrouillée », or is told from afar that
+            # the heating is on, must not be when HA could not reach the lock or the boiler
             return ". ".join(await asyncio.gather(*calls))
 
         # Fire and forget. An HA service call blocks until the HomeKit bridge
@@ -1998,14 +2007,16 @@ class VoiceAssistantServer:
         from llm import get_tool_definitions
 
         homes = [site.name for site in self.sites if site.name]
-        locks = any(
-            info["domain"] == "lock"
-            for site in self.sites
-            if site.ha_client
-            for info in site.ha_client.entities.values()
-        )
+        clients = [site.ha_client for site in self.sites if site.ha_client]
+        locks = any(info["domain"] == "lock" for client in clients for info in client.entities.values())
+        heating = list(dict.fromkeys(mode for client in clients for mode in client.heating_modes))
         return get_tool_definitions(
-            self.ha_client, self.calendar_client, music=self.spotify is not None, homes=homes, locks=locks
+            self.ha_client,
+            self.calendar_client,
+            music=self.spotify is not None,
+            homes=homes,
+            locks=locks,
+            heating=heating,
         )
 
     def _continue(self, conversation) -> None:

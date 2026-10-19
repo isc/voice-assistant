@@ -25,6 +25,7 @@ _TOOL_NAMES = {
     "close_cover",
     "set_cover_position",
     "set_temperature",
+    "set_heating",
     "get_state",
     "get_sensor",
     "set_timer",
@@ -66,9 +67,10 @@ def claims_completed_action(text: str) -> bool:
     return bool(_ACTION_CLAIM.search(re.sub(r"[^.!?]*\?", "", flat)))
 
 
-def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(), locks=False) -> list:
-    """Return LLM tool definitions. `homes`: the homes' names, which the door tools and get_state may name
-    when there are several (AD-068); `locks`: whether some home has a lock."""
+def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(), locks=False, heating=()) -> list:
+    """Return LLM tool definitions. `homes`: the homes' names, which the door and heating tools, get_state and
+    get_sensor may name when there are several (AD-068, AD-071); `locks`: whether some home has a lock;
+    `heating`: the modes of the homes' heating, if some home's can be set (AD-071)."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -438,7 +440,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
         ),
     }
 
-    # Another home, named in the request: its door from this one, its state (AD-068)
+    # Another home, named in the request: its door from this one, its heating, its state (AD-068, AD-071)
     elsewhere = {}
     if len(homes) > 1:
         elsewhere["home"] = {
@@ -446,7 +448,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
             "enum": list(homes),
             "description": (
                 "La maison, seulement si la demande en nomme une (« la porte de Charras », « à Paris »). Ses "
-                "appareils ne sont pas dans la liste : entity tel que la demande le dit (« porte »)"
+                "appareils ne sont pas dans la liste : entity tel que la demande le dit (« porte », « chauffage »)"
             ),
         }
 
@@ -484,6 +486,39 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
                 ),
                 "parameters": door_params,
             },
+        ]
+
+    # A home whose heating HA sets by a mode (Charras's Ökofen boiler), from either home (AD-071)
+    heating_tools = []
+    if heating:
+        heating_tools = [
+            {
+                "name": "set_heating",
+                "description": (
+                    "Allumer, éteindre ou changer le mode du chauffage (« allume le chauffage », « coupe le "
+                    "chauffage », « mets le chauffage en confort »)"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "« chauffage » pour tout le chauffage, ou le circuit nommé (« radiateurs »)",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": list(heating),
+                            "description": (
+                                "Auto : selon le programme horaire, pour « allume » ou « active » sans autre "
+                                "précision. Confort : à la température de confort en permanence. Réduit : à la "
+                                "température réduite. Off : arrêté (« éteins », « coupe »)"
+                            ),
+                        },
+                        **elsewhere,
+                    },
+                    "required": ["entity", "mode"],
+                },
+            }
         ]
 
     return [
@@ -619,12 +654,14 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
                             "la recherche renvoie tous les capteurs correspondants."
                         ),
                     },
+                    **elsewhere,
                 },
                 "required": ["query"],
             },
         },
         *standalone_tools,
         *lock_tools,
+        *heating_tools,
         {
             "name": "end_conversation",
             "description": (
