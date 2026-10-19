@@ -360,7 +360,7 @@ const TOOLS = {
   get_state: ['État', 'eye'], get_sensor: ['Capteur', 'gauge'],
   set_timer: ['Minuteur', 'timer'], set_alarm: ['Alarme', 'alarm'], cancel_timer: ['Annuler', 'timer'],
   get_weather: ['Météo', 'sun'], find_place: ['Lieu', 'pin'],
-  query_calendar: ['Agenda', 'cal'], create_event: ['Nouvel événement', 'cal'],
+  query_calendar: ['Agenda', 'cal'], create_event: ['Nouvel événement', 'cal'], update_event: ['Événement modifié', 'cal'],
   play_music: ['Spotify', 'note'], music_control: ['Spotify', 'note'], play_radio: ['Radio', 'radio'],
   stop_media: ['Stop', 'vol'], move_media: ['Son passé sur', 'vol'], set_volume: ['Volume', 'vol'], change_volume: ['Volume', 'vol'],
   show_image: ['Image', 'image'],
@@ -378,7 +378,7 @@ function callText(tc) {
   const a = Object.fromEntries(Object.entries(tc.args || {}).map(([k, v]) => [k, asName(v)]));
   const pct = (v) => (v == null ? null : v + ' %');
   const target = [
-    a.entity, a.room, a.home && cap(a.home), a.query, a.station, a.location, a.title, a.label,
+    a.entity, a.room, a.home && cap(a.home), a.query, a.event, a.station, a.title, a.location, a.label,
     a.duration_minutes && a.duration_minutes + ' min', a.time, shortDate(a.start_date), shortDate(a.start_datetime),
     ACTIONS[a.action] || ACTIONS[a.direction], a.mode, pct(a.level), pct(a.position), pct(a.brightness),
     a.temperature != null && a.temperature + ' °C',

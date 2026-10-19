@@ -2,12 +2,11 @@
 
 import asyncio
 import logging
-import re
 from typing import Collection, NamedTuple, Optional
 
 import aiohttp
 
-from ha_client import normalize
+from ha_client import words
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +29,14 @@ class Picture(NamedTuple):
     from_article: bool  # a Wikipedia article's image, rather than a photo matched on words
 
 
-def _words(text: str) -> set[str]:
-    # Words only: « Paris, Texas » kept « paris, » and missed the article « Paris (Texas) »
-    return set(re.findall(r"\w+", normalize(text)))
-
-
 def is_about(query: str, *titles: str) -> bool:
     """Whether a Wikipedia article is about what was asked: every word of the query is in one of its titles.
 
     "Arc de Triomphe" → "Arc de triomphe de l'Étoile" is; "coucher de soleil sur la mer" →
     "Le Coucher du soleil", a painting, is not — a photo search does better there.
     """
-    words = _words(query)
-    return bool(words) and any(words <= _words(title) for title in titles)
+    asked = words(query)
+    return bool(asked) and any(asked <= words(title) for title in titles)
 
 
 async def _wikipedia(session: aiohttp.ClientSession, query: str) -> list[tuple[str, str]]:

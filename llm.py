@@ -33,6 +33,7 @@ _TOOL_NAMES = {
     "cancel_timer",
     "query_calendar",
     "create_event",
+    "update_event",
     "play_radio",
     "stop_media",
     "set_volume",
@@ -171,6 +172,11 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
     # Calendar tools (standalone, no HA dependency)
     calendar_tools = []
     if calendar_client:
+        # Its address is looked up by the server (AD-072)
+        location_param = {
+            "type": "string",
+            "description": "Lieu, s'il est dit : son nom ou son adresse, tels que dits (ex: Le Récepteur, 3 rue Cler)",
+        }
         calendar_tools = [
             {
                 "name": "query_calendar",
@@ -206,7 +212,11 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
             },
             {
                 "name": "create_event",
-                "description": "Ajouter un événement à l'agenda",
+                # « rajoute sur ce rendez-vous qu'il a lieu au… » made a second event (2026-10-19, AD-072)
+                "description": (
+                    "Ajouter un nouvel événement à l'agenda. Jamais pour changer un événement déjà dans "
+                    "l'agenda : c'est update_event."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -222,8 +232,41 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
                             "type": "integer",
                             "description": "Durée en minutes. Par défaut: 60",
                         },
+                        "location": location_param,
                     },
                     "required": ["title", "start_datetime"],
+                },
+            },
+            {
+                "name": "update_event",
+                "description": (
+                    "Modifier un événement déjà dans l'agenda : son lieu, son heure, sa durée ou son titre "
+                    "(« ajoute l'adresse », « il a lieu au… », « décale-le à 14h », « le dentiste de jeudi "
+                    "dure deux heures »)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "event": {
+                            "type": "string",
+                            "description": "Titre de l'événement à modifier, tel quel (ex: Déjeuner avec Clémence)",
+                        },
+                        "date": {
+                            "type": "string",
+                            "description": "Sa date au format AAAA-MM-JJ, avant modification",
+                        },
+                        "location": location_param,
+                        "start_datetime": {
+                            "type": "string",
+                            "description": "Nouvelles date et heure AAAA-MM-JJ HH:MM, seulement s'il est déplacé",
+                        },
+                        "duration_minutes": {
+                            "type": "integer",
+                            "description": "Nouvelle durée en minutes, seulement si elle change",
+                        },
+                        "title": {"type": "string", "description": "Nouveau titre, seulement s'il est renommé"},
+                    },
+                    "required": ["event", "date"],
                 },
             },
         ]

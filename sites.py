@@ -27,6 +27,7 @@ class Conversation:
     id: Optional[int] = None
     last_time: float = 0
     shown_images: set = field(default_factory=set)  # pictures not to show twice
+    events: list = field(default_factory=list)  # ids of the calendar events it made: « ce rendez-vous » (AD-072)
 
 
 # Compared by identity: a site is a home with live state, not a value

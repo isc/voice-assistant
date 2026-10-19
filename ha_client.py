@@ -49,6 +49,11 @@ def normalize(text: str) -> str:
     return " ".join(w for w in fold(text).split() if w not in STOPWORDS)
 
 
+def words(text: str) -> set[str]:
+    """normalize()'s words, punctuation left out: « Paris, Texas » kept « paris, » and missed « Paris (Texas) »."""
+    return set(re.findall(r"\w+", normalize(text)))
+
+
 def without_home(name: str, home: str) -> str:
     """A device's name without its home's (« Sonos Paris » at Paris → « Sonos »): a request is already that
     home's, by the satellite it reaches or the phone's Wi-Fi or choice. A name that is only the home's stays."""

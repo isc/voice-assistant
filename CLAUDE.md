@@ -35,8 +35,8 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `stt.py` | Parakeet TDT 0.6B v3: onnx-asr on Linux/CUDA (server) or parakeet-mlx on Apple Silicon (Mac dev), picked by `STT_BACKEND` |
 | `onnx_gpu.py` | ONNX Runtime on the GPU shared with Ollama: one thread for STT and TTS runs, CUDA arenas that give their memory back after each run (AD-053), the CPU when CUDA fails (AD-055) |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
-| `places.py` | Shops and places from OpenStreetMap, nearest to the home first: address, phone, the week's opening hours read by opening-hours-py |
-| `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, prompt summary |
+| `places.py` | Shops and places from OpenStreetMap, nearest to the home first: address, phone, the week's opening hours read by opening-hours-py; an event's place as its address (`address_of`, AD-072) |
+| `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, and changes to an event in place (`update_event`: the conversation's own first, AD-072), prompt summary |
 | `setup_calendar.py` | One-time OAuth setup script for Google Calendar (requires browser) |
 | `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
 | `images.py` | Pictures for the web app or a screen: Wikipedia article's lead image, else an Openverse photo; the phone or the screen loads the URL itself |

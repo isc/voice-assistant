@@ -1741,6 +1741,89 @@ class TestCalendarQueryValidation(unittest.IsolatedAsyncioTestCase):
         self.assertIn("train", data["note"])
 
 
+class TestCalendarEvents(unittest.IsolatedAsyncioTestCase):
+    """An event changed where it is, never created again; with its place's address (AD-072)."""
+
+    def setUp(self):
+        from calendar_client import CalendarClient
+
+        os.environ.setdefault("TZ", "Europe/Paris")
+        self.client = client = CalendarClient.__new__(CalendarClient)
+        client._service, client._lock = object(), asyncio.Lock()
+
+        def event(id_, title, start, end):
+            return {"id": id_, "summary": title, "start": {"dateTime": f"2026-10-20T{start}:00+02:00"},
+                    "end": {"dateTime": f"2026-10-20T{end}:00+02:00"}}  # fmt: skip
+
+        self.items = [
+            event("a", "Déjeuner avec Clémence", "13:00", "14:00"),
+            event("b", "Dîner avec Paul", "20:00", "22:00"),
+        ]
+        client._list_events = lambda _min, _max, search: {"items": self.items}
+        self.patched = []
+        client._patch_event = lambda id_, body: self.patched.append((id_, body)) or {
+            **next(i for i in self.items if i["id"] == id_), **body}  # fmt: skip
+        client._insert_event = lambda body: {**body, "id": "new"}
+
+    async def test_its_place_set_where_it_is(self):
+        data = json.loads(await self.client.update_event("le déjeuner avec Clémence", "2026-10-20", location="Ici"))
+        self.assertEqual(self.patched, [("a", {"location": "Ici"})])
+        self.assertEqual((data["status"], data["location"]), ("updated", "Ici"))
+
+    async def test_moved_it_keeps_its_length(self):
+        await self.client.update_event("Dîner avec Paul", "2026-10-20", start_datetime="2026-10-20 21:00")
+        _, body = self.patched[0]
+        self.assertEqual((body["start"]["dateTime"], body["end"]["dateTime"]),
+                         ("2026-10-20T21:00:00+02:00", "2026-10-20T23:00:00+02:00"))  # fmt: skip
+
+    async def test_not_another_event_sharing_a_word(self):
+        """« Dîner avec Paul » shares « avec » with « Déjeuner avec Clémence »: not enough to be it."""
+        data = json.loads(await self.client.update_event("Déjeuner avec Marc", "2026-10-20", location="Ici"))
+        self.assertTrue(data["error"].startswith("Rien n'a été fait : aucun événement"))
+        self.assertIn("Dîner avec Paul (20:00)", data["error"])
+        self.assertEqual(self.patched, [])
+
+    async def test_the_one_this_conversation_made(self):
+        """Two of the same name that day: the conversation's own; and « ce rendez-vous », however named."""
+        made = []
+        await self.client.create_event("Déjeuner avec Clémence", "2026-10-20 13:00", made=made)
+        self.assertEqual(made, ["new"])
+        self.items.append({**self.items[0], "id": "new"})
+        await self.client.update_event("Déjeuner avec Clémence", "2026-10-20", location="Ici", made=made)
+        await self.client.update_event("rendez-vous", "2026-10-20", location="Là", made=made)
+        self.assertEqual([id_ for id_, _ in self.patched], ["new", "new"])
+        data = json.loads(await self.client.update_event("Déjeuner avec Clémence", "2026-10-20", location="Ici"))
+        self.assertIn("plusieurs événements", data["error"])
+        # Another event named, which is not there: not the one the conversation made
+        data = json.loads(await self.client.update_event("Cours de piano", "2026-10-20", location="Ici", made=made))
+        self.assertIn("aucun événement", data["error"])
+        self.assertEqual(len(self.patched), 2)
+
+    async def test_an_address_or_someones_home_not_searched(self):
+        from places import address_of
+
+        with patch("places._search", AsyncMock(side_effect=AssertionError("searched"))):
+            for said in ("12 rue Cler", "rue Cler", "chez Clémence", ""):
+                self.assertIsNone(await address_of(said), said)
+
+    async def test_nothing_to_change(self):
+        data = json.loads(await self.client.update_event("Dîner avec Paul", "2026-10-20"))
+        self.assertIn("Rien à modifier", data["error"])
+
+    async def test_the_place_said_kept_as_its_address(self):
+        server = make_server()
+        server.calendar_client, server.ha_client = MagicMock(), None
+        server.calendar_client.create_event = AsyncMock(return_value="{}")
+        server.new_request("phone42")
+        args = {"title": "Déjeuner", "start_datetime": "2026-10-20 13:00", "location": "bistrot Le Récepteur"}
+        address = "Le Récepteur, 3 Avenue Théophile Gautier, 75016 Paris"
+        for found, kept in ((address, address), (None, "bistrot Le Récepteur")):
+            with patch("voice_server.address_of", AsyncMock(return_value=found)):
+                await server.execute_function("create_event", args)
+            self.assertEqual(server.calendar_client.create_event.await_args.kwargs["location"], kept)
+        self.assertIs(server.calendar_client.create_event.await_args.kwargs["made"], server.conversation.events)
+
+
 # ---------------------------------------------------------------------------
 # Tests: several sites from one server
 # ---------------------------------------------------------------------------

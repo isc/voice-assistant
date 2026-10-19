@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from opening_hours import OpeningHours, ParserError, State, UnknownCountryError
 
+from ha_client import fold, words
+
 # Nominatim's usage policy, like Wikimedia's, asks for an identifying User-Agent
 from images import _HEADERS
 from weather import _error
@@ -36,6 +38,10 @@ _BIAS = {"zoom": 16, "location_bias_scale": 0.1}
 _NOT_PLACES = set("highway railway public_transport place boundary landuse natural waterway building".split())
 # Named after the landmark beside them: Vélib' stations above all
 _NOT_PLACE_TYPES = set("bicycle_rental ferry_terminal parking parking_entrance taxi charging_station".split())
+
+# An event's place, from the home's: a place of the name said farther off is another one
+_NEARBY_KM = 50
+_STREETS = set("rue avenue av boulevard bd place allee chemin impasse quai route cours square passage".split())
 
 _DAYS = "lundi mardi mercredi jeudi vendredi samedi dimanche".split()
 _MONTHS = "janvier février mars avril mai juin juillet août septembre octobre novembre décembre".split()
@@ -146,14 +152,21 @@ async def _tags(session: aiohttp.ClientSession, features: list[dict]) -> list[di
     return [by_id.get(_osm_id(f["properties"]), {}) for f in features]
 
 
+def _origin(home: dict) -> Optional[tuple[float, float]]:
+    return (home["latitude"], home["longitude"]) if home.get("latitude") is not None else None
+
+
+def _street(props: dict) -> str:
+    return " ".join(filter(None, (props.get("housenumber"), props.get("street"))))
+
+
 def _describe(feature: dict, tags: dict, origin: Optional[tuple[float, float]], tz: Optional[ZoneInfo]) -> dict:
     props = feature["properties"]
     lon, lat = feature["geometry"]["coordinates"]
-    street = " ".join(filter(None, (props.get("housenumber"), props.get("street"))))
     place = {
         "nom": props["name"],
         "type": props.get("osm_value"),
-        "adresse": ", ".join(filter(None, (street, props.get("city")))),
+        "adresse": ", ".join(filter(None, (_street(props), props.get("city")))),
     }
     if origin:
         place["distance_km"] = round(_distance_km(*origin, lat, lon), 1)
@@ -179,7 +192,7 @@ async def find_place(query: str, home: Optional[dict] = None) -> str:
     if not query:
         return _error("Lieu à chercher manquant")
     home = home or {}
-    origin = (home["latitude"], home["longitude"]) if home.get("latitude") is not None else None
+    origin = _origin(home)
     # The home's, for every place found: one far enough to be in another is a rare request
     tz = ZoneInfo(home["time_zone"]) if home.get("time_zone") else None
     try:
@@ -198,3 +211,29 @@ async def find_place(query: str, home: Optional[dict] = None) -> str:
         return _error("Recherche de lieux indisponible")
     places = [_describe(feature, t, origin, tz) for feature, t in zip(features, tags)]
     return json.dumps({"lieux": places}, ensure_ascii=False)
+
+
+async def address_of(query: str, home: Optional[dict] = None) -> Optional[str]:
+    """An event's place as a calendar keeps it, its name and address (« Le Récepteur, 3 Avenue Théophile Gautier,
+    75016 Paris »), when a place nearest the home bears the name said (« au bistrot Le Récepteur »); else None,
+    and the words said are kept (AD-072)."""
+    first = next(iter(query.split()), "")
+    # An address already (« 12 rue Cler »): Photon names no house, and took 0.6 to 1 s to find nothing. And
+    # « chez Clémence » is her home, not the restaurant « Chez Clémence », found in Kinshasa
+    if not first or first[0].isdigit() or fold(first) in _STREETS | {"chez"}:
+        return None
+    origin = _origin(home or {})
+    try:
+        # A nicety: the event is made with the words said rather than wait for a slow search
+        async with asyncio.timeout(2), aiohttp.ClientSession(headers=_HEADERS, timeout=_TIMEOUT) as session:
+            features = await _search(session, query, origin)
+    except _NETWORK_ERRORS as e:
+        logger.warning(f"Address search for {query!r} failed: {e!r}")
+        return None
+    for feature in features:
+        props = feature["properties"]
+        far = origin and _distance_km(*origin, *reversed(feature["geometry"]["coordinates"])) > _NEARBY_KM
+        if words(props["name"]) <= words(query) and not far:
+            town = " ".join(filter(None, (props.get("postcode"), props.get("city"))))
+            return ", ".join(filter(None, (props["name"], _street(props), town)))
+    return None

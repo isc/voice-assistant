@@ -40,7 +40,7 @@ from aiohttp import web
 import onnx_gpu
 from ha_client import LOCAL_CONFIG, asks_whole_house, compact, fold, is_whole_house, normalize
 from images import find_image
-from places import find_place
+from places import address_of, find_place
 from push import Push
 from recordings import Recordings
 from sites import Conversation, Site, load_sites, site_at_address
@@ -141,7 +141,8 @@ UNLOCK_CONFIRM_SECONDS = 120
 # Tool results saying nothing was done (« Appareil volet non trouvé », « Sonos ne répond pas (hors ligne) »):
 # flagged in the log, so that the web app shows them beside a reply that may claim otherwise
 _NOTHING_DONE = re.compile(
-    r"^(erreur|rien n'a été fait|rien trouvé|aucun|impossible|précise|le déverrouillage)|non (trouvée?s?|disponibles?)"
+    r"^(erreur|\{\"error\"|rien n'a été fait|rien trouvé|aucun|impossible|précise|le déverrouillage)"
+    r"|non (trouvée?s?|disponibles?)"
     r"|ne répond(ent)? pas|hors ligne|inconnue?\b|n'est pas connecté|manquante?",
     re.IGNORECASE,
 )
@@ -1162,13 +1163,28 @@ class VoiceAssistantServer:
                 search=arguments.get("search"),
             )
 
-        if function_name == "create_event":
+        if function_name in ("create_event", "update_event"):
             if not self.calendar_client:
                 return "Agenda non disponible"
+            # A place's name said (« au bistrot Le Récepteur ») is kept as its address when one nearby bears it (AD-072)
+            if location := arguments.get("location"):
+                location = await address_of(location, self.ha_client and self.ha_client.home) or location
+            if function_name == "update_event":
+                return await self.calendar_client.update_event(
+                    event=arguments.get("event", ""),
+                    date=arguments.get("date", ""),
+                    title=arguments.get("title"),
+                    start_datetime=arguments.get("start_datetime"),
+                    duration_minutes=arguments.get("duration_minutes"),
+                    location=location,
+                    made=self.conversation.events,
+                )
             return await self.calendar_client.create_event(
                 title=arguments.get("title", ""),
                 start_datetime=arguments.get("start_datetime", ""),
                 duration_minutes=arguments.get("duration_minutes", 60),
+                location=location,
+                made=self.conversation.events,
             )
 
         # Media player tools (radio + volume) — default to the current ESP speaker,
@@ -2031,6 +2047,7 @@ class VoiceAssistantServer:
         if not conversation.id:
             conversation.id = int(now)
             conversation.shown_images.clear()
+            conversation.events.clear()
 
     async def _run_call(self, tc_entry: dict) -> str:
         """Run one call, its result or its error written in its log entry; the result, as the model reads it."""

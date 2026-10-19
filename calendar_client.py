@@ -13,6 +13,9 @@ import os
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from ha_client import words
+from timer import _format_remaining
+
 try:
     locale.setlocale(locale.LC_TIME, "fr_FR.UTF-8")
 except locale.Error:
@@ -34,7 +37,7 @@ def _time_zone() -> str:
     return os.environ.get("TZ", "UTC")
 
 
-LIST_FIELDS = "items(id,summary,start,end,status)"
+LIST_FIELDS = "items(id,summary,start,end,status,location)"
 
 
 class CalendarClient:
@@ -173,9 +176,13 @@ class CalendarClient:
         return json.dumps(result, ensure_ascii=False)
 
     async def _events(self, start_dt: datetime, end_dt: datetime, search: str | None) -> list[dict]:
+        return [_format_event(item) for item in await self._items(start_dt, end_dt, search)]
+
+    async def _items(self, start_dt: datetime, end_dt: datetime, search: str | None = None) -> list[dict]:
+        """The calendar's events in a period, as the API gives them."""
         async with self._lock:
             result = await asyncio.to_thread(self._list_events, start_dt.isoformat(), end_dt.isoformat(), search)
-        return [_format_event(item) for item in result.get("items", []) if item.get("status") != "cancelled"]
+        return [item for item in result.get("items", []) if item.get("status") != "cancelled"]
 
     def _list_events(self, time_min: str, time_max: str, search: str | None) -> dict:
         """Execute the events.list API call (runs in thread)."""
@@ -199,13 +206,16 @@ class CalendarClient:
         title: str,
         start_datetime: str,
         duration_minutes: int = 60,
+        location: str | None = None,
+        made: list[str] | None = None,
     ) -> str:
-        """Create a calendar event.
+        """Create a calendar event; its id added to `made`, the conversation's (AD-072).
 
         Args:
             title: Event title.
             start_datetime: Start in "YYYY-MM-DD HH:MM" format.
             duration_minutes: Duration in minutes (default 60).
+            location: Where, an address or a place's name (AD-072).
 
         Returns:
             JSON string with confirmation for the LLM.
@@ -225,6 +235,8 @@ class CalendarClient:
             "start": {"dateTime": start_dt.isoformat(), "timeZone": _time_zone()},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": _time_zone()},
         }
+        if location:
+            event_body["location"] = location
 
         try:
             async with self._lock:
@@ -232,28 +244,116 @@ class CalendarClient:
         except Exception as e:
             logger.error(f"Calendar event creation failed: {e}")
             return _error("Erreur lors de la création de l'événement")
+        if made is not None:
+            made.append(created["id"])
 
-        # Format duration for display
-        if duration_minutes >= 60:
-            hours = duration_minutes // 60
-            mins = duration_minutes % 60
-            dur_str = f"{hours}h" + (f"{mins:02d}" if mins else "")
-        else:
-            dur_str = f"{duration_minutes}min"
-
-        return json.dumps(
-            {
-                "status": "created",
-                "title": created.get("summary", title),
-                "start": _format_datetime_fr(start_dt),
-                "duration": dur_str,
-            },
-            ensure_ascii=False,
-        )
+        result = {
+            "status": "created",
+            "title": created.get("summary", title),
+            "start": _format_datetime_fr(start_dt),
+            "duration": _format_remaining(duration_minutes * 60),
+        }
+        if location:
+            result["location"] = location
+        return json.dumps(result, ensure_ascii=False)
 
     def _insert_event(self, event_body: dict) -> dict:
         """Execute the events.insert API call (runs in thread)."""
         return self._service.events().insert(calendarId="primary", body=event_body).execute()
+
+    async def update_event(
+        self,
+        event: str,
+        date: str,
+        title: str | None = None,
+        start_datetime: str | None = None,
+        duration_minutes: int | None = None,
+        location: str | None = None,
+        made: list[str] | None = None,
+    ) -> str:
+        """Change an event already in the calendar: its title, start, duration or place. Patched, never created again:
+        « ajoute le lieu à ce rendez-vous » made a second (AD-072). The event is found on its day: by the words of its
+        title among those the conversation made (`made`), then among all; when the request names none (« ce
+        rendez-vous »), the one it made that day."""
+        if not self._service:
+            return _error("Agenda non disponible")
+        tz = ZoneInfo(_time_zone())
+        try:
+            day = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=tz)
+            start_dt = (
+                datetime.strptime(start_datetime, "%Y-%m-%d %H:%M").replace(tzinfo=tz) if start_datetime else None
+            )
+        except ValueError:
+            return _error(
+                f"Date invalide: {date} {start_datetime or ''} (format attendu: AAAA-MM-JJ, AAAA-MM-JJ HH:MM)"
+            )
+        try:
+            items = await self._items(day, day + timedelta(days=1))
+        except Exception as e:
+            logger.error(f"Calendar query failed: {e}")
+            return _error("Erreur lors de la consultation de l'agenda")
+
+        mine = [item for item in items if item["id"] in (made or ())]
+        unnamed = len(mine) == 1 and not _title_words(event)
+        found = _matching(mine, event) or _matching(items, event) or (mine if unnamed else [])
+        if len(found) != 1:
+            # « Rien n'a été fait » first: told « Lequel ? » alone, the model answered « C'est fait »
+            listed = ", ".join(f"{e['title']} ({e['start']})" for e in map(_format_event, found or items))
+            which = f"« {event} » le {_format_date_fr(day)}"
+            if found:
+                return _error(f"Rien n'a été fait : plusieurs événements {which} : {listed}")
+            return _error(f"Rien n'a été fait : aucun événement {which}. Ce jour-là : {listed or 'aucun'}")
+        item = found[0]
+
+        body = {}
+        if title:
+            body["summary"] = title
+        if location:
+            body["location"] = location
+        if start_dt or duration_minutes:
+            if was := item["start"].get("dateTime"):
+                was = datetime.fromisoformat(was)
+                length = datetime.fromisoformat(item["end"]["dateTime"]) - was  # moved, it keeps it
+            elif not start_dt:
+                return _error("Événement sur toute la journée : donner aussi l'heure de début")
+            else:
+                length = timedelta(hours=1)
+            start_dt = start_dt or was
+            if duration_minutes:
+                length = timedelta(minutes=duration_minutes)
+            body["start"] = {"dateTime": start_dt.isoformat(), "timeZone": _time_zone()}
+            body["end"] = {"dateTime": (start_dt + length).isoformat(), "timeZone": _time_zone()}
+        if not body:
+            return _error("Rien à modifier : préciser le lieu, l'heure, la durée ou le titre")
+
+        try:
+            async with self._lock:
+                patched = await asyncio.to_thread(self._patch_event, item["id"], body)
+        except Exception as e:
+            logger.error(f"Calendar event update failed: {e}")
+            return _error("Erreur lors de la modification de l'événement")
+        return json.dumps({"status": "updated", **_format_event(patched)}, ensure_ascii=False)
+
+    def _patch_event(self, event_id: str, body: dict) -> dict:
+        """Execute the events.patch API call (runs in thread)."""
+        return self._service.events().patch(calendarId="primary", eventId=event_id, body=body).execute()
+
+
+# Words that name no event: « Déjeuner avec Marc » is not « Déjeuner avec Clémence » for its « avec »
+_FILLER = {"avec", "chez", "pour", "au", "aux", "et", "en", "a", "rendez", "vous", "rdv"}
+
+
+def _title_words(text: str) -> set[str]:
+    return words(text) - _FILLER
+
+
+def _matching(items: list[dict], event: str) -> list[dict]:
+    """The events whose titles hold the most of the words naming one (« le déjeuner avec Clémence »), and more
+    than half of them: « Déjeuner avec Marc » is not « Déjeuner avec Clémence »."""
+    words = _title_words(event)
+    scores = [(len(words & _title_words(item.get("summary", ""))), item) for item in items]
+    best = max((score for score, _ in scores), default=0)
+    return [item for score, item in scores if score == best and 2 * score > len(words)]
 
 
 def _format_event(item: dict) -> dict:
@@ -289,6 +389,8 @@ def _format_event(item: dict) -> dict:
     }
     if end_str:
         result["end"] = end_str
+    if item.get("location"):
+        result["location"] = item["location"]
 
     return result
 
