@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Optional
 
 import aiohttp
@@ -751,22 +752,17 @@ def parse_text_tool_call(content: str) -> tuple[Optional[str], Optional[dict]]:
     return None, None
 
 
-async def chat_completion(
-    url: str,
-    api_key: str,
-    model: str,
-    messages: list,
-    tools: list | None = None,
-    temperature: float = 0.3,
-    max_tokens: int = 500,
-) -> dict | None:
-    """Send a chat completion request to an OpenAI-compatible API.
-    Returns the message dict from the first choice, or None on error.
-    """
-    max_tokens_key = "max_completion_tokens" if api_key else "max_tokens"
+def _max_tokens_key(api_key: str) -> str:
+    return "max_completion_tokens" if api_key else "max_tokens"
+
+
+def _payload(api_key: str, model: str, messages: list, tools: list | None, temperature: float, max_tokens: int) -> dict:
+    """A chat completion's request, built alike for every call: all but the last two arguments make the prompt
+    the model reads, and a warm-up's must be the request's (the reasoning effort too, which a template may
+    write into the system turn)."""
     payload = {
         "messages": messages,
-        max_tokens_key: max_tokens,
+        _max_tokens_key(api_key): max_tokens,
         "temperature": temperature,
     }
     # Thinking models burn the whole token budget on internal deliberation before
@@ -783,7 +779,40 @@ async def chat_completion(
         payload["model"] = model
     if tools:
         payload["tools"] = [{"type": "function", "function": func} for func in tools]
+    return payload
 
+
+async def warm_up(url: str, model: str, messages: list, tools: list) -> None:
+    """Has the local model read a prompt and answer one token, for nothing: loaded, if Ollama had let it go,
+    and the prompt in its cache, where the request that follows finds what it shares."""
+    t0 = time.monotonic()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, json=_payload("", model, messages, tools, 0, 1), timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+                await response.read()
+    except Exception as e:
+        logger.debug(f"LLM warm-up failed: {e}")
+        return
+    if (seconds := time.monotonic() - t0) > 1:  # ~0.1 s when the cache had it all
+        logger.info(f"LLM warmed up in {seconds:.1f} s")
+
+
+async def chat_completion(
+    url: str,
+    api_key: str,
+    model: str,
+    messages: list,
+    tools: list | None = None,
+    temperature: float = 0.3,
+    max_tokens: int = 500,
+) -> dict | None:
+    """Send a chat completion request to an OpenAI-compatible API.
+    Returns the message dict from the first choice, or None on error.
+    """
+    max_tokens_key = _max_tokens_key(api_key)
+    payload = _payload(api_key, model, messages, tools, temperature, max_tokens)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

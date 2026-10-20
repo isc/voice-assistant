@@ -785,6 +785,7 @@ class VoiceAssistantServer:
         # Follow-ups keep the server-assigned ID so exchanges group correctly.
         if not self.is_followup:
             self.conversation.id = None
+            self.warm_llm()  # while the request is spoken
 
         # Cancel any previous recording timeout
         if self.recording_task and not self.recording_task.done():
@@ -826,11 +827,13 @@ class VoiceAssistantServer:
         self.is_recording = False
         self._in_background(self._restore_speakers())
 
-    def _in_background(self, coro) -> None:
-        """Run an HA call, or a push, without waiting for it; shutdown does, so that it still gets through."""
+    def _in_background(self, coro, drained: bool = True) -> None:
+        """Run an HA call, or a push, without waiting for it; shutdown does, so that it still gets through.
+        Not a request to the LLM (`drained=False`): it must not hold a restart for up to a minute."""
+        tasks = self._pending_service_calls if drained else self._background_tasks
         task = asyncio.ensure_future(coro)
-        self._pending_service_calls.add(task)
-        task.add_done_callback(self._pending_service_calls.discard)
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
 
     async def monitor_recording_timeout(self, api: APIClient):
         """Safety timeout: the recording ends if nobody speaks soon enough, and at MAX_SECONDS in all."""
@@ -1785,43 +1788,6 @@ class VoiceAssistantServer:
         self._keep_llm_loaded()
         self._whole_house = asks_whole_house(text)
 
-        is_local = not LLM_API_KEY
-
-        # The system prompt stays the same from one request to the next: Ollama reuses the prompt
-        # it has already read, tools included, up to the first change. With the time in it, every
-        # new minute re-read all ~3.6K tokens (~1.9 s, measured). What changes goes just before
-        # the request instead.
-        system_prompt = (
-            "Tu es un assistant vocal pour la maison connectée. "
-            "Réponds en français, en 1-2 phrases courtes maximum. "
-            "Pas de markdown. Parle naturellement comme à l'oral. "
-            "Quand on te demande de contrôler un appareil "
-            "(même avec un pronom comme 'la' ou 'les'), "
-            "utilise TOUJOURS les fonctions disponibles. "
-            "Passe le paramètre room quand la pièce est mentionnée. "
-            "Utilise les noms de groupes tels quels "
-            "(ex: room='enfants'), ne les décompose pas. "
-            "Si la demande couvre plusieurs actions ou sujets "
-            "(ex: contrôler un appareil ET demander la météo), "
-            "appelle TOUTES les fonctions nécessaires "
-            "en parallèle dans ta réponse. "
-            # Without it, « merci bonne nuit » got a goodbye and no call 5 times out of 5 (dry runs,
-            # 2026-10-11), once with « (end_conversation) » written in the text
-            "Quand l'utilisateur prend congé (merci, au revoir, bonne nuit, c'est tout), "
-            "appelle end_conversation en plus de ta réponse."
-        )
-        family = LOCAL_CONFIG.get("family", [])
-        if family:
-            system_prompt += "\n" + _format_family_for_prompt(family)
-        if is_local:
-            # Not only a Qwen 3 habit: without it, gemma4 sometimes spent a round's 500 tokens
-            # thinking, reasoning_effort none notwithstanding (content empty, finish_reason length)
-            system_prompt = "/no_think " + system_prompt
-        if self.ha_client:
-            entity_list = self.ha_client.get_entity_list_for_prompt()
-            if entity_list:
-                system_prompt += f"\nAppareils disponibles: {entity_list}"
-
         from timer import format_timers_for_prompt
 
         context = [f"Date et heure actuelles: {time.strftime('%A %d %B %Y, %H:%M')}."]
@@ -1839,8 +1805,7 @@ class VoiceAssistantServer:
         self._continue(conversation)
 
         # Build messages
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(conversation.history)
+        messages = self._prompt_head(conversation)
         messages.append({"role": "system", "content": "\n".join(context)})
         messages.append({"role": "user", "content": text})
 
@@ -1989,7 +1954,7 @@ class VoiceAssistantServer:
 
         # Direct response (possibly with text-encoded tool call)
         content = message.get("content", "")
-        if is_local and "</think>" in content:
+        if not LLM_API_KEY and "</think>" in content:
             content = content.split("</think>")[-1]
         content = content.strip()
 
@@ -2018,6 +1983,53 @@ class VoiceAssistantServer:
             save_to_history(content)
         return content if content else None
 
+    def _expired(self, conversation) -> bool:
+        return time.time() - conversation.last_time > self.CONVERSATION_TIMEOUT
+
+    def _prompt_head(self, conversation) -> list:
+        """What a request's prompt begins with, the same for every request so that the model's cache serves it:
+        the system prompt, then the conversation's history unless it has expired."""
+        history = [] if self._expired(conversation) else conversation.history
+        return [{"role": "system", "content": self._system_prompt()}, *history]
+
+    def _system_prompt(self) -> str:
+        """The prompt's first message: the instructions, the family, the active site's devices."""
+        # The system prompt stays the same from one request to the next: Ollama reuses the prompt
+        # it has already read, tools included, up to the first change. With the time in it, every
+        # new minute re-read all ~3.6K tokens (~1.9 s, measured). What changes goes just before
+        # the request instead.
+        system_prompt = (
+            "Tu es un assistant vocal pour la maison connectée. "
+            "Réponds en français, en 1-2 phrases courtes maximum. "
+            "Pas de markdown. Parle naturellement comme à l'oral. "
+            "Quand on te demande de contrôler un appareil "
+            "(même avec un pronom comme 'la' ou 'les'), "
+            "utilise TOUJOURS les fonctions disponibles. "
+            "Passe le paramètre room quand la pièce est mentionnée. "
+            "Utilise les noms de groupes tels quels "
+            "(ex: room='enfants'), ne les décompose pas. "
+            "Si la demande couvre plusieurs actions ou sujets "
+            "(ex: contrôler un appareil ET demander la météo), "
+            "appelle TOUTES les fonctions nécessaires "
+            "en parallèle dans ta réponse. "
+            # Without it, « merci bonne nuit » got a goodbye and no call 5 times out of 5 (dry runs,
+            # 2026-10-11), once with « (end_conversation) » written in the text
+            "Quand l'utilisateur prend congé (merci, au revoir, bonne nuit, c'est tout), "
+            "appelle end_conversation en plus de ta réponse."
+        )
+        family = LOCAL_CONFIG.get("family", [])
+        if family:
+            system_prompt += "\n" + _format_family_for_prompt(family)
+        if not LLM_API_KEY:
+            # Not only a Qwen 3 habit: without it, gemma4 sometimes spent a round's 500 tokens
+            # thinking, reasoning_effort none notwithstanding (content empty, finish_reason length)
+            system_prompt = "/no_think " + system_prompt
+        if self.ha_client:
+            entity_list = self.ha_client.get_entity_list_for_prompt()
+            if entity_list:
+                system_prompt += f"\nAppareils disponibles: {entity_list}"
+        return system_prompt
+
     def _tools(self) -> list:
         """The tools this house offers: the model is given these, and only these run."""
         from llm import get_tool_definitions
@@ -2038,7 +2050,7 @@ class VoiceAssistantServer:
     def _continue(self, conversation) -> None:
         """A request goes on with its conversation, or starts a new one after a silence."""
         now = time.time()
-        if now - conversation.last_time > self.CONVERSATION_TIMEOUT:
+        if self._expired(conversation):
             if conversation.history:
                 logger.info("Conversation ended or expired, starting fresh")
             conversation.history = []
@@ -2065,7 +2077,8 @@ class VoiceAssistantServer:
     def _keep_llm_loaded(self) -> None:
         """Ask Ollama to keep the model loaded: it unloads after 5 idle minutes, and the next request
         then waited ~7 s (median of 10 cold requests, against 2.3 s warm). Sent with each request
-        rather than on a timer, so that a job that unloads it to free the GPU (beast) can."""
+        rather than on a timer, so that a job that unloads it to free the GPU (beast) can; a wake word
+        loads it back sooner (`warm_llm`), this pins it."""
         if LLM_API_KEY or not LLM_MODEL or not LLM_URL.endswith("/v1/chat/completions"):
             return
         url = LLM_URL.removesuffix("/v1/chat/completions") + "/api/generate"
@@ -2079,10 +2092,18 @@ class VoiceAssistantServer:
             except Exception as e:
                 logger.debug(f"Ollama keep-alive failed: {e}")
 
-        # Not with the service calls drained at shutdown: a ping must not hold a restart 30 s
-        task = asyncio.ensure_future(ping())
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        self._in_background(ping(), drained=False)
+
+    def warm_llm(self) -> None:
+        """A request starts to be spoken: meanwhile, the local model reads the prompt it will begin with, loaded
+        first if a job had taken the GPU back (AD-073). ddmr's OCR had, on the morning of 2026-10-20: 11.9 s
+        before the first call returned, 1 s otherwise."""
+        if LLM_API_KEY:
+            return
+        from llm import warm_up
+
+        messages = [*self._prompt_head(self.conversation), {"role": "user", "content": "…"}]
+        self._in_background(warm_up(LLM_URL, LLM_MODEL, messages, self._tools()), drained=False)
 
     # === WEB APP ===
 

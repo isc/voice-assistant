@@ -143,6 +143,9 @@ def make_server(env=None):
     server._volume_lock = asyncio.Lock()
     server._spotify_at = None
     server._tool_semaphore = asyncio.Semaphore(4)
+    server._background_tasks = set()
+    server.recording_task = None
+    server.warm_llm = MagicMock()  # no LLM to warm; deleted for the real one
     return server
 
 
@@ -2106,6 +2109,26 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
             self.server.new_request()
             await self.ask(dry_run=True, text=text)
             self.assertIn(result, self.server._last_tool_calls[0]["result"])
+
+    async def test_a_wake_word_has_the_request_s_prompt_read(self):
+        """2026-10-20 at 7:36, Ollama had let gemma go for ddmr's OCR: 11.9 s before the first call returned
+        (AD-073)."""
+        del self.server.warm_llm  # make_server's stub
+        await self.ask()  # a conversation goes on
+        with patch("llm.warm_up", AsyncMock()) as warm_up:
+            await self.server.handle_voice_assistant_start(self.server.site, "", 1, None, "Okay Nabu")
+            await asyncio.gather(*self.server._background_tasks)
+        await self.ask()
+        _, _, warmed, tools = warm_up.await_args.args
+        _, _, _, asked, asked_tools = self.completion.await_args_list[0].args
+        self.assertEqual(len(warmed), 6)  # the system turn, the first exchange, a request
+        self.assertEqual(warmed[:-1], asked[:5])  # as the request reads them
+        self.assertEqual(tools, asked_tools)
+
+    async def test_a_follow_up_warms_nothing(self):
+        """The model has just answered: what the follow-up reads is in its cache."""
+        await self.server.handle_voice_assistant_start(self.server.site, "", 1, None, None)
+        self.server.warm_llm.assert_not_called()
 
     async def test_malformed_arguments_do_not_fail_the_request(self):
         self.replies[0]["tool_calls"][0]["function"]["arguments"] = "{not json"

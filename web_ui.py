@@ -399,6 +399,8 @@ def setup_routes(app, server):
         that follows a reply."""
         await serve(request, dict(request.query))
         follow_up = request.query.get("follow_up") == "1"
+        if not follow_up:
+            server.warm_llm()  # while the request is spoken
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         if not (heard := await _listen(ws, follow_up)):
