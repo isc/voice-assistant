@@ -376,6 +376,7 @@ class VoiceAssistantServer:
 
         # Google Calendar client
         self.calendar_client = None
+        self._calendar_down = False  # it has a token, and Google did not answer
 
         # Continuous conversation
         self.is_followup = False  # True when pipeline was started without wake word
@@ -520,10 +521,13 @@ class VoiceAssistantServer:
         """Every few minutes, re-read each site's devices, or connect a Home Assistant that was down.
 
         Without it, devices added in HA would stay unknown until a restart, and a Home Assistant
-        down at startup (booting slower after a power cut) would never be used.
+        down at startup (booting slower after a power cut) would never be used. The calendar too:
+        on 2026-10-20, two restarts in a row found Google's token endpoint cutting one connection in two.
         """
         while True:
             await asyncio.sleep(_HA_REFRESH_SECONDS)
+            if self._calendar_down:
+                await self.init_calendar_client()
             for site in self.sites:
                 try:
                     if site.ha_client:
@@ -555,11 +559,12 @@ class VoiceAssistantServer:
             return
 
         self.calendar_client = CalendarClient(credentials_path, token_path)
-        if await self.calendar_client.connect():
-            logger.info("Google Calendar connected")
-        else:
-            logger.warning("Google Calendar not available, calendar disabled")
+        self._calendar_down = not await self.calendar_client.connect()
+        if self._calendar_down:
+            logger.warning(f"Google Calendar not available, tried again in {_HA_REFRESH_SECONDS // 60} min")
             self.calendar_client = None
+        else:
+            logger.info("Google Calendar connected")
 
     async def init_spotify(self):
         """Enable music when a go-librespot player answers on this host."""
