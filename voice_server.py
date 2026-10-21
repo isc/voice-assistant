@@ -476,8 +476,7 @@ class VoiceAssistantServer:
 
         await self.init_ha_clients()
         self._ha_refresh_task = asyncio.create_task(self._keep_ha_fresh())
-        if not await self.init_calendar_client():
-            self._calendar_retry_task = asyncio.create_task(self._connect_calendar_later())
+        self._calendar_task = asyncio.create_task(self._connect_calendar())
         await self.init_spotify()
         await self.start_http_server()
         self._recover_media_target()
@@ -563,14 +562,13 @@ class VoiceAssistantServer:
         logger.info("Google Calendar connected")
         return True
 
-    async def _connect_calendar_later(self):
-        """Google unreachable at startup: tried again every few minutes, apart from Home Assistant's refresh,
-        which a call to Google with no timeout of its own would hold. On 2026-10-20, two restarts in a row found
-        its token endpoint cutting one connection in two, and the calendar stayed off until the next restart."""
-        while True:
+    async def _connect_calendar(self):
+        """Google Calendar connected in the background, and tried again every few minutes until it answers, apart
+        from Home Assistant's refresh, which a call to Google with no timeout of its own would hold. On 2026-10-20,
+        two restarts in a row found its token endpoint cutting one connection in two, and the calendar stayed off
+        until the next restart; awaited at startup, it held the satellite and the web app for up to 2 min 21 s."""
+        while not await self.init_calendar_client():
             await asyncio.sleep(_HA_REFRESH_SECONDS)
-            if await self.init_calendar_client():
-                return
 
     async def init_spotify(self):
         """Enable music when a go-librespot player answers on this host."""

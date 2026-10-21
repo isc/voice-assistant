@@ -3183,5 +3183,47 @@ class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await (await client.get("/health")).json())["status"], "ok")
 
 
+class TestCalendarAtStartup(unittest.IsolatedAsyncioTestCase):
+    """Google slow to answer holds neither the satellite nor the web app: on 2026-10-20, a startup waited
+    2 min 21 s for its token endpoint before serving anything."""
+
+    async def test_startup_does_not_wait_for_google(self):
+        import sys
+
+        server = make_server({"ESP_HOST": "voice.local"})
+        google = asyncio.Event()
+        attempts = 0
+
+        async def init_calendar_client():
+            nonlocal attempts
+            attempts += 1
+            await google.wait()  # Google hangs
+            return attempts > 1
+
+        engines = {"stt": MagicMock(), "tts": MagicMock()}
+        engines["stt"].ParakeetSTT.return_value.init = AsyncMock()
+        engines["tts"].KokoroTTS.return_value.init = AsyncMock()
+        with (
+            patch.dict(sys.modules, engines),
+            patch("onnx_gpu.lost_cuda", return_value=False),
+            patch.object(server, "init_ha_clients", AsyncMock()),
+            patch.object(server, "_keep_ha_fresh", AsyncMock()),
+            patch.object(server, "init_calendar_client", init_calendar_client),
+            patch.object(server, "init_spotify", AsyncMock()),
+            patch.object(server, "start_http_server", AsyncMock()) as start_http_server,
+            patch.object(server, "_recover_media_target", MagicMock()),
+            patch.object(server, "connect_to_device", AsyncMock()) as connect_to_device,
+            patch("voice_server._HA_REFRESH_SECONDS", 0),
+        ):
+            await asyncio.wait_for(server.start(), 1)
+            start_http_server.assert_awaited_once()
+            connect_to_device.assert_awaited_once_with(server.sites[0])
+            await asyncio.sleep(0)
+            self.assertEqual(attempts, 1)  # tried at once, in the background
+            google.set()
+            await asyncio.wait_for(server._calendar_task, 1)
+        self.assertEqual(attempts, 2)  # and again until it answers
+
+
 if __name__ == "__main__":
     unittest.main()
