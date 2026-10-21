@@ -44,7 +44,7 @@ from places import address_of, find_place
 from push import Push
 from recordings import Recordings
 from sites import Conversation, Site, load_sites, site_at_address
-from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected
+from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected, SpotifySearchError
 from timer import Timer
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
 
@@ -1508,9 +1508,14 @@ class VoiceAssistantServer:
             return result
         except SpotifyNotConnected:
             return "Spotify n'est pas connecté au compte"
+        except SpotifySearchError as e:
+            # « Spotify ne répond pas » had the model say the Sonos could not play (2026-10-20)
+            logger.error(f"Spotify search error: {e}")
+            return ("Rien n'a été fait : la recherche Spotify n'a pas abouti, l'enceinte n'est pas en cause. "
+                    "On peut réessayer.")
         except SpotifyError as e:
             logger.error(f"Spotify error: {e}")
-            return "Spotify ne répond pas"
+            return "Le lecteur Spotify du serveur ne répond pas"
 
     async def _music_for_prompt(self) -> Optional[str]:
         """What Spotify plays and where, and the radio last started here, so that « passe le son sur la Sonos »

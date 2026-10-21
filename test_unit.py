@@ -2159,6 +2159,59 @@ class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ne répond pas", result)
         server.spotify.play.assert_not_awaited()
 
+    async def test_a_failed_search_does_not_blame_the_speaker(self):
+        from spotify import SpotifySearchError
+        from voice_server import _NOTHING_DONE
+
+        server = make_server()
+        server.ha_client = make_client()
+        server.spotify = MagicMock()
+        server.spotify.find = AsyncMock(side_effect=SpotifySearchError("GET search: TimeoutError"))
+        server._resolve_media_target = lambda room: ("ha", "media_player.sonos_paris")
+        server._offline_reply = AsyncMock(return_value=None)
+        server._point_at_spotify = AsyncMock()
+        result = await server._execute_music_function("play_music", {"query": "Prélude 2 de Bach", "room": "Sonos"})
+        self.assertIn("l'enceinte n'est pas en cause", result)
+        self.assertTrue(_NOTHING_DONE.search(result))  # the page shows it failed
+        server._point_at_spotify.assert_not_awaited()
+
+
+class TestSpotifyWebRetry(unittest.IsolatedAsyncioTestCase):
+    """2026-10-20: a search timed out after 10 s, and took 0.74 s when the request was said again."""
+
+    FOUND = {"tracks": {"items": [{"uri": "spotify:track:x"}]}}
+
+    def spotify(self, *answers):
+        from spotify import Spotify
+
+        self.enterContext(patch.multiple("spotify", CLIENT_ID="id", CLIENT_SECRET="secret"))
+        spotify = Spotify()
+        spotify._app_token, spotify._app_token_expiry = "token", float("inf")
+        spotify._request = AsyncMock(side_effect=answers)
+        return spotify
+
+    async def test_a_network_failure_is_tried_again(self):
+        from spotify import SpotifyError
+
+        spotify = self.spotify(SpotifyError("GET search: TimeoutError"), (200, self.FOUND))
+        self.assertEqual(await spotify._search("Prélude 2 de Bach", "track"), [{"uri": "spotify:track:x"}])
+        self.assertEqual(spotify._request.await_count, 2)
+
+    async def test_twice_is_a_search_error(self):
+        from spotify import SpotifyError, SpotifySearchError
+
+        spotify = self.spotify(SpotifyError("GET search: TimeoutError"), SpotifyError("GET search: TimeoutError"))
+        with self.assertRaises(SpotifySearchError):
+            await spotify._search("Prélude 2 de Bach", "track")
+
+    async def test_an_http_error_is_not_tried_again(self):
+        from spotify import SpotifySearchError
+
+        spotify = self.spotify((401, None))
+        with self.assertRaises(SpotifySearchError):
+            await spotify._search("Prélude 2 de Bach", "track")
+        self.assertEqual(spotify._request.await_count, 1)
+
 
 class SpotifySpeakers:
     """A Paris server with its satellite, the Sonos and the Google Home, and a stream they all join."""

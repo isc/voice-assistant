@@ -38,6 +38,8 @@ WEB_API = "https://api.spotify.com/v1"
 # A Spotify developer app (developer.spotify.com), used for search only
 CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
+# One try of a Web API call: two fit in the 10 s a single one had until 2026-10-20
+_WEB_TIMEOUT = aiohttp.ClientTimeout(total=4.5)
 
 # go-librespot's PCM: 44.1 kHz, stereo, s16le
 _FRAME = 4
@@ -395,6 +397,10 @@ class SpotifyNotConnected(SpotifyError):
     """go-librespot runs but has no Spotify session (not paired with an account yet)."""
 
 
+class SpotifySearchError(SpotifyError):
+    """Spotify's Web API, on the internet, failed: nothing was played yet."""
+
+
 # music_control actions → (go-librespot endpoint, what the LLM is told)
 CONTROLS = {
     "pause": ("pause", "Musique en pause"),
@@ -430,6 +436,17 @@ class Spotify:
                 return resp.status, body
         except (aiohttp.ClientError, TimeoutError) as e:
             raise SpotifyError(f"{method} {url}: {type(e).__name__}") from None
+
+    async def _web(self, method: str, url: str, **kwargs) -> tuple[int, Any]:
+        """A Web API call, tried again once when the network failed: a search that timed out on 2026-10-20 took
+        0.74 s when asked again. An HTTP error is Spotify's answer, kept."""
+        for attempt in range(2):
+            try:
+                return await self._request(method, url, timeout=_WEB_TIMEOUT, **kwargs)
+            except SpotifyError as e:
+                if attempt:
+                    raise SpotifySearchError(str(e)) from None
+                logger.warning(f"Spotify Web API, trying again: {e}")
 
     async def _api(self, method: str, path: str, **kwargs) -> Any:
         """Call go-librespot; its 204 means no Spotify session."""
@@ -478,14 +495,14 @@ class Spotify:
 
     async def _search_token(self) -> str:
         if not CLIENT_ID or not CLIENT_SECRET:
-            raise SpotifyError("search needs SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET")
+            raise SpotifySearchError("search needs SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET")
         if time.monotonic() < self._app_token_expiry:
             return self._app_token
         auth = aiohttp.BasicAuth(CLIENT_ID, CLIENT_SECRET)
         data = {"grant_type": "client_credentials"}
-        status, body = await self._request("POST", "https://accounts.spotify.com/api/token", data=data, auth=auth)
+        status, body = await self._web("POST", "https://accounts.spotify.com/api/token", data=data, auth=auth)
         if status != 200:
-            raise SpotifyError(f"app token: HTTP {status}")
+            raise SpotifySearchError(f"app token: HTTP {status}")
         self._app_token = body["access_token"]
         self._app_token_expiry = time.monotonic() + body["expires_in"] - 60
         return self._app_token
@@ -494,9 +511,9 @@ class Spotify:
         # An app token has no user to take the market from. 10 is the most Spotify gives (400 above)
         params = {"q": query, "type": kind, "limit": 10, "market": "FR"}
         headers = {"Authorization": f"Bearer {await self._search_token()}"}
-        status, body = await self._request("GET", f"{WEB_API}/search", params=params, headers=headers)
+        status, body = await self._web("GET", f"{WEB_API}/search", params=params, headers=headers)
         if status != 200:
-            raise SpotifyError(f"search: HTTP {status}")
+            raise SpotifySearchError(f"search: HTTP {status}")
         return [item for item in body[f"{kind}s"]["items"] if item]  # playlist results hold nulls
 
     async def find(self, query: str, kind: Optional[str]) -> Optional[Music]:
