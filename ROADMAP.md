@@ -43,7 +43,7 @@ First version: the music playing and `show_image`, the two uses of the Default M
 - one app at a time: a cast from a phone, or "Hey Google", takes the screen back.
 
 ### Generated pictures
-"Dessine-moi un dragon" → generate the picture locally and show it on the Nest Hub, next to `show_image` (AD-038). charras already has `stable-diffusion.cpp` with Z-Image-Turbo q8 in `/opt/sd/` (~22 s per 1024² image; exact command in home-infra `charras/trellis/beast.sh`). Blocked by VRAM today: Z-Image needs ~6.3 GB beside the voice assistant's ~4 GB and `gemma4:12b`'s 8.1 GB on the 16 GB card. A second GPU is ordered for charras. Unlike web pictures, the result is a local file, so it must be served over HTTP, beside `/tts/`, which the Paris relay forwards.
+"Dessine-moi un dragon" → generate the picture locally and show it on the Nest Hub, next to `show_image` (AD-038). charras already has `stable-diffusion.cpp` with Z-Image-Turbo q8 in `/opt/sd/` (~22 s per 1024² image; exact command in home-infra `charras/trellis/beast.sh`). Blocked by VRAM today: Z-Image needs ~6.3 GB beside the voice assistant's ~4 GB and `gemma4:12b`'s 8.1 GB on the 16 GB card. A second GPU has arrived, to be installed in charras around 2026-10-23. Unlike web pictures, the result is a local file, so it must be served over HTTP, beside `/tts/`, which the Paris relay forwards.
 
 ### Family photos from Immich
 "Montre-moi des photos de Zoé", "les vacances en Bretagne l'été dernier", "Charlie à la plage" → find them in Immich and show them on the Nest Hub as a slideshow. Immich on charras (v2.7.5, port 2283) already has smart search (CLIP), facial recognition and reverse geocoding enabled, so: people for names, place and date for trips, smart search for descriptions. The Default Media Receiver shows one picture at a time, so a slideshow means casting every few seconds, or our own receiver (above), with "suivante" and "arrête". Immich needs an API key and the Paris Nest cannot reach the charras LAN, so the server fetches each preview and serves it under `/tts/`. Prerequisites on the family's side: migrate the photos, name the face clusters.
@@ -77,6 +77,15 @@ Identify who is speaking. Two distinct problems:
 Today Parakeet turns audio into text and every voice cue is lost there, so voice ID means a separate component on the raw audio: a small speaker-verification model whose verdict ("Ivan / child / unknown") is injected into the prompt.
 
 ## Infrastructure
+
+### Models worth trying (review of 2026-10-21)
+Open models that run on charras, checked against ours on 2026-10-21. Mistral's Voxtral 3 (2026-10-20) is not among them: API only, self-hosting on request through their sales, no weights published.
+
+- **TTS: Qwen3-TTS or Kyutai TTS instead of Kokoro.** The most to gain: Kokoro is English-first, and its French is one voice (`ff_siwis`) through the misaki G2P. Qwen3-TTS 0.6B / 1.7B (Apache 2.0, French among its languages, voice cloning) and Kyutai TTS 1.6B (CC-BY 4.0, English and French only) are the candidates; Voxtral 4B TTS (2026-03) is CC BY-NC, acceptable for us but 4B. Replay twenty real replies (`recordings/`) through each, compare by ear and on latency against Kokoro's, and on VRAM: both are 20× Kokoro's size.
+- **STT: Qwen3-ASR 1.7B beside Parakeet.** Apache 2.0, 2026-06, French: 4.75 % WER on FLEURS French in its report, against 5.15 % for Parakeet TDT 0.6B v3 in NVIDIA's (different normalisations, so indicative). Three times Parakeet's size. Run the 2026-10-11 recordings (the 28 with known words, from "STT through the LLM") through it: children, speech over music, the house's names. Voxtral Mini 4B Realtime (Apache 2.0) is more accurate still on paper, but 4B. NVIDIA has published no newer multilingual Parakeet.
+- **LLM: Gemma 4 26B-A4B on two cards.** `gemma4:12b` stays right for one 16 GB card: Qwen3.8-27B (Apache 2.0, 2026-08) and Gemma 4 26B-A4B (MoE, 4B active) need ~14 GB at Q4, which the STT and TTS's ~4 GB leave no room for. With the second GPU, try Gemma 4 26B-A4B first (4B active a token, so no slower than the 12B, with a larger model's knowledge), then Qwen3.8-27B, on the tool-calling dry runs; keep the 12B's audio input in mind ("STT through the LLM").
+
+Silero VAD stays: nothing newer replaces it for French.
 
 ### Re-evaluate the small-model workarounds
 Written for Qwen 3 4B. The French-verb text fallback went on 2026-10-11 (never fired in 223 requests, and it could take a reply for a command), and so did the « already called » reminder. The structured text fallback (`fn({...})` written as text) remains, harmless; it never fired either. Remove it after a few hundred more requests without a `Function call (text fallback)` line. Generic names stay: they drive group resolution and the shutter/roof-window split.
