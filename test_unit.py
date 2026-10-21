@@ -2171,7 +2171,7 @@ class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
         server._offline_reply = AsyncMock(return_value=None)
         server._point_at_spotify = AsyncMock()
         result = await server._execute_music_function("play_music", {"query": "Prélude 2 de Bach", "room": "Sonos"})
-        self.assertIn("l'enceinte n'est pas en cause", result)
+        self.assertEqual(result, "La recherche Spotify ne répond pas")  # not the speaker
         self.assertTrue(_NOTHING_DONE.search(result))  # the page shows it failed
         server._point_at_spotify.assert_not_awaited()
 

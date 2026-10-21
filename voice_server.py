@@ -1511,8 +1511,7 @@ class VoiceAssistantServer:
         except SpotifySearchError as e:
             # « Spotify ne répond pas » had the model say the Sonos could not play (2026-10-20)
             logger.error(f"Spotify search error: {e}")
-            return ("Rien n'a été fait : la recherche Spotify n'a pas abouti, l'enceinte n'est pas en cause. "
-                    "On peut réessayer.")
+            return "La recherche Spotify ne répond pas"
         except SpotifyError as e:
             logger.error(f"Spotify error: {e}")
             return "Le lecteur Spotify du serveur ne répond pas"
