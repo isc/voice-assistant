@@ -207,7 +207,7 @@ def ship(base):
         shipped.notes.append(f"Pas déployé : {reason}. À faire : `sudo git -C /opt/voice-assistant pull` "
                              "puis `sudo systemctl restart voice-assistant`.")
         return shipped
-    deployed = run("git", "-C", str(LIVE), "rev-parse", "HEAD").stdout.strip()
+    deployed = run("sudo", "-n", "git", "-C", str(LIVE), "rev-parse", "HEAD").stdout.strip()  # root-owned
     run("sudo", "-n", "git", "-C", str(LIVE), "pull", "--quiet", "--ff-only")
     if restart():
         shipped.notes.append("Déployé, le serveur a redémarré sans erreur.")
