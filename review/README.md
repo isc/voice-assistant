@@ -29,9 +29,10 @@ session on it (AD-074).
    commit it ran, restarted, and the email says so with ⚠️.
 5. One email from `assistant-vocal@arabesque.app` (Resend key `voice-assistant-review`, send only,
    `~/.config/voice-assistant-review/resend-api-key`). Each proposal's brief is written to
-   `<day>/proposals/<n>-<slug>.md`; its link `claude://code/new?ssh_host=charras&ssh_folder=…&q=…`
-   opens a Desktop session on charras whose prompt asks to read it. The same prompt is in the email,
-   to paste. No fix and no proposal: no email.
+   `<day>/proposals/<n>-<slug>.md`; its link goes to the voice server's `/review/open?brief=…`, on the
+   tailnet, which sends the browser to `claude://code/new?ssh_host=charras&ssh_folder=…&q=…`: a Desktop
+   session on charras whose prompt asks to read it. HEY shows a `claude://` link but doesn't follow it.
+   The brief's path is in the email too, to paste. No fix and no proposal: no email.
 
 Each day's folder keeps `interactions.json`, `journal.log`, `claude.json` (Claude's full answer),
 `review.json`, `proposals/` and `email.html`. The next nights read `review.json` of the last 30 to

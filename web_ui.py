@@ -2,15 +2,18 @@
 
 import asyncio
 import hmac
+import html
 import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote, urlencode
 
 from aiohttp import WSMsgType, web
 from yarl import URL
@@ -38,6 +41,11 @@ _INSTALL_PATHS = ("/manifest.webmanifest", "/static/")
 KEY_COOKIE = "assistant_key"
 # The names browsers reach this server by, besides IP addresses and MagicDNS's (*.ts.net, Funnel's too)
 _OUR_NAMES = {"localhost", socket.gethostname().split(".")[0].lower()}
+# The nightly review's briefs (AD-074), and where the Claude Code Desktop session that reads one opens:
+# Ivan's SSH connection to this machine, the project's folder
+_REVIEW_DIR = "/home/ivan/.local/state/voice-assistant-review"
+_REVIEW_BRIEF = re.compile(r"(\d{4}-\d{2}-\d{2})/proposals/[\w.-]+\.md")
+_REVIEW_SESSION = {"ssh_host": "charras", "ssh_folder": "/home/ivan/Code/voice-assistant"}
 # What the app's microphone sends: 16 kHz 16-bit mono, as long as the satellite's at most
 _MAX_RECORDING = int(MAX_SECONDS) * 16000 * 2
 
@@ -185,6 +193,25 @@ def _client(params) -> Optional[str]:
     """The id a browser gives itself (`client`): its conversation (AD-061), the one its page shows (AD-060)."""
     client = params.get("client")
     return client if isinstance(client, str) and 0 < len(client) <= 40 and client.isalnum() else None
+
+
+async def handle_review_open(request):
+    """GET /review/open?brief=<day>/proposals/<file>.md: opens a Claude Code Desktop session on a proposal of
+    the nightly review. Its email can't link to claude:// itself: HEY shows such a link but doesn't follow
+    it. The brief is a path the page checks, not a prompt: a link from elsewhere can't put words in it."""
+    match = _REVIEW_BRIEF.fullmatch(request.query.get("brief", ""))
+    if not match:
+        raise web.HTTPNotFound(text="Pas de proposition à cette adresse")
+    prompt = (f"Lis {_REVIEW_DIR}/{match[0]} : une proposition de la revue de nuit de l'assistant vocal "
+              f"({match[1]}). Discutons-en avant de coder.")
+    link = html.escape(f"claude://code/new?{urlencode({**_REVIEW_SESSION, 'q': prompt}, quote_via=quote)}")
+    return web.Response(content_type="text/html", text=f"""<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Revue de nuit</title>
+<body style="font:16px -apple-system,Helvetica,sans-serif;margin:2em">
+<p><a href="{link}" style="font-size:1.2em">Ouvrir dans Claude Code</a></p>
+<p style="color:#666">{html.escape(prompt)}</p>
+<script>location.href = document.querySelector("a").href</script>""")
 
 
 def _json_error(error: type[web.HTTPException], message: str) -> web.HTTPException:
@@ -569,6 +596,7 @@ def setup_routes(app, server):
     app.router.add_get("/manifest.webmanifest", handle_manifest)
     app.router.add_get("/sw.js", handle_service_worker)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/review/open", handle_review_open)
     app.router.add_get("/api/exchanges", handle_get_exchanges)
     app.router.add_get("/api/sites", handle_sites)
     app.router.add_get("/api/state", handle_state)

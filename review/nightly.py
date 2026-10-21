@@ -38,8 +38,9 @@ REPO_URL = "https://github.com/isc/voice-assistant"
 FROM = "Assistant vocal <assistant-vocal@arabesque.app>"
 TO = "ivan.schneider@hey.com"
 PARIS = ZoneInfo("Europe/Paris")
-# Where a proposal's Desktop session opens: the SSH connection and folder of Ivan's other sessions
-SSH_HOST, SSH_FOLDER = "charras", "/home/ivan/Code/voice-assistant"
+# The voice server's page that opens a Desktop session on a brief (web_ui.handle_review_open), on the
+# tailnet: HEY doesn't follow a claude:// link
+OPEN_BRIEF = "http://charras-server.tailcef78d.ts.net:8888/review/open"
 # What a nightly fix may touch: the server's top-level code and docs, its web app; never this loop, the
 # dependencies, the scripts or the firmware. The topics it must leave alone (locks, access control…) live
 # in files it may touch: those limits are the prompt's alone.
@@ -241,12 +242,6 @@ def slug(title):
     return re.sub(r"[^a-z0-9]+", "-", ascii_title)[:40].strip("-")
 
 
-def desktop_link(prompt):
-    query = urllib.parse.urlencode({"ssh_host": SSH_HOST, "ssh_folder": SSH_FOLDER, "q": prompt},
-                                   quote_via=urllib.parse.quote)
-    return f"claude://code/new?{query}"
-
-
 def report(day, out, interactions, review, error, shipped):
     """The email's Markdown, each proposal's brief written to proposals/ for its Desktop session to read."""
     parts = []
@@ -266,11 +261,9 @@ def report(day, out, interactions, review, error, shipped):
     for n, proposal in enumerate(proposals, 1):
         brief = out / "proposals" / f"{n}-{slug(proposal['title'])}.md"
         brief.write_text(f"# {proposal['title']}\n\n{proposal['brief']}\n")
-        prompt = (f"Lis {brief} : une proposition de la revue de nuit de l'assistant vocal ({day}). "
-                  "Discutons-en avant de coder.")
+        link = f"{OPEN_BRIEF}?{urllib.parse.urlencode({'brief': str(brief.relative_to(STATE))})}"
         parts.append(f"## {n}. {proposal['title']}\n\n{proposal['problem']}\n\n**Pistes.** {proposal['suggestion']}"
-                     f"\n\n[Ouvrir dans Claude Code]({desktop_link(prompt)}) · ou coller dans une session : "
-                     f"`{prompt}`")
+                     f"\n\n[Ouvrir dans Claude Code]({link}) · ou dans une session : `Lis {brief}`")
     if review.get("session_id"):
         parts.append(f"La revue elle-même se reprend sur charras : `cd {CLONE} && claude --resume "
                      f"{review['session_id']}`.")
@@ -283,10 +276,7 @@ def report(day, out, interactions, review, error, shipped):
 
 
 def to_html(markdown):
-    # claude:// links are dropped by markdown-it's default URL check
-    md = MarkdownIt("commonmark", {"breaks": True, "html": False})
-    md.validateLink = lambda url: url.startswith(("https://", "http://", "claude://"))
-    return md.render(markdown)
+    return MarkdownIt("commonmark", {"breaks": True, "html": False}).render(markdown)
 
 
 def send(subject, text, body):
