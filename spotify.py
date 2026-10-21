@@ -38,8 +38,8 @@ WEB_API = "https://api.spotify.com/v1"
 # A Spotify developer app (developer.spotify.com), used for search only
 CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
-# One try of a Web API call: two fit in the 10 s a single one had until 2026-10-20
-_WEB_TIMEOUT = aiohttp.ClientTimeout(total=4.5)
+# A Web API call's two tries: a search takes under a second, so a first one past 2 s has hung (2026-10-20)
+_WEB_TIMEOUTS = (aiohttp.ClientTimeout(total=2), aiohttp.ClientTimeout(total=5))
 
 # go-librespot's PCM: 44.1 kHz, stereo, s16le
 _FRAME = 4
@@ -440,9 +440,9 @@ class Spotify:
     async def _web(self, method: str, url: str, **kwargs) -> tuple[int, Any]:
         """A Web API call, tried again once when the network failed: a search that timed out on 2026-10-20 took
         0.74 s when asked again. An HTTP error is Spotify's answer, kept."""
-        for attempt in range(2):
+        for attempt, timeout in enumerate(_WEB_TIMEOUTS):
             try:
-                return await self._request(method, url, timeout=_WEB_TIMEOUT, **kwargs)
+                return await self._request(method, url, timeout=timeout, **kwargs)
             except SpotifyError as e:
                 if attempt:
                     raise SpotifySearchError(str(e)) from None
