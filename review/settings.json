@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Edit",
+      "Write",
+      "Grep",
+      "Glob",
+      "Bash(date:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git grep:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git restore:*)",
+      "Bash(/opt/voice-assistant/venv/bin/python -m unittest:*)",
+      "Bash(curl -s http://localhost:8888/health)"
+    ],
+    "deny": [
+      "Bash(git commit *--amend*)",
+      "Bash(git *--no-verify*)",
+      "Bash(git *-c *)"
+    ]
+  }
+}

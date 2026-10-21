@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly review of the voice assistant, at 3:30 Paris time
+
+[Timer]
+# charras runs on UTC: the time zone follows daylight saving by itself.
+# At night: nobody is talking to it, and a deploy cuts no music.
+OnCalendar=*-*-* 03:30 Europe/Paris
+Persistent=true
+
+[Install]
+WantedBy=timers.target

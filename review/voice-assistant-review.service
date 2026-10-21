@@ -1,0 +1,10 @@
+[Unit]
+Description=Nightly review of the voice assistant's interactions (review/README.md)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/voice-assistant/review/nightly.py
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=CLAUDE_CODE_OAUTH_TOKEN
+# Whisper on the CPU, Claude 40 min at most, the deploy's health wait
+TimeoutStartSec=90min
