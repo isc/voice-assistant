@@ -38,7 +38,7 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 import onnx_gpu
-from ha_client import LOCAL_CONFIG, asks_whole_house, compact, fold, is_whole_house, normalize
+from ha_client import LOCAL_CONFIG, asks_whole_house, compact, fold, is_whole_house, normalize, quiet
 from images import find_image
 from places import address_of, find_place
 from push import Push
@@ -277,8 +277,6 @@ def _format_family_for_prompt(family: list) -> str:
 # The site the running task serves: set where a satellite's request or a web request comes in.
 # asyncio copies it into every task created from there (service calls, TTS generation, timers).
 _current_site: ContextVar[Site] = ContextVar("current_site")
-# Set while a call runs at another home than its request's (`_at`): what it lacks is not looked for elsewhere
-_away: ContextVar[bool] = ContextVar("away", default=False)
 
 
 @dataclass
@@ -1101,24 +1099,27 @@ class VoiceAssistantServer:
 
     async def _at(self, site: Site, work: Awaitable) -> Any:
         """`work` done at another home, which it serves meanwhile; this request's home after."""
-        token, away = _current_site.set(site), _away.set(True)
+        token = _current_site.set(site)
         try:
             return await work
         finally:
             _current_site.reset(token)
-            _away.reset(away)
 
     def _only_home_with(self, entity: str, room: Optional[str], domains: list[str]) -> Optional[Site]:
         """The one other home where a device this one lacks is found, as Charras's heating from Paris; in the
         room said, if one is: « parcourt » (partout, misheard) is no room, and would read every shutter there."""
-        homes = [
-            site
-            for site in self.sites
-            if site is not self.site
-            and site.ha_client
-            and (not room or site.ha_client.knows_room(room))
-            and site.ha_client.resolve_all_entities(entity, room=room, domain_hints=domains)
-        ]
+        token = quiet.set(True)  # each failed read asks the other homes: their misses stay out of the log
+        try:
+            homes = [
+                site
+                for site in self.sites
+                if site is not self.site
+                and site.ha_client
+                and (not room or site.ha_client.knows_room(room))
+                and site.ha_client.resolve_all_entities(entity, room=room, domain_hints=domains)
+            ]
+        finally:
+            quiet.reset(token)
         return homes[0] if len(homes) == 1 else None
 
     def _unasked_sweep(self, function_name: str, arguments: dict) -> Optional[str]:
@@ -1236,12 +1237,14 @@ class VoiceAssistantServer:
         if function_name == "show_image":
             return await self._show_image(arguments.get("query", ""), arguments.get("room"), call)
 
+        # Sent to the home named with its own arguments, where it names that home: it is not read elsewhere
         named = self._home_named(arguments) if function_name in self._ANY_HOME else None
         if named:
-            home, arguments = named
+            home, there = named
             if home is not self.site:
                 result = await self._at(home, self.execute_function(function_name, arguments, call))
                 return f"{result} ({home.name.capitalize()})"
+            arguments = there
 
         if not self.ha_client:
             return "Home Assistant non disponible"
@@ -1272,10 +1275,16 @@ class VoiceAssistantServer:
             # « la fenêtre de la cuisine », a room Paris has not, got which room (AD-077). Not « les volets »
             # with no room, which both have; never an action: « allume le chauffage » at Paris must not heat
             # Charras (AD-071)
-            if function_name == "get_state" and not named and not _away.get() and (room or not asks_room):
-                if home := self._only_home_with(entity_name, room, domains):
-                    result = await self._at(home, self.execute_function(function_name, arguments, call))
-                    return f"Pas de {entity_name} ici, mais à {home.name.capitalize()} : {result}"
+            if (
+                function_name == "get_state"
+                and not named
+                and (room or not asks_room)
+                and (home := self._only_home_with(entity_name, room, domains))
+            ):
+                result = await self._at(
+                    home, self.execute_function(function_name, {**arguments, "home": home.name}, call)
+                )
+                return f"Pas de {entity_name} ici, mais à {home.name.capitalize()} : {result}"
             if asks_room:
                 return _WHICH_ROOM
             return f"Appareil {entity_name} non trouvé"
