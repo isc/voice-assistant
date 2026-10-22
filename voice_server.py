@@ -277,6 +277,8 @@ def _format_family_for_prompt(family: list) -> str:
 # The site the running task serves: set where a satellite's request or a web request comes in.
 # asyncio copies it into every task created from there (service calls, TTS generation, timers).
 _current_site: ContextVar[Site] = ContextVar("current_site")
+# Set while a call runs at another home than its request's (`_at`): what it lacks is not looked for elsewhere
+_away: ContextVar[bool] = ContextVar("away", default=False)
 
 
 @dataclass
@@ -1099,11 +1101,25 @@ class VoiceAssistantServer:
 
     async def _at(self, site: Site, work: Awaitable) -> Any:
         """`work` done at another home, which it serves meanwhile; this request's home after."""
-        token = _current_site.set(site)
+        token, away = _current_site.set(site), _away.set(True)
         try:
             return await work
         finally:
             _current_site.reset(token)
+            _away.reset(away)
+
+    def _only_home_with(self, entity: str, room: Optional[str], domains: list[str]) -> Optional[Site]:
+        """The one other home where a device this one lacks is found, as Charras's heating from Paris; in the
+        room said, if one is: « parcourt » (partout, misheard) is no room, and would read every shutter there."""
+        homes = [
+            site
+            for site in self.sites
+            if site is not self.site
+            and site.ha_client
+            and (not room or site.ha_client.knows_room(room))
+            and site.ha_client.resolve_all_entities(entity, room=room, domain_hints=domains)
+        ]
+        return homes[0] if len(homes) == 1 else None
 
     def _unasked_sweep(self, function_name: str, arguments: dict) -> Optional[str]:
         """The result of an action on every room that the request did not ask for, else None (AD-058)."""
@@ -1220,7 +1236,8 @@ class VoiceAssistantServer:
         if function_name == "show_image":
             return await self._show_image(arguments.get("query", ""), arguments.get("room"), call)
 
-        if function_name in self._ANY_HOME and (named := self._home_named(arguments)):
+        named = self._home_named(arguments) if function_name in self._ANY_HOME else None
+        if named:
             home, arguments = named
             if home is not self.site:
                 result = await self._at(home, self.execute_function(function_name, arguments, call))
@@ -1249,7 +1266,17 @@ class VoiceAssistantServer:
         entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
         if not entity_ids:
             # « ferme les volets » with no room HA knows (none said, or « parcourt »): not one of them at random
-            if self.ha_client.needs_room(entity_name) and not self.ha_client.knows_room(room):
+            asks_room = self.ha_client.needs_room(entity_name) and not self.ha_client.knows_room(room)
+            # A read, with no home said, of a device that only the other home has: there, the result saying
+            # so. gemma left out the home of « il est déjà allumé hein » about Charras's heating, from Paris;
+            # « la fenêtre de la cuisine », a room Paris has not, got which room (AD-077). Not « les volets »
+            # with no room, which both have; never an action: « allume le chauffage » at Paris must not heat
+            # Charras (AD-071)
+            if function_name == "get_state" and not named and not _away.get() and (room or not asks_room):
+                if home := self._only_home_with(entity_name, room, domains):
+                    result = await self._at(home, self.execute_function(function_name, arguments, call))
+                    return f"Pas de {entity_name} ici, mais à {home.name.capitalize()} : {result}"
+            if asks_room:
                 return _WHICH_ROOM
             return f"Appareil {entity_name} non trouvé"
 

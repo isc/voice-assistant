@@ -940,10 +940,45 @@ class TestHeating(unittest.IsolatedAsyncioTestCase):
         result = await self.server.execute_function("set_heating", {"entity": "chauffage", "mode": "Turbo",
                                                                     "home": "charras"})  # fmt: skip
         self.assertEqual(result, "Mode Turbo inconnu : Off, Auto, Confort, Réduit (Charras)")
-        for function in ("set_heating", "get_state"):  # not « which room? »: the heating is the home's
-            result = await self.server.execute_function(function, {"entity": "chauffage", "mode": "Auto"})
-            self.assertEqual(result, "Appareil chauffage non trouvé")
+        # Not « which room? »: the heating is the home's. Not Charras's: an action stays at its home
+        result = await self.server.execute_function("set_heating", {"entity": "chauffage", "mode": "Auto"})
+        self.assertEqual(result, "Appareil chauffage non trouvé")
         self.charras.ha_client.call_service.assert_not_awaited()
+
+    async def test_its_state_read_at_the_one_home_that_has_it(self):
+        """« Il est déjà allumé hein », from Paris about Charras's heating, got get_state with no home (AD-077)."""
+        self.charras.ha_client.get_entity_state = AsyncMock(return_value={"state": "Auto"})
+        read = self.server.execute_function
+        self.assertEqual(
+            await read("get_state", {"entity": "chauffage"}),
+            "Pas de chauffage ici, mais à Charras : Radiateurs en mode Auto. Plancher en mode Auto. Plancher 2 en "
+            "mode Auto",
+        )
+        self.assertIs(self.server.site, self.paris)
+        # A room only the other home has, rather than which room; not a kind both have, that a room narrows
+        for eid, name in (("cover.fenetre_cuisine", "Fenêtre Cuisine Évier"), ("cover.volet_cuisine", "Volet Cuisine")):
+            self.charras.ha_client.entities[eid] = {
+                "friendly_name": name, "domain": "cover", "state": "closed",
+                "attributes": {}, "area_id": "cuisine", "area_name": "Cuisine",
+            }  # fmt: skip
+        self.charras.ha_client.areas["cuisine"] = "Cuisine"
+        window = await read("get_state", {"entity": "fenêtre", "room": "cuisine"})
+        self.assertEqual(window, "Pas de fenêtre ici, mais à Charras : cover.fenetre_cuisine est Auto")
+        from voice_server import _WHICH_ROOM
+
+        self.assertEqual(await read("get_state", {"entity": "volets"}), _WHICH_ROOM)
+        # Paris said: there only
+        paris = await read("get_state", {"entity": "chauffage", "home": "paris"})
+        self.assertEqual(paris, "Appareil chauffage non trouvé")
+        # Charras said, and a device only Paris has: not Paris's in its place, Smart Lock Pro for Charras's door
+        self.paris.ha_client.entities["lock.smart_lock_pro"] = {
+            "friendly_name": "Smart Lock Pro", "domain": "lock", "state": "locked",
+            "attributes": {}, "area_id": None, "area_name": "",
+        }  # fmt: skip
+        self.paris.ha_client.get_entity_state = AsyncMock(return_value={"state": "locked"})
+        result = await read("get_state", {"entity": "Smart Lock Pro", "home": "charras"})
+        self.assertEqual(result, "Appareil Smart Lock Pro non trouvé (Charras)")
+        self.paris.ha_client.get_entity_state.assert_not_awaited()
 
     async def test_the_other_homes_temperatures(self):
         search = self.server.execute_function
