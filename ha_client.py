@@ -141,6 +141,27 @@ def _heating_name(name: str) -> str:
     return re.sub(r"[\s—–-]*\bmode\b[\s—–-]*", " ", name, flags=re.IGNORECASE).strip() or name
 
 
+def _degrees(value) -> str:
+    """A temperature as French says it: 20.0 is « 20 », 18.1 « 18,1 »."""
+    return f"{float(value):g}".replace(".", ",")
+
+
+def _setpoint_words(mode: str, setpoint: Optional[dict]) -> str:
+    """What a heating circuit heats to, read from its setpoint sensor (home-infra charras/oekofen/): Confort's or
+    Réduit's temperature by its mode, in Auto the one of the time program's phase now, the other beside it.
+    Nothing when Off or when the box was not read (AD-075)."""
+    attrs = (setpoint or {}).get("attributes", {})
+    temps = {"confort": attrs.get("confort"), "réduit": attrs.get("reduit")}
+    # Confort or Réduit by the select's mode, which a mode just set shows before the box's next read
+    phase = attrs.get("phase") if mode == "Auto" else mode.lower()
+    if phase not in temps or None in temps.values():
+        return ""
+    if mode != "Auto":
+        return f", à {_degrees(temps[phase])} degrés"
+    other = next(p for p in temps if p != phase)
+    return f", en {phase} en ce moment à {_degrees(temps[phase])} degrés ({_degrees(temps[other])} en {other})"
+
+
 def cover_kind(info: dict) -> Optional[str]:
     """Classify a cover as 'volet', 'fenetre' or 'moustiquaire', None if undetermined.
 
@@ -171,6 +192,8 @@ class HAClient:
         self.home: dict = {}
         # media_player entities with a screen, to show pictures on
         self.screens: list[str] = []
+        # A heating circuit's select -> the sensor of its setpoint, which names it (AD-075)
+        self.setpoints: dict[str, str] = {}
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -333,6 +356,15 @@ class HAClient:
                 "area_id": area_id,
                 "area_name": area_name,
             }
+
+        # A setpoint sensor names its circuit's select: « Radiateurs consigne » has `circuit:
+        # select.radiateurs_mode` (home-infra charras/oekofen/)
+        self.setpoints = {
+            circuit: state["entity_id"]
+            for state in states
+            if state["entity_id"].startswith("sensor.")
+            and (circuit := state.get("attributes", {}).get("circuit")) in self.entities
+        }
 
         # Logged grouped by area when it changed: refreshed every few minutes
         if set(self.entities) != known:
@@ -667,25 +699,36 @@ class HAClient:
         return self.match_sensors(states, query, limit)
 
     def match_sensors(self, states: list[dict], query: str, limit: int = 15) -> str:
-        """Rank sensor states against a keyword query. Pure — see search_sensors."""
+        """Rank sensor states against a keyword query. Pure — see search_sensors.
+
+        A heating circuit's setpoint answers as get_state does, with the circuit's mode, Off included: « le
+        chauffage est allumé ? » searched the sensors too (AD-075)."""
         words = normalize(query).split()
+        selects = {state["entity_id"]: state for state in states if state["entity_id"] in self.setpoints}
+        circuits = {sensor: select for select, sensor in self.setpoints.items() if select in selects}
         matches = []
         for state in states:
             eid = state["entity_id"]
             if not eid.startswith("sensor."):
                 continue
             value = state["state"]
-            if value in ("unknown", "unavailable", ""):
+            select = circuits.get(eid)
+            if value in ("unknown", "unavailable", "") and not select:
                 continue
             attrs = state.get("attributes", {})
             name = attrs.get("friendly_name") or eid
             area = self.areas.get(self.entity_areas.get(eid, ""), "")
-            score = sum(1 for w in words if w in normalize(f"{name} {area}"))
+            heating = " chauffage" if select else ""  # « chauffage » finds « Radiateurs consigne »
+            score = sum(1 for w in words if w in normalize(f"{name} {area}{heating}"))
             if not score:
                 continue
             unit = attrs.get("unit_of_measurement") or ""
+            if select:
+                line = self.format_state_for_speech(select, selects[select], state)
+            else:
+                line = f"{name}: {value} {unit}".strip()
             # A measurement beats a raw status code when results get truncated.
-            matches.append((score, bool(unit), f"{name}: {value} {unit}".strip()))
+            matches.append((score, bool(unit), line))
 
         if not matches:
             return f"Aucun capteur trouvé pour « {query} »"
@@ -707,6 +750,13 @@ class HAClient:
         except Exception as e:
             logger.error(f"Error getting state for {entity_id}: {e}")
             return None
+
+    async def spoken_state(self, entity_id: str) -> Optional[str]:
+        """The device's state as a sentence for the reply, a heating circuit's with what it heats to (AD-075)."""
+        if not (state := await self.get_entity_state(entity_id)):
+            return None
+        setpoint = await self.get_entity_state(sensor) if (sensor := self.setpoints.get(entity_id)) else None
+        return self.format_state_for_speech(entity_id, state, setpoint)
 
     @property
     def heating_modes(self) -> list[str]:
@@ -797,8 +847,8 @@ class HAClient:
         }
         return responses.get((domain, service), "C'est fait")
 
-    def format_state_for_speech(self, entity_id: str, state_data: dict) -> str:
-        """Format an entity state as a French sentence for TTS."""
+    def format_state_for_speech(self, entity_id: str, state_data: dict, setpoint: Optional[dict] = None) -> str:
+        """Format an entity state as a French sentence for TTS. `setpoint`: a heating circuit's setpoint sensor."""
         friendly = state_data.get("attributes", {}).get("friendly_name", entity_id)
         state = state_data.get("state", "inconnu")
         domain = entity_id.split(".")[0]
@@ -845,7 +895,7 @@ class HAClient:
             return f"{friendly} est {'allumé' if state == 'on' else 'éteint'}"
 
         if domain == "select":  # a heating's mode, under the circuit's name as the prompt lists it
-            return f"{self.display_name(entity_id)} en mode {state}"
+            return f"{self.display_name(entity_id)} en mode {state}{_setpoint_words(state, setpoint)}"
 
         if domain == "lock":
             state_map = {

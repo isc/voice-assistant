@@ -154,6 +154,7 @@ def make_client() -> HAClient:
     client = HAClient.__new__(HAClient)
     client.base_url = "http://fake"
     client.token = "fake"
+    client.home_name = ""
     client.entities = dict(FAKE_ENTITIES)
     client.entity_areas = {}
     client.areas = {
@@ -164,6 +165,7 @@ def make_client() -> HAClient:
         "chambre_parents": "Chambre parents",
     }
     client.screens = []
+    client.setpoints = {}
     client._session = None
     return client
 
@@ -971,14 +973,87 @@ class TestHeating(unittest.IsolatedAsyncioTestCase):
         reply = client._build_response("select", "select_option", "Radiateurs", {"option": "Auto"})
         self.assertEqual(reply, "Radiateurs en mode Auto")
 
+    def test_its_state_says_what_it_heats_to(self):
+        """« Avec quelle température on consigne ? », from Paris on 2026-10-21: the mode alone left it out (AD-075)."""
+
+        def say(mode, setpoint):
+            return self.charras.ha_client.format_state_for_speech("select.radiateurs_mode", {"state": mode}, setpoint)
+
+        auto = "Radiateurs en mode Auto, en "
+        self.assertEqual(say("Auto", setpoint("confort")), auto + "confort en ce moment à 20 degrés (18,1 en réduit)")
+        self.assertEqual(say("Auto", setpoint("réduit")), auto + "réduit en ce moment à 18,1 degrés (20 en confort)")
+        # Set a moment ago, before the box's next read: the mode says which
+        self.assertEqual(say("Confort", setpoint("réduit")), "Radiateurs en mode Confort, à 20 degrés")
+        self.assertEqual(say("Réduit", setpoint("confort")), "Radiateurs en mode Réduit, à 18,1 degrés")
+        self.assertEqual(say("Off", setpoint(None)), "Radiateurs en mode Off")
+        self.assertEqual(say("Auto", {"state": "unavailable", "attributes": {}}), "Radiateurs en mode Auto")
+        self.assertEqual(say("Auto", None), "Radiateurs en mode Auto")
+
+    async def test_its_state_at_the_other_home(self):
+        client = self.charras.ha_client
+        client.setpoints = {"select.radiateurs_mode": "sensor.radiateurs_consigne"}
+        states = {
+            "select.radiateurs_mode": {"state": "Auto"},
+            "select.plancher_mode": {"state": "Auto"},
+            "select.plancher_2_mode": {"state": "Off"},
+            "sensor.radiateurs_consigne": setpoint("confort"),
+        }
+        client.get_entity_state = AsyncMock(side_effect=states.get)
+        result = await self.server.execute_function("get_state", {"entity": "chauffage", "home": "charras"})
+        self.assertEqual(
+            result,
+            "Radiateurs en mode Auto, en confort en ce moment à 20 degrés (18,1 en réduit). Plancher en mode Auto. "
+            "Plancher 2 en mode Off (Charras)",
+        )
+
+    def test_the_sensors_say_it_as_its_state_does(self):
+        """« Le chauffage est allumé ? » searched the sensors for « chauffage » 2 times out of 3 (AD-075)."""
+        client = self.charras.ha_client
+        client.setpoints = {"select.radiateurs_mode": "sensor.radiateurs_consigne",
+                            "select.plancher_mode": "sensor.plancher_consigne"}  # fmt: skip
+        states = [
+            sensor_state("select.radiateurs_mode", "Radiateurs — mode", "Auto"),
+            sensor_state("select.plancher_mode", "Plancher — mode", "Off"),
+            {"entity_id": "sensor.radiateurs_consigne", **setpoint("confort")},
+            sensor_state("sensor.plancher_consigne", "Plancher consigne", "unknown"),
+            sensor_state("sensor.radiateurs_temperature_piece", "Radiateurs température pièce", "21.0", "°C"),
+        ]
+        self.assertEqual(
+            client.match_sensors(states, "chauffage"),
+            "Plancher en mode Off\nRadiateurs en mode Auto, en confort en ce moment à 20 degrés (18,1 en réduit)",
+        )
+        self.assertEqual(client.match_sensors(states, "température"), "Radiateurs température pièce: 21.0 °C")
+
+    async def test_a_circuit_finds_its_setpoint_sensor(self):
+        client = self.charras.ha_client
+        states = [
+            sensor_state("select.radiateurs_mode", "Radiateurs — mode", "Auto", options=HEATING_MODES),
+            sensor_state("select.plancher_mode", "Plancher — mode", "Auto", options=HEATING_MODES),
+            sensor_state("sensor.radiateurs_consigne", "Radiateurs consigne", "20.0", circuit="select.radiateurs_mode"),
+            sensor_state("sensor.gone_consigne", "Plancher 3 consigne", "20.6", circuit="select.plancher_3_mode"),
+            sensor_state("sensor.radiateurs_temperature_piece", "Radiateurs température pièce", "21.0", "°C"),
+        ]
+        client._session = MagicMock()
+        response = MagicMock(status=200, json=AsyncMock(return_value=states))
+        client._session.get.return_value.__aenter__.return_value = response
+        client._fetch_areas, client._fetch_entity_areas = AsyncMock(), AsyncMock(return_value={})
+        client._fetch_hidden, client._fetch_screens = AsyncMock(return_value=set()), AsyncMock(return_value=[])
+        await client.refresh_entities()
+        self.assertEqual(client.setpoints, {"select.radiateurs_mode": "sensor.radiateurs_consigne"})
+
+
+def setpoint(phase: str | None) -> dict:
+    """The Radiateurs' setpoint sensor, as home-infra charras/oekofen/ makes it (AD-075)."""
+    return {"state": "20.0", "attributes": {"confort": 20.0, "reduit": 18.1, "phase": phase}}
+
 
 # ---------------------------------------------------------------------------
 # Tests: sensor search (read-only, kept out of the system prompt)
 # ---------------------------------------------------------------------------
 
 
-def sensor_state(entity_id, name, state, unit=None):
-    attrs = {"friendly_name": name}
+def sensor_state(entity_id, name, state, unit=None, **attributes):
+    attrs = {"friendly_name": name, **attributes}
     if unit:
         attrs["unit_of_measurement"] = unit
     return {"entity_id": entity_id, "state": state, "attributes": attrs}

@@ -1255,8 +1255,7 @@ class VoiceAssistantServer:
 
         if function_name == "get_state":
             # Every device resolved: « les volets sont fermés ? » names several, and only the first was read
-            states = await asyncio.gather(*(self.ha_client.get_entity_state(eid) for eid in entity_ids))
-            answers = [self.ha_client.format_state_for_speech(eid, st) for eid, st in zip(entity_ids, states) if st]
+            answers = [a for a in await asyncio.gather(*map(self.ha_client.spoken_state, entity_ids)) if a]
             return ". ".join(answers) if answers else f"Impossible de lire l'état de {entity_name}"
 
         if not (reachable := await self.ha_client.reachable(entity_ids)):

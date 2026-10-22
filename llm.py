@@ -553,9 +553,11 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
                             "type": "string",
                             "enum": list(heating),
                             "description": (
-                                "Auto : selon le programme horaire, pour « allume » ou « active » sans autre "
-                                "précision. Confort : à la température de confort en permanence. Réduit : à la "
-                                "température réduite. Off : arrêté (« éteins », « coupe »)"
+                                # « (horaires inconnus) »: the box does not give them (AD-075)
+                                "Auto : selon le programme horaire de la chaudière (horaires inconnus), pour "
+                                "« allume » ou « active » sans autre précision. Confort : à la température de "
+                                "confort en permanence. Réduit : à la température réduite. Off : arrêté (« éteins », "
+                                "« coupe »)"
                             ),
                         },
                         **elsewhere,
