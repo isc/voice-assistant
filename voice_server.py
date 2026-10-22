@@ -2063,6 +2063,13 @@ class VoiceAssistantServer:
             "Quand on te demande de contrôler un appareil "
             "(même avec un pronom comme 'la' ou 'les'), "
             "utilise TOUJOURS les fonctions disponibles. "
+            # Without it, after « il fait quelle température dans la maison à Charras ? », « il est déjà allumé
+            # hein » got « en mode confort » unread, or « quel appareil ? », 3 times out of 3; and « la porte
+            # d'entrée de Charras est fermée ? » read Paris's lock, « verrouillée », 3 out of 3 (AD-076)
+            "Ne dis jamais l'état d'un appareil sans l'avoir lu avec get_state ou get_sensor. "
+            "Une question qui ne nomme pas l'appareil (« il est déjà allumé ? », « réglé sur combien ? ») "
+            "parle de celui de la conversation, dans la même maison : après une température de la maison, "
+            "c'est le chauffage. "
             "Passe le paramètre room quand la pièce est mentionnée. "
             "Utilise les noms de groupes tels quels "
             "(ex: room='enfants'), ne les décompose pas. "
