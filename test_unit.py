@@ -2315,6 +2315,14 @@ class TestStopMedia(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "Erreur lors du contrôle de Google Home")
         self.assertTrue(_NOTHING_DONE.search(result))  # the page shows it failed
 
+    async def test_stop_everywhere_stops_the_speaker_playing(self):
+        await self.server.execute_function("play_radio", {"station": "france inter", "room": "Sonos"})
+        self.server._last_media_target = None  # not the last speaker used: the one the radio plays on
+        result = await self.server.execute_function("stop_media", {"room": "partout"})
+        self.assertEqual(result, "Lecture arrêtée")
+        self.assertEqual(await self.stops(), (0, ["media_player.sonos_paris"]))
+        self.assertIsNone(self.server.site.radio)
+
 
 class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
     """The Nest Hub showed « Default Media Receiver » and « Live » over the music."""

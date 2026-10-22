@@ -1411,7 +1411,12 @@ class VoiceAssistantServer:
         """
         await self._restore_speakers()  # « monte le son » starts from the speaker's own volume
         room = arguments.get("room")
-        target = self._resolve_media_target(room)
+        if function_name == "stop_media" and is_whole_house(room):
+            # « Stop. » sent as « partout »: what plays here, not the first speaker placed in a room (the
+            # Google Home, France Inter going on on the Sonos, 2026-10-21)
+            target = self._spotify_here or (self.site.radio and self.site.radio[0]) or self._resolve_media_target(None)
+        else:
+            target = self._resolve_media_target(room)
         if not target:
             return _no_speaker(room)
         if refusal := await self._offline_reply(target):
