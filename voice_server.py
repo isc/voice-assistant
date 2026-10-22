@@ -223,10 +223,6 @@ NOTHING_HEARD = "[Rien compris]"
 LLM_FAILED = "[Erreur LLM: pas de réponse]"
 
 
-def _no_speaker(room: Optional[str]) -> str:
-    return f"Aucune enceinte trouvée pour {room}" if room else "Aucune enceinte disponible"
-
-
 def _format_duration(total_seconds: int) -> str:
     """Format seconds into a French human-readable duration."""
     if total_seconds >= 3600:
@@ -1118,6 +1114,18 @@ class VoiceAssistantServer:
         logger.warning(f"Whole house not asked for: {function_name}({arguments}) not run")
         return _WHICH_ROOM
 
+    # The radio and volume tools; and all those whose `room` picks the speaker, music_control's only to resume
+    _MEDIA_TOOLS = {"play_radio", "stop_media", "set_volume", "change_volume"}
+    _SPEAKER_TOOLS = _MEDIA_TOOLS | {"play_music", "move_media"}
+
+    def _unknown_speaker(self, function_name: str, arguments: dict) -> Optional[str]:
+        """The result of a call naming a speaker this home does not have, else None; dry runs get it too."""
+        room = arguments.get("room")
+        resume = function_name == "music_control" and arguments.get("action") == "resume"
+        if not room or is_whole_house(room) or not (function_name in self._SPEAKER_TOOLS or resume):
+            return None
+        return None if self._resolve_media_target(room) else self._no_speaker(room)
+
     async def execute_function(self, function_name: str, arguments: dict, call: Optional[dict] = None) -> str:
         """Execute a function call from the LLM. `call`: its entry in the exchange log, where an unlock
         writes its button (AD-068), a picture its URL (AD-069)."""
@@ -1201,9 +1209,11 @@ class VoiceAssistantServer:
 
         # Media player tools (radio + volume) — default to the current ESP speaker,
         # fall back to HA media_player entities when a room is named.
+        if unknown := self._unknown_speaker(function_name, arguments):
+            return unknown
         if function_name in ("play_music", "music_control"):
             return await self._execute_music_function(function_name, arguments)
-        if function_name in ("play_radio", "stop_media", "set_volume", "change_volume"):
+        if function_name in self._MEDIA_TOOLS:
             return await self._execute_media_function(function_name, arguments)
         if function_name == "move_media":
             return await self._move_media(arguments.get("room"))
@@ -1383,10 +1393,32 @@ class VoiceAssistantServer:
                 return self._last_media_target
 
         # Default: the current ESP, if it has a media_player
+        return self._satellite_speaker()
+
+    def _satellite_speaker(self) -> Optional[tuple[str, str]]:
+        """This site's satellite as a media target, when connected with its media_player."""
         if self.device and self.site.name in self.device_media_keys:
             return ("esp", self.site.name)
-
         return None
+
+    def _no_speaker(self, room: Optional[str]) -> str:
+        """The result when no speaker answers to `room`, naming this home's: the Sonos heard « sous-douce », the
+        model offered « une autre enceinte », naming none, and France Inter took three requests more (2026-10-21)."""
+        if not room:
+            return "Aucune enceinte disponible"
+        speakers = [
+            f"{info['friendly_name']} ({info['area_name']})" if info["area_name"] else info["friendly_name"]
+            for info in (self.ha_client.entities.values() if self.ha_client else ())
+            if info["domain"] == "media_player"
+        ]
+        if satellite := self._satellite_speaker():
+            speakers.append(f"ici ({self._speaker_name(satellite)})")  # « ici » being how a call names it
+        if not speakers:
+            return f"Aucune enceinte trouvée pour {room}"
+        return (
+            f"Aucune enceinte trouvée pour {room}. Enceintes de la maison : {', '.join(speakers)}. "
+            "Le nom a pu être mal entendu : demande si c'est l'une d'elles."
+        )
 
     async def _offline_reply(self, target: tuple[str, str]) -> Optional[str]:
         """The result when the target is an HA speaker HA cannot reach (the satellite, being the one listening,
@@ -1418,7 +1450,7 @@ class VoiceAssistantServer:
         else:
             target = self._resolve_media_target(room)
         if not target:
-            return _no_speaker(room)
+            return self._no_speaker(room)
         if refusal := await self._offline_reply(target):
             return refusal
 
@@ -1495,7 +1527,7 @@ class VoiceAssistantServer:
             target = self._spotify_here if action == "resume" and not room else None
             target = target or self._resolve_media_target(room)
             if not target:
-                return _no_speaker(room)
+                return self._no_speaker(room)
             if refusal := await self._offline_reply(target):
                 return refusal
             found = None
@@ -1563,9 +1595,10 @@ class VoiceAssistantServer:
         music_control resume did it for Spotify alone: asked to move France Inter from the Google Home to
         the Sonos, it started Spotify's last queue on the Sonos, France Inter going on (2026-10-14)."""
         await self._restore_speakers()
-        target = self._resolve_media_target(room) if room else None
-        if not target:
-            return _no_speaker(room) if room else "Rien n'a été fait : la demande ne dit pas vers quelle enceinte"
+        if not room:
+            return "Rien n'a été fait : la demande ne dit pas vers quelle enceinte"
+        if not (target := self._resolve_media_target(room)):
+            return self._no_speaker(room)
         if refusal := await self._offline_reply(target):
             return refusal
         name = self._speaker_name(target)
@@ -1914,7 +1947,11 @@ class VoiceAssistantServer:
                     return tc_entry, tc_entry["result"]
                 if dry_run:
                     logger.info(f"Dry run: {function_name}({function_args})")
-                    tc_entry["result"] = self._unasked_sweep(function_name, function_args) or "OK"
+                    tc_entry["result"] = (
+                        self._unasked_sweep(function_name, function_args)
+                        or self._unknown_speaker(function_name, function_args)
+                        or "OK"
+                    )
                     return tc_entry, tc_entry["result"]
                 result = await self._run_call(tc_entry)
                 if "error" not in tc_entry:

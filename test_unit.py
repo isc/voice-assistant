@@ -2110,6 +2110,15 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
             await self.ask(dry_run=True, text=text)
             self.assertIn(result, self.server._last_tool_calls[0]["result"])
 
+    async def test_a_speaker_the_home_lacks_too(self):
+        """« la Sonos » heard « la sous-douce » (2026-10-21): replayed, the model must be told what it was told."""
+        self.server.ha_client = make_client()
+        radio = {"name": "play_radio", "arguments": '{"station": "fip", "room": "sous-douce"}'}
+        self.replies[0]["tool_calls"][0]["function"] = radio
+        self.server.new_request()
+        await self.ask(dry_run=True, text="Mets FIP sur la sous-douce")
+        self.assertEqual(self.server._last_tool_calls[0]["result"], "Aucune enceinte trouvée pour sous-douce")
+
     async def test_a_wake_word_has_the_request_s_prompt_read(self):
         """2026-10-20 at 7:36, Ollama had let gemma go for ddmr's OCR: 11.9 s before the first call returned
         (AD-073)."""
@@ -2231,6 +2240,12 @@ class SpotifySpeakers:
         stream = MagicMock(listeners=set(), wait_for_join=AsyncMock(return_value=True))
         self.server.spotify = MagicMock(stream=stream, now_metadata=AsyncMock(return_value={"title": "Get Lucky"}))
 
+    def add_speakers(self):
+        """The Sonos, in no room, and the Google Home of the living room."""
+        for (_, eid), name, area in ((self.SONOS, "Sonos", ""), (self.GOOGLE_HOME, "Google Home", "Living Room")):
+            info = {"friendly_name": name, "domain": "media_player", "area_name": area, "attributes": {}}
+            self.server.ha_client.entities[eid] = info
+
     async def stops(self):
         await asyncio.gather(*self.server._pending_service_calls)
         satellite = [c for c in self.satellite.media_player_command.call_args_list if "command" in c.kwargs]
@@ -2300,11 +2315,8 @@ class TestStopMedia(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         super().setUp()
-        ha = self.server.ha_client
-        speakers = (("media_player.sonos_paris", "Sonos", ""), ("media_player.google_home", "Google Home", "Living Room"))
-        for eid, name, area in speakers:
-            ha.entities[eid] = {"friendly_name": name, "domain": "media_player", "area_name": area, "attributes": {}}
-        ha.reachable = AsyncMock(side_effect=lambda ids: ids)
+        self.add_speakers()
+        self.server.ha_client.reachable = AsyncMock(side_effect=lambda ids: ids)
         self.server.new_request()
 
     async def test_a_stop_ha_refuses_is_not_said_done(self):
@@ -2322,6 +2334,39 @@ class TestStopMedia(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "Lecture arrêtée")
         self.assertEqual(await self.stops(), (0, ["media_player.sonos_paris"]))
         self.assertIsNone(self.server.site.radio)
+
+
+class TestUnknownSpeaker(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """Paris, 2026-10-21: « la Sonos » heard « la sous-douce »; the result named no speaker, the model offered
+    « une autre enceinte », and the answer, heard « Luís Sunus », was not understood. France Inter came at the
+    fourth request."""
+
+    def setUp(self):
+        super().setUp()
+        self.add_speakers()
+        self.server.new_request()
+
+    async def test_the_result_names_the_home_s_speakers(self):
+        from voice_server import _NOTHING_DONE
+
+        result = await self.server.execute_function("play_radio", {"station": "france inter", "room": "sous-douce"})
+        self.assertTrue(result.startswith("Aucune enceinte trouvée pour sous-douce. "), result)
+        self.assertIn(": Sonos, Google Home (Living Room), ici (l'enceinte de l'appareil vocal).", result)
+        self.assertTrue(_NOTHING_DONE.search(result))  # the page shows it failed
+        self.server.ha_client.call_service.assert_not_called()
+        self.satellite.media_player_command.assert_not_called()
+
+    def test_only_a_speaker_named_is_checked(self):
+        for function, args, fails in (
+            ("play_radio", {"station": "fip", "room": "sous-douce"}, True),
+            ("music_control", {"action": "resume", "room": "sous-douce"}, True),
+            ("play_radio", {"station": "fip", "room": "Sonos"}, False),
+            ("play_radio", {"station": "fip"}, False),
+            ("set_volume", {"level": 30, "room": "ici"}, False),
+            ("stop_media", {"room": "partout"}, False),  # what plays, wherever
+            ("music_control", {"action": "pause", "room": "sous-douce"}, False),  # Spotify's one queue
+        ):
+            self.assertEqual(self.server._unknown_speaker(function, args) is not None, fails, (function, args))
 
 
 class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
