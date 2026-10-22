@@ -2294,6 +2294,28 @@ class TestMoveMedia(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.stops(), (0, []))
 
 
+class TestStopMedia(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """Paris, 2026-10-21: « Stop. », France Inter on the Sonos, stopped the Google Home, which HA refused
+    (500), and the reply said « C'est fait, j'ai arrêté la lecture »."""
+
+    def setUp(self):
+        super().setUp()
+        ha = self.server.ha_client
+        speakers = (("media_player.sonos_paris", "Sonos", ""), ("media_player.google_home", "Google Home", "Living Room"))
+        for eid, name, area in speakers:
+            ha.entities[eid] = {"friendly_name": name, "domain": "media_player", "area_name": area, "attributes": {}}
+        ha.reachable = AsyncMock(side_effect=lambda ids: ids)
+        self.server.new_request()
+
+    async def test_a_stop_ha_refuses_is_not_said_done(self):
+        from voice_server import _NOTHING_DONE
+
+        self.server.ha_client.call_service.return_value = "Erreur lors du contrôle de Google Home"
+        result = await self.server.execute_function("stop_media", {"room": "Google Home"})
+        self.assertEqual(result, "Erreur lors du contrôle de Google Home")
+        self.assertTrue(_NOTHING_DONE.search(result))  # the page shows it failed
+
+
 class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
     """The Nest Hub showed « Default Media Receiver » and « Live » over the music."""
 

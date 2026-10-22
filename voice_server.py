@@ -1436,7 +1436,9 @@ class VoiceAssistantServer:
             return f"{display_name} en cours de lecture"
 
         if function_name == "stop_media":
-            await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop")
+            result = await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop")
+            if result and _NOTHING_DONE.search(result):
+                return result  # HA refused: not « Lecture arrêtée », the music going on
             if self.site.radio and self.site.radio[0] == target:
                 self.site.radio = None
             return "Lecture arrêtée"
@@ -1666,8 +1668,9 @@ class VoiceAssistantServer:
 
     async def _media_command(
         self, target: tuple[str, str], command: MediaPlayerCommand, ha_service: str, site: Optional[Site] = None
-    ) -> None:
-        """Send a media control command (STOP, VOLUME_UP...) to a target of the active site, or of `site`."""
+    ) -> Optional[str]:
+        """Send a media control command (STOP, VOLUME_UP...) to a target of the active site, or of `site`.
+        HA's result for an HA speaker, None for the satellite."""
         kind, ident = target
         if kind == "esp":
             api = self.devices.get(ident)
@@ -1675,10 +1678,11 @@ class VoiceAssistantServer:
             if api and key is not None:
                 logger.info(f"ESP media_player_command: {command.name} on {ident} (key={key})")
                 api.media_player_command(key, command=command)
-            return
+            return None
         ha_client = (site or self.site).ha_client
         if ha_client:
-            await ha_client.call_service("media_player", ha_service, ident)
+            return await ha_client.call_service("media_player", ha_service, ident)
+        return None
 
     async def _media_set_volume(self, target: tuple[str, str], level: int) -> None:
         """Set absolute volume (0-100) on the target speaker."""
