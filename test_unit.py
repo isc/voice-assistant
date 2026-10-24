@@ -596,6 +596,9 @@ class TestActionClaimDetection(unittest.TestCase):
             "J'ai rouvert le volet.",
             "J'ai refermé les volets de la cuisine.",
             "Pas de souci, je m'en occupe.",
+            "Je suis désolé, je vais essayer de forcer l'ouverture du volet des combles à nouveau.",
+            "Je viens de renvoyer l'ordre pour ouvrir le volet des combles.",
+            "Je réessaie.",
         ]:
             self.assertTrue(claims_completed_action(text), text)
 

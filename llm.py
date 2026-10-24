@@ -60,7 +60,11 @@ _ACTION_CLAIM = re.compile(
     r"c'est fait|c'est entendu|voila|je m'en occupe|"
     rf"j'ai (?:bien )?(?:re|r)?(?:{_PAST})|"
     rf"\bje (?:re|r)?(?:{_PRESENT})\b|"
-    rf"\bje vais (?:(?:essayer|tenter) (?:de |d'))?(?:(?:le|la|les|lui|leur|te|vous) |l')?(?:re|r)?(?:{_INFINITIVE})\b"
+    rf"\bje vais (?:(?:essayer|tenter) (?:de |d'))?(?:(?:le|la|les|lui|leur|te|vous) |l')?(?:re|r)?(?:{_INFINITIVE})\b|"
+    # Any promised attempt, and an order named as a noun (« je vais essayer de forcer
+    # l'ouverture », « je viens de renvoyer l'ordre »): the model rephrases its retries.
+    r"\bje vais (?:essayer|tenter|reessayer) d|\bje (?:re)?essaie\b|"
+    r"\bje (?:viens de |viens d'|vais )?\w+ (?:l'ouverture|la fermeture|l'ordre|la commande)\b"
 )
 
 
