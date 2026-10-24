@@ -578,8 +578,35 @@ class TestActionClaimDetection(unittest.TestCase):
             "J'ai éteint les lumières.",
             "J'ai éteint les lumières. Autre chose ?",
             "J'ai verrouillé la porte d'entrée.",
+            "C’est fait.",
         ]:
             self.assertTrue(claims_completed_action(text), text)
+
+    def test_claims_retries_and_promises(self):
+        """2026-10-24: « il ne se rouvre pas » got « je vais essayer de le rouvrir », and no call (AD-078)."""
+        for text in [
+            "Je suis désolé, je vais essayer de le rouvrir à nouveau pour toi.",
+            "Je vais le rouvrir.",
+            "Je vais tenter d'ouvrir le volet des combles.",
+            "Je vais l'ouvrir tout de suite.",
+            "Je vais rallumer la lumière du salon.",
+            "Je rouvre le volet.",
+            "Je relance l'ouverture du volet des combles.",
+            "Je referme la fenêtre.",
+            "J'ai rouvert le volet.",
+            "J'ai refermé les volets de la cuisine.",
+            "Pas de souci, je m'en occupe.",
+        ]:
+            self.assertTrue(claims_completed_action(text), text)
+
+    def test_does_not_flag_refusals_or_forecasts(self):
+        for text in [
+            "Je ne vais pas ouvrir la fenêtre, il pleut.",
+            "Le volet va se rouvrir dans quelques secondes.",
+            "Je vais vérifier l'état du volet.",
+            "Veux-tu que je le rouvre ?",
+        ]:
+            self.assertFalse(claims_completed_action(text), text)
 
     def test_does_not_flag_state_reports(self):
         """Reading a state out loud is not claiming to have changed it."""

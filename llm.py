@@ -47,13 +47,20 @@ _TOOL_NAMES = {
 }
 
 
-# Claims of having carried something out, matched on accent-stripped lowercase.
-# Deliberately about *actions performed*: a state report ("le volet est fermé")
-# must not match.
+# Claims of having carried something out, or of being about to, matched on
+# accent-stripped lowercase. Deliberately about *actions*: a state report ("le
+# volet est fermé") must not match. Every verb also takes its re- form (« je
+# rouvre », « j'ai refermé », « je relance »), and a promise counts (« je vais
+# essayer de le rouvrir »): a retry after « ça n'a pas marché » is where the
+# model answered with no call at all (AD-078).
+_PAST = "ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill"
+_PRESENT = "ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille"
+_INFINITIVE = "ouvrir|fermer|allumer|eteindre|regler|lancer|programmer|mettre|baisser|monter|verrouiller|activer|desactiver"
 _ACTION_CLAIM = re.compile(
-    r"c'est fait|c'est entendu|voila|"
-    r"j'ai (?:bien )?(?:ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill)|"
-    r"\bje (?:ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille)\b"
+    r"c'est fait|c'est entendu|voila|je m'en occupe|"
+    rf"j'ai (?:bien )?(?:re|r)?(?:{_PAST})|"
+    rf"\bje (?:re|r)?(?:{_PRESENT})\b|"
+    rf"\bje vais (?:(?:essayer|tenter) (?:de |d'))?(?:(?:le|la|les|lui|leur|te|vous) |l')?(?:re|r)?(?:{_INFINITIVE})\b"
 )
 
 
@@ -65,7 +72,7 @@ def claims_completed_action(text: str) -> bool:
     out: « souhaitez-vous que je lance de la musique ? » offers an action, and
     challenging it once pushed the model into playing music nobody asked for.
     """
-    flat = fold(text or "")
+    flat = fold(text or "").replace("’", "'")
     return bool(_ACTION_CLAIM.search(re.sub(r"[^.!?]*\?", "", flat)))
 
 

@@ -1942,10 +1942,10 @@ class VoiceAssistantServer:
                         {
                             "role": "system",
                             "content": (
-                                "Tu viens d'affirmer avoir effectué une action alors que tu n'as "
+                                "Tu viens d'annoncer une action, faite ou à faire, alors que tu n'as "
                                 "appelé AUCUNE fonction : rien n'a été fait. Appelle maintenant les "
                                 "fonctions nécessaires. Si la demande n'exige aucune action, réponds "
-                                "sans prétendre avoir agi."
+                                "sans prétendre agir."
                             ),
                         }
                     )
