@@ -157,6 +157,11 @@ async def _send(ws: web.WebSocketResponse, message: dict) -> None:
             pass
 
 
+def _page_path(audio_url: str) -> str:
+    """Where the page fetches a reply's audio: relative, the app lives at / and at /assistant/."""
+    return "tts/" + audio_url.rsplit("/", 1)[-1]
+
+
 async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[bytes, bool]]:
     """Take the app's audio until speech ends, the page says the user is done (« end »), or time is up, with
     the satellite's limits. Once the page says « hold » (the mic button held down), only « end » (released)
@@ -419,7 +424,8 @@ def setup_routes(app, server):
     async def handle_listen(request):
         """The app as a satellite (AD-059): its microphone, 16 kHz 16-bit mono in binary messages,
         heard by the satellite's VAD; the reply is the phone's to play. To the page, in order:
-        speech (someone speaks), heard (stop sending), transcript, then reply or error. From the page,
+        speech (someone speaks), heard (stop sending), transcript, wait (« Un petit instant. », if the reply takes
+        long, AD-079), then reply or error. From the page,
         « end » when the user is done speaking, « hold » while the button is held; closing drops the request.
 
         ?site=… as for a typed request; ?client=… the browser's id (AD-060); ?follow_up=1 for the listening
@@ -438,13 +444,13 @@ def setup_routes(app, server):
                 *heard,
                 follow_up,
                 lambda transcript: _send(ws, {"type": "transcript", "text": transcript}),
+                lambda audio_url: _send(ws, {"type": "wait", "audio": _page_path(audio_url)}),
             )
         except Exception:
             logger.exception("App request failed")
             reply = {"response": None}
         if reply and reply["response"]:
-            # Where the page fetches it: relative, the app lives at / and at /assistant/
-            await _send(ws, {"type": "reply", **reply, "audio": "tts/" + reply["tts_url"].rsplit("/", 1)[-1]})
+            await _send(ws, {"type": "reply", **reply, "audio": _page_path(reply["tts_url"])})
         elif reply:
             await _send(ws, {"type": "error"})
         await ws.close()

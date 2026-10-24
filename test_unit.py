@@ -136,6 +136,7 @@ def make_server(env=None):
     server.devices = {}
     server.device_media_keys = {}
     server.device_media_states = {}
+    server._wait_phrases = {}
     server._followup_by = {}
     server.is_recording = False
     server._pipeline_running = False
@@ -2170,6 +2171,63 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         await server.text_to_speech(api, "Une phrase.")
         api.send_voice_assistant_announcement_await_response.assert_awaited_once()
 
+    async def test_wait_phrase_only_when_the_llm_takes_long(self):
+        """« Un petit instant. » past the delay; nothing for a quick reply, nor once it is there (AD-079)."""
+        server = self.server
+        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/wait.flac")
+        play = AsyncMock()
+        with patch("voice_server._WAIT_PHRASE_AFTER", 0.05):
+            async with server._wait_phrase(play):
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)  # past the delay: cancelled with the reply
+            play.assert_not_awaited()
+            async with server._wait_phrase(play):
+                await asyncio.sleep(0.1)
+        play.assert_awaited_once_with("http://x/tts/wait.flac")
+        server.text_to_speech_file.assert_awaited_once_with("Un petit instant.")
+        async with server._wait_phrase(None):  # a typed request
+            pass
+
+    async def test_wait_phrase_on_the_satellite_keeps_its_run(self):
+        """Through its player: an announcement would end the run, the satellite idle until the reply (AD-079).
+        The reply waits for the phrase's end, told by the player, which its queue's STOP would cut."""
+        from aioesphomeapi import MediaPlayerState
+
+        server = self.server
+        server.new_request()
+        server.device_media_keys["paris"] = 7
+        server._audio_seconds = MagicMock(return_value=1)
+        server._end_conversation = server._no_followup = False
+        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        api = MagicMock()
+        await server._say_wait_phrase(api, "http://x/tts/wait.flac")
+        api.media_player_command.assert_called_once_with(7, media_url="http://x/tts/wait.flac", announcement=True)
+        api.send_voice_assistant_announcement_await_response.assert_not_called()
+        api.send_voice_assistant_event.assert_not_called()  # still thinking
+        server._announce = AsyncMock()
+        reply = asyncio.create_task(server.text_to_speech(api, "C'est fait."))
+        await asyncio.sleep(0.05)
+        self.media_state(MediaPlayerState.IDLE)  # not yet announced: not its end
+        self.media_state(MediaPlayerState.ANNOUNCING)
+        await asyncio.sleep(0.05)
+        server._announce.assert_not_awaited()
+        self.media_state(MediaPlayerState.IDLE)
+        await asyncio.wait_for(reply, 1)  # well before its 4 s at the latest
+        server._announce.assert_awaited_once()
+        self.assertEqual(server._wait_phrases, {})
+
+    async def test_a_wait_phrase_never_announced_holds_the_reply_so_long(self):
+        server = self.server
+        server.new_request()
+        server.device_media_keys["paris"] = 7
+        server._audio_seconds = MagicMock(return_value=-2.9)  # at the latest 0.1 s from now
+        server._end_conversation = server._no_followup = False
+        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        server._announce = AsyncMock()
+        await server._say_wait_phrase(MagicMock(), "http://x/tts/wait.flac")
+        await asyncio.wait_for(server.text_to_speech(MagicMock(), "C'est fait."), 1)
+        server._announce.assert_awaited_once()
+
     async def test_announcement_timeout_is_caught(self):
         from aioesphomeapi.core import TimeoutAPIError
 
@@ -3203,6 +3261,25 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         self.server.stt.transcribe.assert_awaited_once_with(bytes(3 * 2048))
         with wave.open(str(self.server.recordings.path(entry["audio"]))) as recording:
             self.assertEqual(recording.getnframes(), 3 * 1024)
+
+    async def test_a_slow_reply_says_wait_first(self):
+        """« Un petit instant. » for the page to play while the LLM works on (AD-079)."""
+        reply = self.server.process_with_llm
+
+        async def slow(*args, **kwargs):
+            await asyncio.sleep(0.1)
+            return await reply(*args, **kwargs)
+
+        self.server.process_with_llm = slow
+        client = await self.client()
+        with patch("web_ui.SpeechEnd", FakeSpeech), patch("voice_server._WAIT_PHRASE_AFTER", 0.05):
+            ws = await client.ws_connect("/api/listen")
+            for _ in range(3):
+                await ws.send_bytes(bytes(2048))
+            messages = [await ws.receive_json() for _ in range(5)]
+        self.assertEqual([m["type"] for m in messages], ["speech", "heard", "transcript", "wait", "reply"])
+        self.assertEqual(messages[3]["audio"], "tts/reply_1.flac")
+        self.server.text_to_speech_file.assert_any_await("Un petit instant.")
 
     async def test_held_the_end_of_speech_waits_for_the_release(self):
         """A pause, then a child's question: held, it is the release that ends the request (AD-062)."""

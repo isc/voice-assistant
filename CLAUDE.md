@@ -60,6 +60,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 5. If tool_calls → execute each, loop back to LLM with results + tools (up to 3 rounds) until text response
 6. If text response → check the fallback parser for a tool call written as text (`fn({...})`)
 7. Final LLM round formulates natural spoken response from tool results
+   - Steps 4-7 past 5 s: « Un petit instant. » meanwhile, by the satellite's media player, which keeps the run open, or the app's `wait` message (AD-079)
 8. TTS: Kokoro generates FLAC (ffmpeg), played via announcement API with `start_conversation=True`
 9. ESP automatically starts listening for follow-up (no wake word needed)
 10. If no speech within 5s → conversation ends. If `end_conversation` tool was called → no follow-up.

@@ -5,6 +5,7 @@ Replaces Home Assistant for the voice pipeline
 """
 
 import asyncio
+import contextlib
 import datetime
 import locale
 import logging
@@ -69,6 +70,10 @@ _GPU_RETRY_SECONDS = 60
 _HISTORY_RESULT_CHARS = 300
 # While a request is heard, the HA speakers playing are turned down to this share of their volume
 _DUCKED_SHARE = 0.2
+# A spoken request the LLM still answers after this long hears « Un petit instant. » (AD-079): 6 % of the
+# 157 recorded by 2026-10-24, the slowest up to 15 s (the model loaded again)
+_WAIT_PHRASE_AFTER = 5
+_WAIT_PHRASE = "Un petit instant."  # « Un instant. » alone, Kokoro's came out « Un estompe » to Whisper
 
 
 # French web radio streams. All MP3: the Voice PE does not decode AAC.
@@ -293,6 +298,16 @@ class _Request:
 
 
 @dataclass
+class _WaitPhrase:
+    """« Un petit instant. » sent to a satellite's player (AD-079): over once the player has announced it, then
+    stopped, as ESPHome's voice assistant itself tells an announcement's end."""
+
+    until: float  # at the latest, should the player never say: its length, fetched through a relay first
+    announced: bool = False
+    over: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass
 class _UnlockOffer:
     """A door the model proposed to unlock, waiting for a tap on the web app's button (AD-068)."""
 
@@ -384,6 +399,8 @@ class VoiceAssistantServer:
         self.device_media_keys: Dict[str, int] = {}
         # Site name -> what its satellite's own player does (announcements left out)
         self.device_media_states: Dict[str, MediaPlayerState] = {}
+        # Site name -> « Un petit instant. » on its satellite, until its reply (AD-079)
+        self._wait_phrases: Dict[str, _WaitPhrase] = {}
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
@@ -699,9 +716,14 @@ class VoiceAssistantServer:
 
     def _on_satellite_state(self, site: Site, state) -> None:
         if isinstance(state, MediaPlayerEntityState) and state.key == self.device_media_keys.get(site.name):
+            announcing = state.state == MediaPlayerState.ANNOUNCING
             # An announcement plays over the media, which resumes after it
-            if state.state != MediaPlayerState.ANNOUNCING:
+            if not announcing:
                 self.device_media_states[site.name] = state.state
+            if phrase := self._wait_phrases.get(site.name):
+                phrase.announced |= announcing
+                if phrase.announced and not announcing:
+                    phrase.over.set()
 
     def _satellite_plays(self, site: Optional[Site] = None) -> bool:
         """Whether this site's (or `site`'s) satellite plays music or a radio itself."""
@@ -925,6 +947,13 @@ class VoiceAssistantServer:
         if follow_up:
             self._followup_by[api] = time.time() + 3
 
+    async def _say_wait_phrase(self, api: APIClient, audio_url: str) -> None:
+        """« Un petit instant. » on the satellite, through its player: an announcement would end the request's run
+        there (ESPHome's `on_announce`), the satellite then idle, a wake word heard, until the reply."""
+        if (key := self.device_media_keys.get(self.site.name)) is not None:
+            self._wait_phrases[self.site.name] = _WaitPhrase(time.time() + self._audio_seconds(audio_url) + 3)
+            api.media_player_command(key, media_url=audio_url, announcement=True)
+
     def _audio_seconds(self, audio_url: str) -> float:
         from tts import flac_seconds
 
@@ -1009,9 +1038,10 @@ class VoiceAssistantServer:
             )
             logger.info(f'STT_END sent: "{transcript}"')
 
-            # 2. LLM
+            # 2. LLM, « Un petit instant. » if it takes long
             t0 = time.time()
-            response_text = await self.process_with_llm(api, transcript)
+            async with self._wait_phrase(partial(self._say_wait_phrase, api)):
+                response_text = await self.process_with_llm(api, transcript)
             timings["llm"] = round(time.time() - t0, 2)
             # Capture conversation_id now — TTS triggers ESP follow-up which overwrites it
             entry.update(
@@ -2206,6 +2236,27 @@ class VoiceAssistantServer:
         messages = [*self._prompt_head(self.conversation), {"role": "user", "content": "…"}]
         self._in_background(warm_up(LLM_URL, LLM_MODEL, messages, self._tools()), drained=False)
 
+    @contextlib.asynccontextmanager
+    async def _wait_phrase(self, play: Optional[Callable[[str], Awaitable]]):
+        """A spoken request's LLM stage: still running after _WAIT_PHRASE_AFTER s, `play` gets the URL of
+        « Un petit instant. » (AD-079). The thinking light, or the phone's orb, says nothing to someone who looks
+        away."""
+
+        async def later():
+            await asyncio.sleep(_WAIT_PHRASE_AFTER)
+            logger.info(f"LLM still busy after {_WAIT_PHRASE_AFTER} s: {_WAIT_PHRASE!r}")
+            try:
+                await play(await self.text_to_speech_file(_WAIT_PHRASE))
+            except Exception as e:
+                logger.warning(f"Waiting phrase failed: {e}")
+
+        task = asyncio.create_task(later()) if play else None
+        try:
+            yield
+        finally:
+            if task:
+                task.cancel()
+
     # === WEB APP ===
 
     async def answer(
@@ -2215,12 +2266,15 @@ class VoiceAssistantServer:
         timings: dict,
         speak: bool,
         audio: Optional[str] = None,
+        on_wait: Optional[Callable[[str], Awaitable]] = None,
     ) -> dict:
         """Answer a request of the web app, typed or heard by the phone (AD-059): the LLM, then, if it is to be
         spoken, the reply's audio; logged with the browser it came from, whose page shows it (AD-060). Returns
-        the reply, whose `response` is None when the LLM gave none."""
+        the reply, whose `response` is None when the LLM gave none. `on_wait` gets « Un petit instant. » if the LLM
+        takes long (AD-079)."""
         t0 = time.time()
-        response_text = await self.process_with_llm(None, text)
+        async with self._wait_phrase(on_wait):
+            response_text = await self.process_with_llm(None, text)
         timings["llm"] = round(time.time() - t0, 2)
         tts_url = None
         if response_text and speak:
@@ -2361,9 +2415,11 @@ class VoiceAssistantServer:
         heard: bool,
         follow_up: bool,
         on_transcript: Callable[[str], Awaitable],
+        on_wait: Callable[[str], Awaitable],
     ) -> Optional[dict]:
         """Answer a request the phone heard (AD-059): recorded, transcribed unless the VAD heard no speech
-        (AD-036), told to `on_transcript`, answered. None when nothing was said; errors are logged and raised."""
+        (AD-036), told to `on_transcript`, answered, « Un petit instant. » given to `on_wait` if that takes long
+        (AD-079). None when nothing was said; errors are logged and raised."""
         timings = {}
         # What became of the request, beside its recording, as for the satellite's
         entry = {"site": self.site.name, "source": "app", "follow_up": follow_up, "vad_speech": heard}
@@ -2374,7 +2430,9 @@ class VoiceAssistantServer:
             timings["stt"] = round(time.time() - t0, 2)
             await on_transcript(entry["transcript"])
             if entry["transcript"]:
-                reply = await self.answer(entry["transcript"], "app", timings, speak=True, audio=entry["audio"])
+                reply = await self.answer(
+                    entry["transcript"], "app", timings, speak=True, audio=entry["audio"], on_wait=on_wait
+                )
                 entry.update(response=reply["response"], tool_calls=reply["tool_calls"])
                 return reply
             if heard or not follow_up:  # a follow-up nobody spoke in is how conversations end
@@ -2434,6 +2492,12 @@ class VoiceAssistantServer:
             t0 = time.time()
             url = await self.text_to_speech_file(text)
             gen_time = time.time() - t0
+
+            # « Un petit instant. » heard to its end: the queue's STOP below would cut it
+            if phrase := self._wait_phrases.get(self.site.name):
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(phrase.over.wait(), phrase.until - time.time())
+                self._wait_phrases.pop(self.site.name, None)
 
             # End pipeline before playing announcements
             api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})

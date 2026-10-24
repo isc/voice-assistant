@@ -895,7 +895,7 @@ async function startVoice(followUp = false) {
     setTimeout(() => orb.classList.remove('nudge'), 3000);
     return;
   }
-  const session = voice.session = {followUp, closeMic: null, pending: null, player: null, analyser: null, held: false, early: []};
+  const session = voice.session = {followUp, closeMic: null, pending: null, player: null, analyser: null, held: false, early: [], waiting: null};
   setVoice('starting');
   if (press) press.session = session;
   if (press?.held) hold(session);  // held before the socket was there
@@ -967,6 +967,11 @@ async function onVoiceMessage(session, msg) {
       endVoice(session);
       if (!session.followUp) toast("Je n'ai rien entendu");
     }
+  } else if (msg.type === 'wait') {
+    // « Un petit instant. »: the reply takes long (AD-079)
+    if (dock.dataset.voice === 'thinking' && !document.hidden) {
+      session.waiting = speak(session, fetch(msg.audio).then((r) => r.arrayBuffer()));
+    }
   } else if (msg.type === 'reply') {
     session.ws.onclose = null;  // the server closes it now, the session goes on
     learn(msg.tool_calls);
@@ -975,6 +980,8 @@ async function onVoiceMessage(session, msg) {
     settle(session.pending);
     session.pending = null;
     if (audio) {
+      await session.waiting;  // « Un petit instant. » to its end
+      if (voice.session !== session) return;
       setVoice('speaking');
       await speak(session, audio);
     }
