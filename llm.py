@@ -857,11 +857,15 @@ async def chat_completion(
                     finish_reason = choice.get("finish_reason")
                     usage = result.get("usage") or {}
                     called = [tc["function"]["name"] for tc in choice["message"].get("tool_calls") or []]
+                    # Where a reply's tokens went when its text is empty: Ollama returns hidden thinking as
+                    # `reasoning`, other servers as `reasoning_content` (2026-10-24: 3 × empty, 67 s, AD-080)
+                    reasoning = choice["message"].get("reasoning") or choice["message"].get("reasoning_content") or ""
                     # One line per round: the raw response, indented, took ~30 journal lines each
                     logger.info(
                         f"LLM: {finish_reason}, prompt {usage.get('prompt_tokens')} + completion "
                         f"{usage.get('completion_tokens')} tokens, calls {called}, "
                         f"text {(choice['message'].get('content') or '')[:120]!r}"
+                        + (f", reasoning {len(reasoning)} chars {reasoning[:200]!r}" if reasoning else "")
                     )
 
                     # A completion stopped well short of its budget hit the context, not the budget:
