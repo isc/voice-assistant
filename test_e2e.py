@@ -9,16 +9,18 @@ Requires the server to be running (./ctl.sh start).
 
 Usage:
     python test_e2e.py              # run all tests
+    VOICE_SERVER=http://localhost:8889 python test_e2e.py   # another server, e.g. a model on trial
     python test_e2e.py -k weather   # run tests matching "weather"
     python test_e2e.py -v           # verbose output
 """
 
 import argparse
 import json
+import os
 import sys
 import urllib.request
 
-SERVER = "http://localhost:8888"
+SERVER = os.environ.get("VOICE_SERVER", "http://localhost:8888")
 
 
 def post(path: str, body: dict, timeout: float) -> dict:
@@ -31,7 +33,8 @@ def post(path: str, body: dict, timeout: float) -> dict:
 
 def send(text: str) -> dict:
     """Send a text command via dry-run (no HA execution)."""
-    return post("/api/dry-run", {"text": text}, 30)
+    # A loose outer guard: the server gives each LLM call 60 s, and a model on trial may need them
+    return post("/api/dry-run", {"text": text}, 120)
 
 
 def reset():
