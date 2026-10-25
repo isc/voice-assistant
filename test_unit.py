@@ -30,6 +30,7 @@ from opening_hours import ParserError
 
 from ha_client import HAClient, asks_whole_house, cover_kind, normalize, without_home
 from images import Picture, is_about
+import llm
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
 from recordings import Recordings
@@ -2249,6 +2250,71 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         await self.server._handle_timer_event(self.paris, updated, timer)
         paris_esp.send_voice_assistant_timer_event.assert_called_once()
         charras_esp.send_voice_assistant_timer_event.assert_not_called()
+
+
+class _FakeLLM:
+    """An OpenAI-compatible server answering chat_completion's requests from a list, recording each payload."""
+
+    def __init__(self, replies):
+        self.replies, self.payloads = list(replies), []
+
+    def __call__(self, *args, **kwargs):  # stands for aiohttp.ClientSession()
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def post(self, url, json, **kwargs):
+        self.payloads.append(dict(json))
+        finish, tokens, content, calls = self.replies.pop(0)
+        message = {"role": "assistant", "content": content}
+        if calls:
+            message["tool_calls"] = [{"id": "c1", "function": {"name": n, "arguments": "{}"}} for n in calls]
+        body = {"choices": [{"finish_reason": finish, "message": message}], "usage": {"completion_tokens": tokens}}
+        response = MagicMock(status=200)
+        response.json = AsyncMock(return_value=body)
+        response.__aenter__ = AsyncMock(return_value=response)
+        response.__aexit__ = AsyncMock(return_value=False)
+        return response
+
+
+class TestLengthRetry(unittest.IsolatedAsyncioTestCase):
+    """gemma4 hits its budget by looping past its answer, not by reasoning (AD-080)."""
+
+    async def complete(self, *replies):
+        self.llm = _FakeLLM(replies)
+        with patch("llm.aiohttp.ClientSession", self.llm):
+            return await llm.chat_completion("http://llm", "", "gemma", [{"role": "user", "content": "Merci."}])
+
+    async def test_nothing_said_samples_again_warmer_at_the_same_budget(self):
+        """2026-10-24: 500, 1000, 2000 tokens of nothing, 67 s, an empty reply."""
+        message = await self.complete(("length", 200, "", []), ("stop", 20, "Avec plaisir !", ["end_conversation"]))
+        self.assertEqual(message["content"], "Avec plaisir !")
+        self.assertEqual([p["max_tokens"] for p in self.llm.payloads], [200, 200])
+        self.assertEqual([p["temperature"] for p in self.llm.payloads], [0.3, 0.7])
+
+    async def test_a_few_words_then_a_loop_are_kept(self):
+        message = await self.complete(("length", 200, "Bonne nuit, faites de beaux rêves. \n", []))
+        self.assertEqual(message["content"], "Bonne nuit, faites de beaux rêves.")
+        self.assertEqual(len(self.llm.payloads), 1)
+
+    async def test_a_call_then_a_loop_is_kept(self):
+        message = await self.complete(("length", 200, "", ["end_conversation"]))
+        self.assertEqual(message["tool_calls"][0]["function"]["name"], "end_conversation")
+        self.assertEqual(len(self.llm.payloads), 1)
+
+    async def test_a_long_answer_cut_short_gets_more_room(self):
+        message = await self.complete(("length", 200, "mot " * 200, []), ("stop", 300, "Une longue histoire.", []))
+        self.assertEqual(message["content"], "Une longue histoire.")
+        self.assertEqual([p["max_tokens"] for p in self.llm.payloads], [200, 400])
+
+    async def test_three_loops_give_up(self):
+        message = await self.complete(*[("length", 200, "", [])] * 3)
+        self.assertEqual(message["content"], "")
+        self.assertEqual(len(self.llm.payloads), 3)
 
 
 class TestLLMLoop(unittest.IsolatedAsyncioTestCase):

@@ -819,7 +819,9 @@ async def chat_completion(
     messages: list,
     tools: list | None = None,
     temperature: float = 0.3,
-    max_tokens: int = 500,
+    # A round is 79 tokens at most (900 rounds, a month to 2026-10-25; p99 49): 200 leaves room, and a
+    # model looping past its answer stops after ~4.5 s instead of ~11.5 s at 500 (AD-080)
+    max_tokens: int = 200,
 ) -> dict | None:
     """Send a chat completion request to an OpenAI-compatible API.
     Returns the message dict from the first choice, or None on error.
@@ -832,11 +834,13 @@ async def chat_completion(
 
     logger.debug(f"LLM request: {len(messages)} messages, last {messages[-1]['role']}: {messages[-1]['content']!r}")
 
-    # Retry on finish_reason=length: the completion was truncated (often a
-    # reasoning model spending the whole budget on internal thinking). Bump the
-    # token limit and retry rather than returning a truncated/empty message.
+    # finish_reason=length with the budget spent. A long answer cut short gets a bigger budget. But gemma4
+    # mostly hits it by looping past its answer, with no hidden reasoning (AD-080): it said a few words or made
+    # its call, and those are kept; or it said nothing, and a bigger budget only looped longer (500, 1000,
+    # 2000 tokens: 67 s and an empty reply, 2026-10-24), so it samples again, warmer, at the same budget.
     MAX_TOKEN_CEILING = 2000
     MAX_LENGTH_RETRIES = 2
+    RETRY_TEMPERATURE = 0.7
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -871,20 +875,31 @@ async def chat_completion(
                     # A completion stopped well short of its budget hit the context, not the budget:
                     # more tokens cannot help (Ollama's 4096-token context, 2026-10-11: 3 retries, 7 tokens each)
                     hit_budget = (usage.get("completion_tokens") or 0) >= payload[max_tokens_key] * 0.9
+                    budget = payload[max_tokens_key]
+                    content = (choice["message"].get("content") or "").strip()
                     if finish_reason == "length" and not hit_budget:
                         logger.error(f"LLM context full: prompt {usage.get('prompt_tokens')} tokens")
-                    elif finish_reason == "length" and payload[max_tokens_key] < MAX_TOKEN_CEILING:  # budget hit
-                        if attempt < MAX_LENGTH_RETRIES:
-                            new_limit = min(payload[max_tokens_key] * 2, MAX_TOKEN_CEILING)
+                    elif finish_reason == "length" and (called or content and len(content) < budget):
+                        # Fewer characters than tokens: the answer is there, the rest was a loop
+                        logger.warning(f"LLM looped past its reply to {budget} tokens: keeping {content!r}, calls {called}")
+                        choice["message"]["content"] = content
+                    elif finish_reason == "length" and attempt < MAX_LENGTH_RETRIES:
+                        if not content:
                             logger.warning(
-                                f"LLM truncated (finish_reason=length) at {payload[max_tokens_key]} tokens, "
-                                f"retrying with {new_limit}"
+                                f"LLM looped to {budget} tokens with nothing said, "
+                                f"sampling again at temperature {RETRY_TEMPERATURE}"
                             )
+                            payload["temperature"] = RETRY_TEMPERATURE
+                            continue
+                        if budget < MAX_TOKEN_CEILING:
+                            new_limit = min(budget * 2, MAX_TOKEN_CEILING)
+                            logger.warning(f"LLM truncated (finish_reason=length) at {budget} tokens, retrying with {new_limit}")
                             payload[max_tokens_key] = new_limit
                             continue
+                    elif finish_reason == "length":
                         logger.warning(
                             f"LLM still truncated after {MAX_LENGTH_RETRIES} retries "
-                            f"(max {payload[max_tokens_key]} tokens), returning partial response"
+                            f"(max {budget} tokens), returning partial response"
                         )
 
                     return choice["message"]
