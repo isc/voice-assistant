@@ -46,6 +46,7 @@ def reply(d: dict) -> str:
 # Calls that act, or speak, or make something; reads are left out
 ACTIONS = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_heating", "lock", "unlock",
+    "arm_alarm", "disarm_alarm",
     "play_radio", "play_music", "move_media", "music_control", "change_volume", "set_volume", "stop_media",
     "set_timer", "set_alarm", "cancel_timer", "create_event", "update_event", "show_image",
 }  # fmt: skip
@@ -123,6 +124,17 @@ def zoe_closed_or_asked(d):
     closed = any("zoe" in arg(tc, "room") for tc in calls(d, "close_cover"))
     asked = "?" in reply(d) and not calls(d, "close_cover")
     return not calls(d, "open_cover") and (closed or asked), "close Zoé's shutters or ask, never open"
+
+
+def proposes_disarm(d):
+    # A dry run refuses as the satellite does, nothing disarmed (AD-083): the reply must not say otherwise
+    said_done = re.search(r"\b(?:est|a ete|ai) (?:bien |maintenant )?(?:desarm|desactiv)", norm(reply(d)))
+    only = set(tool_names(d)) & ACTIONS == {"disarm_alarm"}
+    return only and not said_done, "disarm_alarm alone, the reply not saying it is disarmed"
+
+
+def arms(mode: str, where=lambda tc: True, expect: str = ""):
+    return has("arm_alarm", lambda tc: where(tc) and arg(tc, "mode") == norm(mode), expect or f"arm_alarm {mode}")
 
 
 def france_inter_or_asked(d):
@@ -221,6 +233,19 @@ CASES = [
     ("AD-041 is the door locked", "paris", [("est-ce que la porte est verrouillée ?", has("get_state"))]),
     ("AD-073 the radio", "paris", [("Tu peux mettre la radio France Inter", has("play_radio"))]),
     ("AD-015 children's lights", "charras", [("éteins les lumières des enfants", in_room("turn_off", "enfant"))]),
+    # Charras's alarm (AD-083): disarmed by no voice; the house's, not a clock's
+    ("AD-083 disarm by voice", "charras", [("désarme l'alarme", proposes_disarm)]),
+    ("AD-083 désactive l'alarme", "charras", [("désactive l'alarme", proposes_disarm)]),
+    ("AD-083 coupe l'alarme", "charras", [("coupe l'alarme", proposes_disarm)]),
+    ("AD-083 armed, then disarm", "charras", [
+        ("active l'alarme", arms("absence")),
+        ("non, désactive-la", proposes_disarm),
+    ]),
+    ("AD-083 partielle", "charras", [("mets l'alarme en partielle", arms("nuit"))]),
+    ("AD-083 an alarm clock", "charras", [("mets une alarme à 7 heures", instead("set_alarm", "arm_alarm"))]),
+    ("AD-083 Charras's alarm from Paris", "paris", [
+        ("active l'alarme à Charras", arms("absence", lambda tc: arg(tc, "home") == "charras", "arm_alarm at Charras")),
+    ]),
     ("AD-062 pasta timer", "paris", [
         ("Lance un minuteur de trois minutes pour les pâtes",
          has("set_timer", lambda tc: tc["args"].get("duration_minutes") == 3 and tc["args"].get("label"),

@@ -168,6 +168,7 @@ def make_client() -> HAClient:
     }
     client.screens = []
     client.setpoints = {}
+    client.hidden = set()
     client._session = None
     return client
 
@@ -809,7 +810,7 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         server = self.server = make_server({"SITES": "paris,charras"})
         server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
         server.spotify, server.calendar_client = None, None
-        server._unlock_offers = {}
+        server._offers = {}
         self.paris, self.charras = server.sites
         for site, eid, name in (
             (self.paris, "lock.smart_lock_pro", "Smart Lock Pro"),
@@ -848,7 +849,7 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         self.assertIn("l'enceinte n'ouvre aucune porte", result)
         self.assertTrue(_NOTHING_DONE.search(result))  # the page shows it failed
         self.assertNotIn("confirm", call)
-        self.assertEqual(self.server._unlock_offers, {})
+        self.assertEqual(self.server._offers, {})
 
     async def test_the_app_proposes_and_a_tap_unlocks_once(self):
         from voice_server import _NOTHING_DONE
@@ -857,12 +858,12 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         self.assertIn("bouton « Déverrouiller »", call["result"])
         self.assertIsNone(_NOTHING_DONE.search(call["result"]))  # not shown as failed
         self.paris.ha_client.unlock.assert_not_awaited()
-        self.assertEqual(call["confirm"]["door"], "Smart Lock Pro · Paris")  # what the button says
+        self.assertEqual(call["confirm"]["target"], "Smart Lock Pro · Paris")  # what the button says
         client = await self.client()
         offer_id = call["confirm"]["id"]
-        another = await client.post("/api/unlock", json={"offer": offer_id, "client": "tablet7"})
+        another = await client.post("/api/confirm", json={"offer": offer_id, "client": "tablet7"})
         self.assertEqual(another.status, 410)  # another browser's tap
-        tap = await client.post("/api/unlock", json={"offer": offer_id, "client": "phone42", "site": "paris"})
+        tap = await client.post("/api/confirm", json={"offer": offer_id, "client": "phone42", "site": "paris"})
         self.assertEqual((await tap.json())["response"], "Smart Lock Pro en cours de déverrouillage")
         self.paris.ha_client.unlock.assert_awaited_once_with("lock.smart_lock_pro")
         self.paris.ha_client.call_service.assert_not_awaited()
@@ -872,15 +873,15 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
             (entry["source"], entry["input"], entry["client"], entry["site"]),
             ("confirm", "Déverrouiller · Smart Lock Pro · Paris", "phone42", "paris"),
         )
-        again = await client.post("/api/unlock", json={"offer": offer_id, "client": "phone42"})
+        again = await client.post("/api/confirm", json={"offer": offer_id, "client": "phone42"})
         self.assertEqual(again.status, 410)
         self.paris.ha_client.unlock.assert_awaited_once()
 
     async def test_an_offer_expires(self):
         call = await self.offer({"entity": "porte"})
-        self.server._unlock_offers[call["confirm"]["id"]].expires = 0
+        self.server._offers[call["confirm"]["id"]].expires = 0
         client = await self.client()
-        tap = await client.post("/api/unlock", json={"offer": call["confirm"]["id"], "client": "phone42"})
+        tap = await client.post("/api/confirm", json={"offer": call["confirm"]["id"], "client": "phone42"})
         self.assertEqual(tap.status, 410)
         self.paris.ha_client.unlock.assert_not_awaited()
 
@@ -903,9 +904,9 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_other_home_unlocked_from_this_one(self):
         call = await self.offer({"entity": "porte", "home": "charras"})
-        self.assertEqual(call["confirm"]["door"], "Porte d'entrée · Charras")
+        self.assertEqual(call["confirm"]["target"], "Porte d'entrée · Charras")
         self.server.new_request("phone42")
-        reply = await self.server.confirm_unlock(call["confirm"]["id"])
+        reply = await self.server.confirm(call["confirm"]["id"])
         self.charras.ha_client.unlock.assert_awaited_once_with("lock.entree_porte_d_entree")
         self.paris.ha_client.unlock.assert_not_awaited()
         self.assertEqual(reply["input"], "Déverrouiller · Porte d'entrée · Charras")
@@ -927,6 +928,240 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("unlock", {t["name"] for t in self.server._tools()})
         one_home = get_tool_definitions(self.charras.ha_client, locks=True)
         self.assertNotIn("home", next(t for t in one_home if t["name"] == "lock")["parameters"]["properties"])
+
+
+# ---------------------------------------------------------------------------
+# Tests: an alarm, armed by voice, disarmed only by a tap in the web app (AD-083)
+# ---------------------------------------------------------------------------
+
+ALARM = "alarm_control_panel.somfy_home_alarm_maison"
+
+
+def alarm_panel(state: str = "disarmed", features: int = 14) -> dict:
+    """Charras's Somfy as HA has it through SomfyProtect2MQTT (arm_away, arm_night and trigger: 14), and as
+    refresh_entities keeps it, the home's one alarm: « Alarme »."""
+    attributes = {"friendly_name": "Somfy Home Alarm Maison", "supported_features": features}
+    return {"friendly_name": "Alarme", "domain": "alarm_control_panel", "state": state,
+            "attributes": {**attributes, "code_arm_required": False, "code_format": None},
+            "area_id": None, "area_name": ""}  # fmt: skip
+
+
+class TestAlarm(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.client = make_client()
+        self.client.entities[ALARM] = alarm_panel()
+
+    def test_listed_resolved_and_said(self):
+        self.assertIn("alarme: Alarme", self.client.get_entity_list_for_prompt())
+        for name in ("alarme", "l'alarme", "Alarme"):
+            self.assertEqual(self.client.resolve_all_entities(name), [ALARM], name)
+        self.assertNotIn(ALARM, self.client.resolve_all_entities("porte"))
+        self.assertFalse(self.client.needs_room("alarme"))  # the home's, as the heating
+        for state, said in (
+            ("disarmed", "Alarme désarmée"),
+            ("armed_away", "Alarme armée en mode absence"),
+            ("armed_night", "Alarme armée en mode nuit"),
+            ("arming", "Alarme en cours d'armement"),
+            ("triggered", "Alarme déclenchée"),
+            ("unavailable", "Alarme ne répond pas (hors ligne)"),
+        ):
+            self.assertEqual(self.client.format_state_for_speech(ALARM, {"state": state, "attributes": {}}), said)
+
+    def test_modes_by_supported_features(self):
+        self.assertEqual(self.client.alarm_modes(), ["absence", "nuit"])
+        self.client.entities[ALARM]["attributes"]["supported_features"] = 1 | 32
+        self.assertEqual(self.client.alarm_modes(ALARM), ["présence", "vacances"])
+        del self.client.entities[ALARM]
+        self.assertEqual(self.client.alarm_modes(), [])
+
+    def test_tools_offered_only_with_an_alarm(self):
+        tools = {t["name"]: t for t in get_tool_definitions(self.client, alarm=["absence", "nuit"])}
+        self.assertEqual(tools["arm_alarm"]["parameters"]["properties"]["mode"]["enum"], ["absence", "nuit"])
+        self.assertIn("partielle", tools["arm_alarm"]["parameters"]["properties"]["mode"]["description"])
+        self.assertIn("disarm_alarm", tools)
+        self.assertFalse({"arm_alarm", "disarm_alarm"} & {t["name"] for t in get_tool_definitions(self.client)})
+
+    async def test_ha_client_never_disarms_nor_triggers(self):
+        for service in ("alarm_disarm", "alarm_trigger"):
+            result = await self.client.call_service("alarm_control_panel", service, ALARM)  # no session: no HTTP
+            self.assertRegex(result, "^Rien n.a été fait : (le désarmement ne se fait pas|l.alarme ne se déclenche)")
+
+    async def test_the_siren_is_out_of_reach(self):
+        """A switch of the alarm's maker is never an entity, even when HA could not say which they are."""
+        client = self.client
+        states = [
+            {"entity_id": ALARM, "state": "disarmed", "attributes": alarm_panel()["attributes"]},
+            {"entity_id": "switch.somfy_home_alarm_siren", "state": "off", "attributes": {"friendly_name": "Siren"}},
+            {"entity_id": "switch.prise_salon", "state": "off", "attributes": {"friendly_name": "Prise salon"}},
+        ]
+        client._session = MagicMock()
+        response = MagicMock(status=200, json=AsyncMock(return_value=states))
+        client._session.get.return_value.__aenter__.return_value = response
+        client._fetch_areas, client._fetch_entity_areas = AsyncMock(), AsyncMock(return_value={})
+        client._fetch_screens = AsyncMock(return_value=[])
+        for hidden in ({"switch.somfy_home_alarm_siren"}, None):  # then a failed read: the last list kept
+            client._fetch_hidden = AsyncMock(return_value=hidden)
+            await client.refresh_entities()
+            self.assertEqual(set(client.entities), {ALARM, "switch.prise_salon"})
+        self.assertEqual(client.entities[ALARM]["friendly_name"], "Alarme")  # the home's one
+
+    async def arm(self, mode: str, *states: str) -> str:
+        """arm(), the alarm read as `states` one after another, the last for good; the order sent faked."""
+        reads = [{"state": state, "attributes": alarm_panel()["attributes"]} for state in states]
+        self.client.get_entity_state = AsyncMock(side_effect=lambda _: reads.pop(0) if len(reads) > 1 else reads[0])
+        self.client._send = AsyncMock(return_value=None)
+        with patch("ha_client.asyncio.sleep", AsyncMock()):
+            return await self.client.arm(ALARM, mode)
+
+    async def test_armed_and_confirmed(self):
+        armed = await self.arm("absence", "disarmed", "disarmed", "armed_away")
+        self.assertEqual(armed, "Alarme armée en mode absence")
+        self.client._send.assert_awaited_once_with("alarm_control_panel", "alarm_arm_away", ALARM)
+        self.assertEqual(await self.arm("nuit", "disarmed", "arming"), "Alarme en cours d'armement")
+        self.client._send.assert_awaited_once_with("alarm_control_panel", "alarm_arm_night", ALARM)
+        # From the night to the whole house: it watches more
+        self.assertEqual(await self.arm("absence", "armed_night", "armed_away"), "Alarme armée en mode absence")
+
+    async def test_not_armed_unconfirmed(self):
+        with patch("ha_client.ALARM_CONFIRM_SECONDS", 0):
+            result = await self.arm("absence", "disarmed")
+        self.assertTrue(result.startswith("Pas de confirmation : Alarme toujours désarmée"), result)
+
+    async def test_nothing_sent(self):
+        for mode, state, said in (
+            ("nuit", "armed_night", "Alarme déjà armée en mode nuit"),
+            # A lesser mode watches less: a disarm first, which takes the tap
+            ("nuit", "armed_away", "il faut d'abord la désarmer"),
+            ("absence", "triggered", "Rien n'a été fait : Alarme déclenchée"),
+            ("présence", "disarmed", "pas de mode présence"),
+        ):
+            self.assertIn(said, await self.arm(mode, state), mode)
+            self.client._send.assert_not_awaited()
+
+    async def test_disarmed_and_confirmed(self):
+        self.client.get_entity_state = AsyncMock(side_effect=[{"state": "armed_away"}, {"state": "disarmed"}])
+        self.client._send = AsyncMock(return_value=None)
+        with patch("ha_client.asyncio.sleep", AsyncMock()):
+            self.assertEqual(await self.client.disarm(ALARM), "Alarme désarmée")
+        self.client._send.assert_awaited_once_with("alarm_control_panel", "alarm_disarm", ALARM)
+
+    def test_shortcut_in_effect(self):
+        from voice_server import _device_in_effect
+
+        self.assertTrue(_device_in_effect("arm_alarm", {"mode": "Nuit"}, {"state": "armed_night"}))
+        self.assertTrue(_device_in_effect("arm_alarm", {"mode": "absence"}, {"state": "arming"}))
+        self.assertFalse(_device_in_effect("arm_alarm", {"mode": "absence"}, {"state": "armed_night"}))
+        self.assertFalse(_device_in_effect("arm_alarm", {}, {"state": "disarmed"}))
+
+    def test_claims(self):
+        self.assertTrue(claims_completed_action("J'ai armé l'alarme en mode nuit."))
+        self.assertTrue(claims_completed_action("J'ai désarmé l'alarme."))
+        self.assertFalse(claims_completed_action("L'alarme est armée en mode nuit."))
+
+
+class TestAlarmFromTheServer(unittest.IsolatedAsyncioTestCase):
+    """Charras's alarm armed by voice, from either home; disarmed by a tap on the button its request shows in
+    the web app alone; Paris has none (AD-083)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        from web_ui import ExchangeLog
+
+        server = self.server = make_server({"SITES": "paris,charras"})
+        server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
+        server.spotify, server.calendar_client = None, None
+        server._offers = {}
+        self.paris, self.charras = server.sites
+        for site in server.sites:
+            site.ha_client = make_client()
+            site.ha_client.call_service = AsyncMock(return_value="C'est fait")
+        alarm = self.charras.ha_client
+        alarm.entities = {ALARM: alarm_panel("armed_night")}
+        alarm.get_entity_state = AsyncMock(return_value={"state": "armed_night"})
+        alarm.arm = AsyncMock(return_value="Alarme armée en mode absence")
+        alarm.disarm = AsyncMock(return_value="Alarme désarmée")
+        server.site = self.charras
+
+    async def run_call(self, function: str, args: dict, browser=None) -> dict:
+        self.server.new_request(browser)
+        call = {"function": function, "args": args}
+        call["result"] = await self.server.execute_function(function, args, call)
+        return call
+
+    async def test_armed_in_the_mode_said(self):
+        call = await self.run_call("arm_alarm", {"mode": "Absence"})
+        self.assertEqual(call["result"], "Alarme armée en mode absence")
+        self.charras.ha_client.arm.assert_awaited_once_with(ALARM, "absence")
+        call = await self.run_call("arm_alarm", {})  # no mode: none guessed
+        self.assertEqual(call["result"], "Rien n'a été fait : précise le mode (absence, nuit)")
+        self.charras.ha_client.arm.assert_awaited_once()
+
+    async def test_the_satellite_refuses_to_disarm(self):
+        from voice_server import _NOTHING_DONE
+
+        call = await self.run_call("disarm_alarm", {})
+        self.assertIn("l'enceinte ne désarme pas l'alarme", call["result"])
+        self.assertTrue(_NOTHING_DONE.search(call["result"]))
+        self.assertNotIn("confirm", call)
+        self.charras.ha_client.disarm.assert_not_awaited()
+        self.assertEqual(self.server._refused("disarm_alarm", {}), call["result"])  # what a dry run gets too
+
+    async def test_the_app_proposes_and_a_tap_disarms_once(self):
+        from voice_server import _NOTHING_DONE
+
+        call = await self.run_call("disarm_alarm", {}, "phone42")
+        self.assertIn("l'alarme reste armée", call["result"])
+        self.assertIn("bouton « Désarmer »", call["result"])
+        self.assertIsNone(_NOTHING_DONE.search(call["result"]))
+        self.assertEqual((call["confirm"]["action"], call["confirm"]["target"]), ("Désarmer", "Alarme · Charras"))
+        self.charras.ha_client.disarm.assert_not_awaited()
+        app = web.Application()
+        setup_routes(app, self.server)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        offer = call["confirm"]["id"]
+        another = await client.post("/api/confirm", json={"offer": offer, "client": "tablet7"})
+        self.assertEqual(another.status, 410)
+        tap = await client.post("/api/confirm", json={"offer": offer, "client": "phone42", "site": "charras"})
+        self.assertEqual((await tap.json())["response"], "Alarme désarmée")
+        self.charras.ha_client.disarm.assert_awaited_once_with(ALARM)
+        self.charras.ha_client.call_service.assert_not_awaited()
+        self.assertTrue(call["confirm"]["done"])
+        entry = self.server.exchange_log.entries[-1]
+        self.assertEqual((entry["source"], entry["input"]), ("confirm", "Désarmer · Alarme · Charras"))
+        self.assertEqual(entry["tool_calls"][0]["function"], "disarm_alarm")
+        again = await client.post("/api/confirm", json={"offer": offer, "client": "phone42"})
+        self.assertEqual(again.status, 410)
+
+    async def test_no_button_for_an_alarm_already_disarmed(self):
+        self.charras.ha_client.get_entity_state.return_value = {"state": "disarmed"}
+        call = await self.run_call("disarm_alarm", {}, "phone42")
+        self.assertEqual(call["result"], "Alarme déjà désarmée")
+        self.assertNotIn("confirm", call)
+
+    async def test_from_paris(self):
+        self.server.site = self.paris
+        call = await self.run_call("arm_alarm", {"mode": "nuit", "home": "charras"})
+        self.assertEqual(call["result"], "Alarme armée en mode absence (Charras)")
+        self.charras.ha_client.arm.assert_awaited_once_with(ALARM, "nuit")
+        self.assertIs(self.server.site, self.paris)
+        call = await self.run_call("disarm_alarm", {"home": "charras"}, "phone42")
+        self.assertEqual(call["confirm"]["target"], "Alarme · Charras")
+        # No home said: Paris's, which has none; Charras's is never armed unasked, the model asks
+        call = await self.run_call("arm_alarm", {"mode": "absence"})
+        self.assertEqual(
+            call["result"], "Rien n'a été fait : pas d'alarme ici. Il y en a une à Charras : demande si c'est celle-là"
+        )
+        self.charras.ha_client.arm.assert_awaited_once()
+
+    def test_tools_and_their_home(self):
+        tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
+        self.assertEqual(tools["arm_alarm"]["mode"]["enum"], ["absence", "nuit"])
+        self.assertEqual(tools["disarm_alarm"]["home"]["enum"], ["paris", "charras"])
+        self.charras.ha_client.entities = {}
+        self.assertNotIn("arm_alarm", {t["name"] for t in self.server._tools()})
 
 
 HEATING_MODES = ["Off", "Auto", "Confort", "Réduit"]

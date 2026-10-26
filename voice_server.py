@@ -39,7 +39,18 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 import onnx_gpu
-from ha_client import LOCAL_CONFIG, asks_heating_on, asks_whole_house, compact, fold, is_whole_house, normalize, quiet
+from ha_client import (
+    ALARM_MODES,
+    LOCAL_CONFIG,
+    alarm_mode,
+    asks_heating_on,
+    asks_whole_house,
+    compact,
+    fold,
+    is_whole_house,
+    normalize,
+    quiet,
+)
 from images import find_image
 from places import address_of, find_place
 from push import Push
@@ -138,15 +149,37 @@ def _speaker_left_on(entities: dict, urls: set[str]) -> Optional[tuple[str, str]
 
 # The result of an action on several rooms that the request did not say (AD-058)
 _WHICH_ROOM = "Rien n'a été fait : la demande ne dit pas dans quelle pièce. Demande laquelle."
-# A door is unlocked from the web app alone, by a tap on the button its request shows, this long (AD-068)
-_UNLOCK_FROM_APP_ONLY = (
-    "Rien n'a été fait : l'enceinte n'ouvre aucune porte, il faut le demander dans l'application du téléphone"
-)
-UNLOCK_CONFIRM_SECONDS = 120
+# A door is unlocked, an alarm disarmed, from the web app alone, by a tap on the button its request shows, this
+# long (AD-068, AD-083)
+CONFIRM_SECONDS = 120
+
+
+@dataclass(frozen=True)
+class _Confirmable:
+    verb: str  # what the button says
+    stays: str  # what stays as it is until the tap, for the model to say
+    refusal: str  # the satellite's answer, from which nothing is confirmed
+    method: str  # the HAClient method that does it, called by confirm() alone
+
+
+_CONFIRMABLE = {
+    "unlock": _Confirmable(
+        "Déverrouiller",
+        "{name} reste fermée",
+        "Rien n'a été fait : l'enceinte n'ouvre aucune porte, il faut le demander dans l'application du téléphone",
+        "unlock",
+    ),
+    "disarm_alarm": _Confirmable(
+        "Désarmer",
+        "l'alarme reste armée",
+        "Rien n'a été fait : l'enceinte ne désarme pas l'alarme, il faut le demander dans l'application du téléphone",
+        "disarm",
+    ),
+}
 # Tool results saying nothing was done (« Appareil volet non trouvé », « Sonos ne répond pas (hors ligne) »):
 # flagged in the log, so that the web app shows them beside a reply that may claim otherwise
 _NOTHING_DONE = re.compile(
-    r"^(erreur|\{\"error\"|rien n'a été fait|rien trouvé|aucun|impossible|précise|le déverrouillage)"
+    r"^(erreur|\{\"error\"|rien n'a été fait|rien trouvé|aucun|impossible|précise|pas de confirmation)"
     r"|non (trouvée?s?|disponibles?)"
     r"|ne répond(ent)? pas|hors ligne|inconnue?\b|n'est pas connecté|manquante?",
     re.IGNORECASE,
@@ -156,7 +189,7 @@ _NOTHING_DONE = re.compile(
 # words, nor an event at a date gone by (create_event)
 _REDOABLE = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock",
-    "set_heating", "play_radio", "play_music", "move_media", "stop_media", "set_volume",
+    "arm_alarm", "set_heating", "play_radio", "play_music", "move_media", "stop_media", "set_volume",
     "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image",
 }  # fmt: skip
 
@@ -194,6 +227,9 @@ def _device_in_effect(function_name: str, arguments: dict, state: dict) -> bool:
         return _near(attributes.get("temperature"), arguments.get("temperature"), 0.1)
     if function_name == "lock":
         return value in ("locked", "locking")
+    if function_name == "arm_alarm":
+        mode = alarm_mode(arguments.get("mode", ""))
+        return bool(mode) and value in (ALARM_MODES[mode][1], "arming")
     if function_name == "set_heating":
         return fold(str(value)) == fold(str(arguments.get("mode", "")))
     return False
@@ -309,8 +345,9 @@ class _WaitPhrase:
 
 
 @dataclass
-class _UnlockOffer:
-    """A door the model proposed to unlock, waiting for a tap on the web app's button (AD-068)."""
+class _Offer:
+    """What the model proposed and a tap on the web app's button alone does: a door to unlock (AD-068), an
+    alarm to disarm (AD-083)."""
 
     site: Site
     entity_id: str
@@ -424,7 +461,7 @@ class VoiceAssistantServer:
         self._pending_service_calls: set = set()
         self._background_tasks: set = set()  # held until done, not awaited at shutdown
         self._volume_lock = asyncio.Lock()  # turning speakers down and back up, in turn
-        self._unlock_offers: dict[str, _UnlockOffer] = {}  # by id, the button's
+        self._offers: dict[str, _Offer] = {}  # by id, the button's
 
         # HTTP server for serving TTS audio files
         self.http_server = None
@@ -1107,10 +1144,15 @@ class VoiceAssistantServer:
         "set_heating": ["select"],
         "lock": ["lock"],
         "unlock": ["lock"],
+        "arm_alarm": ["alarm_control_panel"],
+        "disarm_alarm": ["alarm_control_panel"],
         "get_state": None,
     }
-    # The calls that may name another home: its door from this one, its heating, its states (AD-068, AD-071)
-    _ANY_HOME = {"lock", "unlock", "set_heating", "get_state", "get_sensor"}
+    # The alarm tools name no device: the home's alarm (AD-083)
+    _ALARM_TOOLS = {"arm_alarm", "disarm_alarm"}
+    # The calls that may name another home: its door from this one, its heating, its alarm, its states (AD-068,
+    # AD-071, AD-083)
+    _ANY_HOME = {"lock", "unlock", "arm_alarm", "disarm_alarm", "set_heating", "get_state", "get_sensor"}
 
     def _home_named(self, arguments: dict) -> Optional[tuple[Site, dict]]:
         """The home a call names, and its arguments as read there: its `home`, else a home's name said in
@@ -1187,8 +1229,8 @@ class VoiceAssistantServer:
         return None if self._resolve_media_target(room) else self._no_speaker(room)
 
     async def execute_function(self, function_name: str, arguments: dict, call: Optional[dict] = None) -> str:
-        """Execute a function call from the LLM. `call`: its entry in the exchange log, where an unlock
-        writes its button (AD-068), a picture its URL (AD-069)."""
+        """Execute a function call from the LLM. `call`: its entry in the exchange log, where an unlock or a
+        disarm writes its button (AD-068, AD-083), a picture its URL (AD-069)."""
         if function_name == "end_conversation":
             self._end_conversation = True
             # Over: the next request starts a new one, as after a silence; this one keeps its id for the log
@@ -1267,10 +1309,10 @@ class VoiceAssistantServer:
                 made=self.conversation.events,
             )
 
+        if refused := self._refused(function_name, arguments):
+            return refused
         # Media player tools (radio + volume) — default to the current ESP speaker,
         # fall back to HA media_player entities when a room is named.
-        if unknown := self._unknown_speaker(function_name, arguments):
-            return unknown
         if function_name in ("play_music", "music_control"):
             return await self._execute_music_function(function_name, arguments)
         if function_name in self._MEDIA_TOOLS:
@@ -1296,17 +1338,12 @@ class VoiceAssistantServer:
         if function_name == "get_sensor":
             return await self.ha_client.search_sensors(arguments.get("query", ""))
 
-        entity_name = arguments.get("entity", "")
+        entity_name = self._entity_said(function_name, arguments)
         room = arguments.get("room")
 
         if function_name not in self._DEVICE_DOMAINS:
             logger.warning(f"Unknown function: {function_name}")
             return f"Fonction {function_name} inconnue"
-        if unasked := self._unasked_sweep(function_name, arguments):
-            return unasked
-        if function_name == "unlock" and not self._client:  # a browser of the web app, where the button shows
-            logger.warning(f"Unlock refused, not from the web app: {arguments}")
-            return _UNLOCK_FROM_APP_ONLY
         domains = self._DEVICE_DOMAINS[function_name]
 
         entity_ids = self.ha_client.resolve_all_entities(entity_name, room=room, domain_hints=domains)
@@ -1330,6 +1367,11 @@ class VoiceAssistantServer:
                 return f"Pas de {entity_name} ici, mais à {home.name.capitalize()} : {result}"
             if asks_room:
                 return _WHICH_ROOM
+            if function_name in self._ALARM_TOOLS:
+                # Another home's is never armed unasked, as the heating is not (AD-077): the model asks
+                there = self._only_home_with(entity_name, None, domains)
+                ask = f". Il y en a une à {there.name.capitalize()} : demande si c'est celle-là" if there else ""
+                return f"Rien n'a été fait : pas d'alarme ici{ask}"
             return f"Appareil {entity_name} non trouvé"
 
         if function_name == "get_state":
@@ -1342,7 +1384,9 @@ class VoiceAssistantServer:
         entity_ids = reachable
 
         if function_name == "unlock":
-            return self._offer_unlock(entity_ids, call)
+            return self._offer("unlock", entity_ids, call)
+        if function_name in self._ALARM_TOOLS:
+            return await self._alarm(function_name, arguments, entity_ids, call)
 
         extra = {}
         if function_name == "set_temperature" and "temperature" in arguments:
@@ -1401,42 +1445,77 @@ class VoiceAssistantServer:
             extra,
         )
 
-    def _offer_unlock(self, entity_ids: list[str], call: dict) -> str:
-        """A door proposed for unlocking: the web app shows a button on this call, and a tap on it alone
-        unlocks (confirm_unlock). The model unlocks nothing (AD-068)."""
+    def _refused(self, function_name: str, arguments: dict) -> Optional[str]:
+        """What a call gets without running, by what it says alone, else None; dry runs get it too (AD-047): a
+        speaker this home does not have, every room unasked (AD-058), and from the satellite, what only a tap in
+        the web app does (AD-068, AD-083)."""
+        if refused := self._unknown_speaker(function_name, arguments) or self._unasked_sweep(function_name, arguments):
+            return refused
+        if function_name in _CONFIRMABLE and not self._client:  # a browser of the web app, where the button shows
+            logger.warning(f"{function_name} refused, not from the web app: {arguments}")
+            return _CONFIRMABLE[function_name].refusal
+        return None
+
+    def _entity_said(self, function_name: str, arguments: dict) -> str:
+        """The device a call names; the alarm tools name none, the home's alarm (AD-083)."""
+        return "alarme" if function_name in self._ALARM_TOOLS else arguments.get("entity", "")
+
+    async def _alarm(self, function_name: str, arguments: dict, entity_ids: list[str], call: dict) -> str:
+        """The home's alarm armed in the mode asked, or proposed for disarming from the web app (AD-083)."""
+        if len(entity_ids) > 1:
+            return f"Rien n'a été fait : plusieurs alarmes ici ({', '.join(entity_ids)}), une seule est prise en charge"
+        alarm = entity_ids[0]
+        if function_name == "arm_alarm":
+            # No mode guessed: absence while the family sleeps sounds the siren at the first step (the text
+            # fallback's « arm_alarm("nuit") » reads as an entity, not a mode)
+            if not (said := str(arguments.get("mode") or "")):
+                return f"Rien n'a été fait : précise le mode ({', '.join(self.ha_client.alarm_modes(alarm))})"
+            return await self.ha_client.arm(alarm, alarm_mode(said) or said)
+        if ((await self.ha_client.get_entity_state(alarm)) or {}).get("state") == "disarmed":
+            return self.ha_client.alarm_words(alarm, "disarmed", "déjà")
+        return self._offer(function_name, entity_ids, call)
+
+    def _offer(self, function_name: str, entity_ids: list[str], call: dict) -> str:
+        """A door proposed for unlocking, an alarm for disarming: the web app shows a button on this call, and a
+        tap on it alone does it (confirm). The model unlocks and disarms nothing (AD-068, AD-083)."""
         if len(entity_ids) > 1:
             return f"Précise quelle porte : {', '.join(map(self.ha_client.display_name, entity_ids))}"
         now = time.time()
-        self._unlock_offers = {key: offer for key, offer in self._unlock_offers.items() if offer.expires > now}
+        self._offers = {key: offer for key, offer in self._offers.items() if offer.expires > now}
         offer_id = secrets.token_urlsafe(12)
-        expires = now + UNLOCK_CONFIRM_SECONDS
-        self._unlock_offers[offer_id] = _UnlockOffer(self.site, entity_ids[0], self._client, expires, call)
-        door = self.ha_client.display_name(entity_ids[0])
-        # What the button says under « Déverrouiller », and how long the page shows it
-        where = f"{door} · {self.site.name.capitalize()}" if len(self.sites) > 1 else door
-        call["confirm"] = {"id": offer_id, "door": where, "seconds": UNLOCK_CONFIRM_SECONDS}
-        logger.info(f"Unlock offered: {entity_ids[0]} ({self.site.label})")
+        expires = now + CONFIRM_SECONDS
+        self._offers[offer_id] = _Offer(self.site, entity_ids[0], self._client, expires, call)
+        name = self.ha_client.display_name(entity_ids[0])
+        confirmable = _CONFIRMABLE[function_name]
+        # What the button says, what under it, and how long the page shows it
+        where = f"{name} · {self.site.name.capitalize()}" if len(self.sites) > 1 else name
+        call["confirm"] = {"id": offer_id, "action": confirmable.verb, "target": where, "seconds": CONFIRM_SECONDS}
+        logger.info(f"{confirmable.verb} offered: {entity_ids[0]} ({self.site.label})")
         return (
-            f"Rien n'est fait : {door} reste fermée tant que l'utilisateur n'a pas touché le bouton "
-            "« Déverrouiller » affiché sous ta réponse. Dis-lui de le toucher pour confirmer (aucune notification "
-            "n'est envoyée)"
+            f"Rien n'est fait : {confirmable.stays.format(name=name)} tant que l'utilisateur n'a pas touché le bouton "
+            f"« {confirmable.verb} » affiché sous ta réponse. Dis-lui de le toucher pour confirmer (aucune "
+            "notification n'est envoyée)"
         )
 
-    async def confirm_unlock(self, offer_id: str) -> Optional[dict]:
-        """A tap on the web app's « Déverrouiller »: the door its request proposed, unlocked if the tap comes
-        from the browser that asked, in time, once (AD-068). Logged as that browser's request, at the home its
-        page is on, which may not be the door's. None if no such offer waits."""
-        offer = self._unlock_offers.get(offer_id)
+    async def confirm(self, offer_id: str) -> Optional[dict]:
+        """A tap on the web app's « Déverrouiller » or « Désarmer »: what its request proposed, done if the tap
+        comes from the browser that asked, in time, once (AD-068, AD-083). Logged as that browser's request, at
+        the home its page is on, which may not be the device's. None if no such offer waits."""
+        offer = self._offers.get(offer_id)
         if not offer or offer.client != self._client or offer.expires < time.time():
             return None
-        del self._unlock_offers[offer_id]
-        logger.info(f"Unlock confirmed: {offer.entity_id} ({offer.site.label})")
+        del self._offers[offer_id]
+        function_name = offer.call["function"]
+        logger.info(f"{function_name} confirmed: {offer.entity_id} ({offer.site.label})")
         self._continue(self.conversation)
-        ha_client = offer.site.ha_client
-        result = await ha_client.unlock(offer.entity_id) if ha_client else "Home Assistant non disponible"
-        offer.call["confirm"]["done"] = True
-        tool_calls = [{"function": "unlock", "args": offer.call["args"], "result": result}]
-        label = f"Déverrouiller · {offer.call['confirm']['door']}"  # as the button said it
+        if not (ha_client := offer.site.ha_client):
+            result = "Home Assistant non disponible"
+        else:
+            result = await getattr(ha_client, _CONFIRMABLE[function_name].method)(offer.entity_id)
+        confirm = offer.call["confirm"]
+        confirm["done"] = True
+        tool_calls = [{"function": function_name, "args": offer.call["args"], "result": result}]
+        label = f"{confirm['action']} · {confirm['target']}"  # as the button said it
         return self._log_app_action("confirm", label, tool_calls, [result])
 
     # === MEDIA PLAYER ===
@@ -2030,11 +2109,7 @@ class VoiceAssistantServer:
                     return tc_entry, tc_entry["result"]
                 if dry_run:
                     logger.info(f"Dry run: {function_name}({function_args})")
-                    tc_entry["result"] = (
-                        self._unasked_sweep(function_name, function_args)
-                        or self._unknown_speaker(function_name, function_args)
-                        or "OK"
-                    )
+                    tc_entry["result"] = self._refused(function_name, function_args) or "OK"
                     return tc_entry, tc_entry["result"]
                 result = await self._run_call(tc_entry)
                 if "error" not in tc_entry:
@@ -2187,6 +2262,7 @@ class VoiceAssistantServer:
         clients = [site.ha_client for site in self.sites if site.ha_client]
         locks = any(info["domain"] == "lock" for client in clients for info in client.entities.values())
         heating = list(dict.fromkeys(mode for client in clients for mode in client.heating_modes))
+        alarm = list(dict.fromkeys(mode for client in clients for mode in client.alarm_modes()))
         return get_tool_definitions(
             self.ha_client,
             self.calendar_client,
@@ -2194,6 +2270,7 @@ class VoiceAssistantServer:
             homes=homes,
             locks=locks,
             heating=heating,
+            alarm=alarm,
         )
 
     def _continue(self, conversation) -> None:
@@ -2341,7 +2418,7 @@ class VoiceAssistantServer:
     def _log_app_action(
         self, source: str, label: str, tool_calls: list, results: list[str], timings: Optional[dict] = None
     ) -> dict:
-        """A request of the web app that ran without the model (a shortcut, a tap on « Déverrouiller »): logged
+        """A request of the web app that ran without the model (a shortcut, a tap on « Déverrouiller »…): logged
         as the browser's request, worded as its button, its calls' results as the reply. Returns that reply."""
         for tc_entry, result in zip(tool_calls, results):
             _mark_outcome(tc_entry, result)
@@ -2393,7 +2470,9 @@ class VoiceAssistantServer:
                 return await self._at(home, self._call_in_effect(function_name, arguments, state))
         if function_name in self._DEVICE_DOMAINS:
             domains = self._DEVICE_DOMAINS[function_name]
-            ids = self.ha_client.resolve_all_entities(arguments.get("entity", ""), arguments.get("room"), domains)
+            ids = self.ha_client.resolve_all_entities(
+                self._entity_said(function_name, arguments), arguments.get("room"), domains
+            )
             found = await asyncio.gather(*map(state, ids))
             return bool(ids) and all(st and _device_in_effect(function_name, arguments, st) for st in found)
         if not (target := self._resolve_media_target(arguments.get("room"))):

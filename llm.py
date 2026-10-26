@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # field strictly, so there it is only sent when explicitly configured.
 REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "")
 
-# What the text fallback may run; its call has a log entry, for unlock's button (AD-068) as for a picture (AD-069)
+# What the text fallback may run; its call has a log entry, for a button to confirm (AD-068) as for a picture (AD-069)
 _TOOL_NAMES = {
     "turn_on",
     "turn_off",
@@ -44,6 +44,8 @@ _TOOL_NAMES = {
     "show_image",
     "lock",
     "unlock",
+    "arm_alarm",
+    "disarm_alarm",
 }
 
 
@@ -54,11 +56,14 @@ _TOOL_NAMES = {
 # essayer de le rouvrir »): a retry after « ça n'a pas marché » is where the
 # model answered with no call at all (AD-078). A check is a call too, done or
 # promised: « je vais vérifier son état », « j'ai vérifié », and nothing read (AD-082).
-_PAST = "ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill|verifi|regard|control"
+_PAST = (
+    "ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill|verifi|regard|control"
+    "|arm|desarm"
+)
 _PRESENT = "ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille|verifie|regarde|controle"
 _INFINITIVE = (
     "ouvrir|fermer|allumer|eteindre|regler|lancer|programmer|mettre|baisser|monter|verrouiller|activer|desactiver"
-    "|verifier|regarder|controler"
+    "|verifier|regarder|controler|armer|desarmer"
 )
 _ACTION_CLAIM = re.compile(
     r"c'est fait|c'est entendu|voila|je m'en occupe|"
@@ -84,10 +89,22 @@ def claims_completed_action(text: str) -> bool:
     return bool(_ACTION_CLAIM.search(re.sub(r"[^.!?]*\?", "", flat)))
 
 
-def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(), locks=False, heating=()) -> list:
-    """Return LLM tool definitions. `homes`: the homes' names, which the door and heating tools, get_state and
-    get_sensor may name when there are several (AD-068, AD-071); `locks`: whether some home has a lock;
-    `heating`: the modes of the homes' heating, if some home's can be set (AD-071)."""
+# Each mode of arm_alarm (ha_client.ALARM_MODES) as a request says it; « partielle » is Somfy's night mode (AD-083)
+_ALARM_MODE_WORDS = {
+    "absence": "toute la maison, quand personne n'y est (« active l'alarme », « alarme totale »)",
+    "nuit": "pendant qu'on dort (« mode nuit », « alarme partielle »)",
+    "présence": "partielle, quand on est à la maison",
+    "vacances": "pour une longue absence",
+}
+
+
+def get_tool_definitions(
+    ha_client, calendar_client=None, music=False, homes=(), locks=False, heating=(), alarm=()
+) -> list:
+    """Return LLM tool definitions. `homes`: the homes' names, which the door, heating and alarm tools,
+    get_state and get_sensor may name when there are several (AD-068, AD-071, AD-083); `locks`: whether some
+    home has a lock; `heating`: the modes of the homes' heating, if some home's can be set (AD-071); `alarm`:
+    the modes the homes' alarms can be armed in, if some home has one (AD-083)."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -547,6 +564,41 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
             },
         ]
 
+    # An alarm, armed by voice; disarming only proposes, as unlocking does (AD-068, AD-083). « Pas un réveil »:
+    # set_alarm's alarm is a clock's
+    alarm_tools = []
+    if alarm:
+        alarm_tools = [
+            {
+                "name": "arm_alarm",
+                "description": (
+                    "Armer l'alarme anti-intrusion de la maison (« active l'alarme », « mets l'alarme en mode "
+                    "nuit »). Pas un réveil : c'est set_alarm. Jamais pour la désactiver : c'est disarm_alarm."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": list(alarm),
+                            "description": " ; ".join(f"{mode} : {_ALARM_MODE_WORDS[mode]}" for mode in alarm),
+                        },
+                        **elsewhere,
+                    },
+                    "required": ["mode"],
+                },
+            },
+            {
+                "name": "disarm_alarm",
+                "description": (
+                    "Désarmer, désactiver ou couper l'alarme anti-intrusion de la maison (« désactive l'alarme »). "
+                    "Ne désarme rien tout de suite : le résultat dit si une confirmation est demandée dans "
+                    "l'application ou si c'est refusé. Répète-le sans dire que l'alarme est désarmée."
+                ),
+                "parameters": {"type": "object", "properties": {**elsewhere}, "required": []},
+            },
+        ]
+
     # A home whose heating HA sets by a mode (Charras's Ökofen boiler), from either home (AD-071)
     heating_tools = []
     if heating:
@@ -683,7 +735,10 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
         },
         {
             "name": "get_state",
-            "description": "Obtenir l'état actuel d'un appareil (allumé/éteint, température, ouvert/fermé, verrouillé)",
+            "description": (
+                "Obtenir l'état actuel d'un appareil (allumé/éteint, température, ouvert/fermé, verrouillé, "
+                "alarme armée)"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -722,6 +777,7 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
         },
         *standalone_tools,
         *lock_tools,
+        *alarm_tools,
         *heating_tools,
         {
             "name": "end_conversation",

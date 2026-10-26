@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import time
 import unicodedata
 from contextvars import ContextVar
 from typing import Optional
@@ -22,7 +23,7 @@ quiet: ContextVar[bool] = ContextVar("quiet", default=False)
 logger.addFilter(lambda record: record.levelno >= logging.ERROR or not quiet.get())
 
 # Domains we expose as LLM tools
-SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock", "select"}
+SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock", "select", "alarm_control_panel"}
 
 # French stopwords to strip for fuzzy matching
 STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
@@ -176,6 +177,38 @@ def _setpoint_words(mode: str, setpoint: Optional[dict]) -> str:
     return f", en {phase} en ce moment à {_degrees(temps[phase])} degrés ({_degrees(temps[other])} en {other})"
 
 
+# An alarm's modes as arm_alarm names them: its service, the state it ends in, the supported_features bit that
+# offers it (HA's AlarmControlPanelEntityFeature). Charras's Somfy has absence and nuit, its « partielle » (AD-083)
+ALARM_MODES = {
+    "absence": ("alarm_arm_away", "armed_away", 2),
+    "nuit": ("alarm_arm_night", "armed_night", 4),
+    "présence": ("alarm_arm_home", "armed_home", 1),
+    "vacances": ("alarm_arm_vacation", "armed_vacation", 32),
+}
+# The modes that watch the whole house: one of them changes to another by voice, but not to a lesser one,
+# which watches less and takes a disarm first (AD-083)
+_ALARM_FULL = {"armed_away", "armed_vacation"}
+_ALARM_STATES = {
+    "disarmed": "désarmée",
+    **{state: f"armée en mode {mode}" for mode, (_, state, _) in ALARM_MODES.items()},
+    "armed_custom_bypass": "armée en mode personnalisé",
+    "arming": "en cours d'armement",
+    "disarming": "en cours de désarmement",
+    "pending": "sur le point de se déclencher",
+    "triggered": "déclenchée",
+}
+
+
+def alarm_mode(said) -> Optional[str]:
+    """arm_alarm's mode as ALARM_MODES names it, whatever its case and accents (« Presence »); None if none."""
+    return next((mode for mode in ALARM_MODES if fold(mode) == fold(str(said))), None)
+
+
+# How long an alarm takes to say it is armed or disarmed: Charras's goes through the Somfy cloud and back
+# through SomfyProtect2MQTT, which reads the site again a second after each order (AD-083)
+ALARM_CONFIRM_SECONDS = 15
+
+
 def cover_kind(info: dict) -> Optional[str]:
     """Classify a cover as 'volet', 'fenetre' or 'moustiquaire', None if undetermined.
 
@@ -208,6 +241,8 @@ class HAClient:
         self.screens: list[str] = []
         # A heating circuit's select -> the sensor of its setpoint, which names it (AD-075)
         self.setpoints: dict[str, str] = {}
+        # Entities the model never reaches (_fetch_hidden): the last list read, kept when a read fails
+        self.hidden: set[str] = set()
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -285,12 +320,18 @@ class HAClient:
             return None
         return dict(line.split("|", 1) for line in text.split() if "|" in line)
 
-    async def _fetch_hidden(self) -> set[str]:
-        """Entities hidden in HA: replaced by another (Paris hides two Fibaro lights for their endpoints)."""
+    async def _fetch_hidden(self) -> Optional[set[str]]:
+        """Entities the model never reaches, None if HA did not say: those hidden in HA, replaced by another
+        (Paris hides two Fibaro lights for their endpoints), and the switches an alarm's maker made, its
+        siren's and its sensors' settings (Charras's Somfy has 56; its siren sounds at « allume »), AD-083."""
         text = await self._render_template(
-            "{% for s in states if is_hidden_entity(s.entity_id) %}{{ s.entity_id }}\n{% endfor %}"
+            "{% set makers = states.alarm_control_panel | map(attribute='entity_id')"
+            " | map('device_attr', 'manufacturer') | reject('none') | list %}"
+            "{% for s in states if is_hidden_entity(s.entity_id)"
+            " or (makers and s.domain == 'switch' and device_attr(s.entity_id, 'manufacturer') in makers) %}"
+            "{{ s.entity_id }}\n{% endfor %}"
         )
-        return set((text or "").split())
+        return None if text is None else set(text.split())
 
     async def _fetch_screens(self) -> list[str]:
         """media_player entities with a screen — Google's Nest Hubs, told apart by device model.
@@ -322,7 +363,10 @@ class HAClient:
         if (fetched := await self._fetch_entity_areas()) is not None:
             self.entity_areas = fetched
         entity_to_area = self.entity_areas
-        hidden = await self._fetch_hidden()
+        # Kept when the read fails: the siren must not become reachable for want of one
+        if (fetched_hidden := await self._fetch_hidden()) is not None:
+            self.hidden = fetched_hidden
+        hidden = self.hidden
         known = set(self.entities)
 
         self.entities.clear()
@@ -371,6 +415,10 @@ class HAClient:
                 "area_name": area_name,
             }
 
+        # A home's one alarm is « Alarme » in the prompt and the replies, not « Somfy Home Alarm Maison » (AD-083)
+        if len(panels := self.alarm_panels) == 1:
+            self.entities[panels[0]]["friendly_name"] = "Alarme"
+
         # A setpoint sensor names its circuit's select: « Radiateurs consigne » has `circuit:
         # select.radiateurs_mode` (home-infra charras/oekofen/)
         self.setpoints = {
@@ -412,6 +460,7 @@ class HAClient:
                 "media_player": "médias",
                 "lock": "serrures",
                 "select": "chauffage",
+                "alarm_control_panel": "alarme",
             }.get(info["domain"], info["domain"])
             # Roof windows and mosquito screens are covers too — list them apart so the LLM never
             # offers a skylight, or a screen, when the user asked for a roller shutter.
@@ -449,10 +498,14 @@ class HAClient:
         "serrures": ("lock", None),
         "verrou": ("lock", None),
         "chauffage": ("select", None),
+        "alarme": ("alarm_control_panel", None),
+        "alarmes": ("alarm_control_panel", None),
+        "l'alarme": ("alarm_control_panel", None),  # normalize() keeps an elided article
     }
 
-    # Kinds that are the home's, not a room's: « le chauffage » is every circuit of it, HA puts them nowhere (AD-071)
-    _HOME_WIDE = {"select"}
+    # Kinds that are the home's, not a room's: « le chauffage » is every circuit of it, HA puts them nowhere
+    # (AD-071); « l'alarme », the house's (AD-083)
+    _HOME_WIDE = {"select", "alarm_control_panel"}
 
     def is_generic(self, name: str) -> bool:
         """Whether a name says a kind of device (« volets », « la lumière ») rather than one device."""
@@ -652,40 +705,101 @@ class HAClient:
         logger.warning(f"No entity match for '{name}' (room={room})")
         return None
 
-    # Never by voice, whatever route a call takes to get here (AD-041); unlocking is unlock()'s alone (AD-068)
-    _FORBIDDEN_SERVICES = {("lock", "unlock"), ("lock", "open")}
+    # Never by voice, whatever route a call takes to get here (AD-041); unlocking is unlock()'s alone (AD-068),
+    # disarming disarm()'s (AD-083). An alarm is never set off: no trigger, and its siren's switch is out of reach
+    _NOT_BY_VOICE = "Rien n'a été fait : le {} ne se fait pas à la voix"
+    _FORBIDDEN_SERVICES = {
+        ("lock", "unlock"): _NOT_BY_VOICE.format("déverrouillage"),
+        ("lock", "open"): _NOT_BY_VOICE.format("déverrouillage"),
+        ("alarm_control_panel", "alarm_disarm"): _NOT_BY_VOICE.format("désarmement"),
+        ("alarm_control_panel", "alarm_trigger"): "Rien n'a été fait : l'alarme ne se déclenche jamais d'ici",
+    }
 
     async def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
         """Call a HA service and return a French result string for TTS."""
-        if (domain, service) in self._FORBIDDEN_SERVICES:
+        if refused := self._FORBIDDEN_SERVICES.get((domain, service)):
             logger.warning(f"Refused {domain}.{service} -> {entity_id}")
-            return "Le déverrouillage ne se fait pas à la voix"
+            return refused
         return await self._call_service(domain, service, entity_id, **kwargs)
 
     async def unlock(self, entity_id: str) -> str:
         """Unlock a door: only for a tap on the web app's confirmation button, never for the model (AD-068)."""
         return await self._call_service("lock", "unlock", entity_id)
 
-    async def _call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
-        payload = {"entity_id": entity_id}
-        payload.update(kwargs)
+    async def disarm(self, entity_id: str) -> str:
+        """Disarm an alarm: only for a tap on the web app's confirmation button, never for the model (AD-083)."""
+        if error := await self._send("alarm_control_panel", "alarm_disarm", entity_id):
+            return error
+        return await self._alarm_reached(entity_id, {"disarmed"})
 
-        display_name = self.display_name(entity_id)
+    def alarm_modes(self, entity_id: Optional[str] = None) -> list[str]:
+        """The modes an alarm can be armed in, by its supported_features; every alarm's of this home without one."""
+        panels = [entity_id] if entity_id else self.alarm_panels
+        features = [int(self.entities.get(e, {}).get("attributes", {}).get("supported_features") or 0) for e in panels]
+        return [mode for mode, (_, _, bit) in ALARM_MODES.items() if any(f & bit for f in features)]
 
+    async def arm(self, entity_id: str, mode: str) -> str:
+        """Arm an alarm in a mode, from disarmed, or from one mode to one that watches the whole house; awaited
+        until the alarm says it is armed, as whoever leaves on « alarme armée » must be told when it is not
+        (AD-083)."""
+        name = self.display_name(entity_id)
+        if mode not in (modes := self.alarm_modes(entity_id)):
+            return f"Rien n'a été fait : {name} n'a pas de mode {mode} ({', '.join(modes) or 'aucun mode'})"
+        service, armed, _ = ALARM_MODES[mode]
+        state = await self.get_entity_state(entity_id)
+        if not state:
+            return f"Impossible de lire l'état de {name}"
+        current, attributes = state["state"], state.get("attributes", {})
+        if current == armed:
+            return self.alarm_words(entity_id, armed, "déjà")
+        if current.startswith("armed_") and armed not in _ALARM_FULL:
+            # « mets l'alarme en mode nuit », heard from a radio while the house is empty, watches less
+            return (
+                f"Rien n'a été fait : {self.alarm_words(entity_id, current)}. Pour passer en mode {mode}, il faut "
+                "d'abord la désarmer, depuis l'application du téléphone"
+            )
+        if current != "disarmed" and not current.startswith("armed_"):
+            return f"Rien n'a été fait : {self.alarm_words(entity_id, current)}"
+        if attributes.get("code_arm_required") and attributes.get("code_format"):
+            return f"Rien n'a été fait : {name} demande un code pour s'armer, sur son clavier ou son application"
+        if error := await self._send("alarm_control_panel", service, entity_id):
+            return error
+        return await self._alarm_reached(entity_id, {armed, "arming"})
+
+    async def _alarm_reached(self, entity_id: str, wanted: set[str]) -> str:
+        """The alarm's state once it is a wanted one, read every half second; else what it still is after
+        ALARM_CONFIRM_SECONDS. HA's 200 only means the order was handed on: to MQTT, at Charras."""
+        deadline = time.monotonic() + ALARM_CONFIRM_SECONDS
+        while True:
+            await asyncio.sleep(0.5)  # the order goes through the alarm's own cloud, at Charras: never back at once
+            state = (await self.get_entity_state(entity_id) or {}).get("state") or "injoignable"
+            if state in wanted:
+                return self.alarm_words(entity_id, state)
+            if time.monotonic() > deadline:
+                logger.warning(f"{entity_id} still {state} after {ALARM_CONFIRM_SECONDS} s, not {wanted}")
+                words = self.alarm_words(entity_id, state, "toujours")
+                return f"Pas de confirmation : {words} {ALARM_CONFIRM_SECONDS} secondes après l'ordre"
+
+    async def _send(self, domain: str, service: str, entity_id: str, **kwargs) -> Optional[str]:
+        """Post a service call: None once HA took it, else what went wrong, in French."""
+        payload = {"entity_id": entity_id, **kwargs}
         try:
             url = f"{self.base_url}/api/services/{domain}/{service}"
             logger.info(f"HA service call: {domain}.{service} -> {entity_id} {kwargs}")
-
             async with self._session.post(url, json=payload) as resp:
                 if resp.status == 200:
-                    return self._build_response(domain, service, display_name, kwargs)
-                else:
-                    error = await resp.text()
-                    logger.error(f"HA service error {resp.status}: {error}")
-                    return f"Erreur lors du contrôle de {display_name}"
+                    return None
+                error = await resp.text()
+                logger.error(f"HA service error {resp.status}: {error}")
+                return f"Erreur lors du contrôle de {self.display_name(entity_id)}"
         except Exception as e:
             logger.error(f"HA service call failed: {e}")
             return "Impossible de contacter Home Assistant"
+
+    async def _call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
+        if error := await self._send(domain, service, entity_id, **kwargs):
+            return error
+        return self._build_response(domain, service, self.display_name(entity_id), kwargs)
 
     async def search_sensors(self, query: str, limit: int = 15) -> str:
         """Search read-only sensors by keyword and return their current values.
@@ -771,6 +885,14 @@ class HAClient:
             return None
         setpoint = await self.get_entity_state(sensor) if (sensor := self.setpoints.get(entity_id)) else None
         return self.format_state_for_speech(entity_id, state, setpoint)
+
+    @property
+    def alarm_panels(self) -> list[str]:
+        return [eid for eid, info in self.entities.items() if info["domain"] == "alarm_control_panel"]
+
+    def alarm_words(self, entity_id: str, state: str, adverb: str = "") -> str:
+        """An alarm's state as said: « Alarme armée en mode nuit », « Alarme déjà désarmée »."""
+        return " ".join(filter(None, (self.display_name(entity_id), adverb, _ALARM_STATES.get(state, state))))
 
     @property
     def heating_modes(self) -> list[str]:
@@ -922,5 +1044,8 @@ class HAClient:
                 "opening": "en cours d'ouverture",
             }
             return f"{friendly} est {state_map.get(state, state)}"
+
+        if domain == "alarm_control_panel":
+            return self.alarm_words(entity_id, state)
 
         return f"{friendly} est {state}"

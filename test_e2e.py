@@ -31,15 +31,15 @@ def post(path: str, body: dict, timeout: float) -> dict:
     return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
 
 
-def send(text: str) -> dict:
-    """Send a text command via dry-run (no HA execution)."""
+def send(text: str, site: str | None = None) -> dict:
+    """Send a text command via dry-run (no HA execution), at `site` if given."""
     # A loose outer guard: the server gives each LLM call 60 s, and a model on trial may need them
-    return post("/api/dry-run", {"text": text}, 120)
+    return post("/api/dry-run", {"text": text, **({"site": site} if site else {})}, 120)
 
 
-def reset():
+def reset(site: str | None = None):
     """Clear the dry-run conversation between independent tests (the live one is left alone)."""
-    post("/api/reset-conversation", {}, 5)
+    post("/api/reset-conversation", {"site": site} if site else {}, 5)
 
 
 def tool_names(data: dict) -> list[str]:
@@ -227,6 +227,42 @@ def test_set_alarm():
 def test_cancel_timer():
     data = send("annule le timer")
     assert has_tool(data, "cancel_timer"), f"Expected cancel_timer, got {tool_names(data)}"
+
+
+# Charras's alarm (AD-083): the house's, not a clock's; armed by voice, read by get_state
+
+
+def alarm_at(text: str, site: str = "charras") -> dict:
+    reset(site)
+    return send(text, site)
+
+
+@test("arm_alarm: the whole house")
+def test_arm_alarm():
+    data = alarm_at("active l'alarme")
+    args = tool_args(data, "arm_alarm")
+    assert args and args.get("mode") == "absence", f"Expected arm_alarm absence, got {data.get('tool_calls')}"
+
+
+@test("arm_alarm: night mode")
+def test_arm_alarm_night():
+    data = alarm_at("mets l'alarme en mode nuit")
+    args = tool_args(data, "arm_alarm")
+    assert args and args.get("mode") == "nuit", f"Expected arm_alarm nuit, got {data.get('tool_calls')}"
+
+
+@test("get_state: the alarm")
+def test_alarm_state():
+    data = alarm_at("est-ce que l'alarme est activée ?")
+    assert has_tool(data, "get_state"), f"Expected get_state, got {tool_names(data)}"
+    assert not {"arm_alarm", "disarm_alarm"} & set(tool_names(data)), f"Expected a read only, got {tool_names(data)}"
+
+
+@test("arm_alarm: Charras's from Paris")
+def test_arm_alarm_other_home():
+    data = alarm_at("active l'alarme de Charras", "paris")
+    args = tool_args(data, "arm_alarm") or {}
+    assert "charras" in str(args.get("home", "")).lower(), f"Expected arm_alarm at Charras, got {args}"
 
 
 # ---------------------------------------------------------------------------

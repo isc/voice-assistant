@@ -38,9 +38,10 @@ script s'en charge, déploie, et reviendra en arrière si le serveur ne redémar
 Trois corrections au plus par nuit.
 
 Ne corrige jamais toi-même, propose seulement : les serrures et le déverrouillage (`lock`,
-`unlock`, `confirm_unlock`), le contrôle d'accès (`access_control`, `cross_site_guard`, clés,
-Funnel), les secrets, l'enregistrement des voix, les dépendances, le firmware, et tout ce qui
-change le prompt système ou le comportement de l'assistant d'une façon qui se discute.
+`unlock`, `confirm`), l'alarme et son désarmement (`arm_alarm`, `disarm_alarm`, `HAClient.arm`,
+`HAClient.disarm`), le contrôle d'accès (`access_control`, `cross_site_guard`, clés, Funnel), les
+secrets, l'enregistrement des voix, les dépendances, le firmware, et tout ce qui change le prompt
+système ou le comportement de l'assistant d'une façon qui se discute.
 
 **Une amélioration à discuter** : tout le reste qui vaut la peine. Une proposition par sujet, avec
 les faits qui la motivent (heure, ce qui a été dit, ce qui s'est passé), et une ou deux pistes
