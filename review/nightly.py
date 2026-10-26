@@ -78,8 +78,12 @@ def collect(day, out):
     interactions = json.loads((out / "interactions.json").read_text())
     wavs = sorted((out / "audio").glob("*.wav"))
     if wavs:
-        # On the CPU: the GPU is Ollama's and the voice server's (AD-053)
-        lines = run(str(TRANSCRIBE), "--cpu", *map(str, wavs), timeout=1800).stdout.splitlines()
+        # On the GPU only when the unit names a card (charras: the bottom one, home-infra charras/SETUP.md
+        # §23); left to itself, CUDA takes the first, Ollama's and the voice server's (AD-053)
+        cpu = [] if os.environ.get("CUDA_VISIBLE_DEVICES") else ["--cpu"]
+        done = run(str(TRANSCRIBE), *cpu, *map(str, wavs), timeout=1800)
+        print(done.stderr.strip(), file=sys.stderr)  # the device it ran on, and how long
+        lines = done.stdout.splitlines()
         # One line per file, in order, each after a « == file » line when there are several
         texts = lines if len(wavs) == 1 else lines[1::2]
         heard = {f"{day}/{wav.name}": text.strip() for wav, text in zip(wavs, texts)}

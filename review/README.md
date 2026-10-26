@@ -17,7 +17,7 @@ session on it (AD-074).
 1. `collect.py` (`sudo`, from `/opt/voice-assistant`: never the clone Claude edits) writes into
    `~/.local/state/voice-assistant-review/<day>/` the day's requests (`exchanges.json`'s entries
    merged with `recordings/<day>/*.json`), the journal without the HTTP and streaming noise, and the WAVs.
-2. Whisper large-v3 (`~/.local/bin/transcrire --cpu`: the GPU is Ollama's and the server's) transcribes
+2. Whisper large-v3 (`~/.local/bin/transcrire`) transcribes
    each WAV again, beside Parakeet's transcript; the WAVs are then deleted.
 3. Claude (Opus, `claude -p --restricted`, `dontAsk`) works in a clone of `main`
    (`~/.local/share/voice-assistant-review/repo`, reset each night): one commit per obvious fix, with
@@ -45,6 +45,10 @@ ln -sf /opt/voice-assistant/review/voice-assistant-review.{service,timer} ~/.con
 systemctl --user daemon-reload
 systemctl --user enable --now voice-assistant-review.timer
 ```
+
+Whisper runs on the GPU only when the unit names a card in `CUDA_VISIBLE_DEVICES`, else on the CPU:
+left to itself, CUDA would take the first card, Ollama's and the voice server's. On charras, a
+drop-in gives it the bottom card (home-infra `charras/SETUP.md` §23).
 
 `ivan` needs `sudo` without a password (collect, deploy), `gh` logged in (push), and Claude Code's login.
 
