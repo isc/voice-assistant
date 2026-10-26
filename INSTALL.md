@@ -48,7 +48,9 @@ brings the CPU one back and the STT silently drops to the CPU; restore the GPU o
 `sudo venv/bin/pip install --force-reinstall --no-deps onnxruntime-gpu`. The startup log lists the
 ONNX execution providers.
 
-The LLM, Ollama in Docker:
+The LLM, Ollama in Docker. With several cards, replace `--gpus all` by the voice server's card,
+`--gpus device=<UUID>` from `nvidia-smi -L`, or the model spreads over all of them (charras: home-infra
+`charras/SETUP.md` §7 and §23):
 
 ```bash
 docker run -d --name ollama --gpus all --restart unless-stopped \

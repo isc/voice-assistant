@@ -2226,8 +2226,8 @@ class VoiceAssistantServer:
     def _keep_llm_loaded(self) -> None:
         """Ask Ollama to keep the model loaded: it unloads after 5 idle minutes, and the next request
         then waited ~7 s (median of 10 cold requests, against 2.3 s warm). Sent with each request
-        rather than on a timer, so that a job that unloads it to free the GPU (beast) can; a wake word
-        loads it back sooner (`warm_llm`), this pins it."""
+        rather than on a timer, so that a job that unloads it can (none does since charras's second card);
+        a wake word loads it back sooner (`warm_llm`), this pins it."""
         if LLM_API_KEY or not LLM_MODEL or not LLM_URL.endswith("/v1/chat/completions"):
             return
         url = LLM_URL.removesuffix("/v1/chat/completions") + "/api/generate"
