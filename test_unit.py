@@ -28,7 +28,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from opening_hours import ParserError
 
-from ha_client import HAClient, asks_whole_house, cover_kind, normalize, without_home
+from ha_client import HAClient, asks_heating_on, asks_whole_house, cover_kind, normalize, without_home
 from images import Picture, is_about
 import llm
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
@@ -601,6 +601,11 @@ class TestActionClaimDetection(unittest.TestCase):
             "Je suis désolé, je vais essayer de forcer l'ouverture du volet des combles à nouveau.",
             "Je viens de renvoyer l'ordre pour ouvrir le volet des combles.",
             "Je réessaie.",
+            # « il continue de se fermer, et il ne se rouvre pas »: no call behind it, 2 of 5 (AD-082)
+            "Je suis désolé que le volet ne réagisse pas correctement. Je vais vérifier son état actuel.",
+            "Je vais le vérifier.",
+            "Je vérifie l'état du volet.",
+            "J'ai vérifié, le volet est fermé.",
         ]:
             self.assertTrue(claims_completed_action(text), text)
 
@@ -608,7 +613,6 @@ class TestActionClaimDetection(unittest.TestCase):
         for text in [
             "Je ne vais pas ouvrir la fenêtre, il pleut.",
             "Le volet va se rouvrir dans quelques secondes.",
-            "Je vais vérifier l'état du volet.",
             "Veux-tu que je le rouvre ?",
         ]:
             self.assertFalse(claims_completed_action(text), text)
@@ -689,6 +693,16 @@ class TestWholeHouseAsked(unittest.IsolatedAsyncioTestCase):
             "ferme les volets tout de suite", "ferme les volets, c'est tout", "ferme le volet de Zoé",
         ):  # fmt: skip
             self.assertFalse(asks_whole_house(text), text)
+
+    def test_heating_on_said(self):
+        """« allume », « active », « remets » with no mode is the heating's program (AD-082)."""
+        for text in ("allume le chauffage", "Tu peux activer le chauffage ?", "remets le chauffage", "Rallume-le"):
+            self.assertTrue(asks_heating_on(text), text)
+        for text in (
+            "mets le chauffage en confort", "allume le chauffage en réduit", "coupe le chauffage",
+            "désactive le chauffage", "remets le chauffage en auto", "quel temps fait-il ?", "la météo",
+        ):  # fmt: skip
+            self.assertFalse(asks_heating_on(text), text)
 
     async def test_not_asked_not_run(self):
         result = await self.server.execute_function("close_cover", {"entity": "volets", "room": "partout"})
@@ -2373,6 +2387,22 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
             self.server.new_request()
             await self.ask(dry_run=True, text=text)
             self.assertIn(result, self.server._last_tool_calls[0]["result"])
+
+    async def test_heating_on_is_auto(self):
+        """« allume le chauffage » set Confort 10 of 10 as the prompt grew (AD-082); a mode said is kept."""
+        for text, mode, expected in (
+            ("allume le chauffage", "Confort", "Auto"),
+            ("Est-ce que tu peux activer le chauffage dans la maison Achara ?", "Réduit", "Auto"),
+            ("mets le chauffage en confort", "Confort", "Confort"),
+            ("allume le chauffage en réduit", "Réduit", "Réduit"),
+            ("coupe le chauffage", "Off", "Off"),
+        ):
+            heating = {"name": "set_heating", "arguments": json.dumps({"entity": "chauffage", "mode": mode})}
+            self.replies[0]["tool_calls"][0]["function"] = heating
+            self.server.new_request()
+            await self.ask(dry_run=True, text=text)
+            self.assertEqual(self.server._last_tool_calls[0]["args"]["mode"], expected, text)
+            self.assertEqual(json.loads(heating["arguments"])["mode"], expected, text)  # the history's call, as run
 
     async def test_a_speaker_the_home_lacks_too(self):
         """« la Sonos » heard « la sous-douce » (2026-10-21): replayed, the model must be told what it was told."""

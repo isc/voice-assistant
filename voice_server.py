@@ -39,7 +39,7 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 import onnx_gpu
-from ha_client import LOCAL_CONFIG, asks_whole_house, compact, fold, is_whole_house, normalize, quiet
+from ha_client import LOCAL_CONFIG, asks_heating_on, asks_whole_house, compact, fold, is_whole_house, normalize, quiet
 from images import find_image
 from places import address_of, find_place
 from push import Push
@@ -293,6 +293,7 @@ class _Request:
     end_conversation: bool = False  # the end_conversation tool: no follow-up, history cleared
     no_followup: bool = False  # a media command: no follow-up, history kept (AD-035)
     whole_house: bool = False  # the request says tout, tous, partout…: an action may sweep every room (AD-058)
+    heating_on: bool = False  # the request turns on and names no mode: the heating goes to Auto (AD-082)
     client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
     address: Optional[str] = None  # through Funnel, the internet address it came from (AD-050, AD-070)
 
@@ -361,6 +362,7 @@ class VoiceAssistantServer:
     _end_conversation = _request_attribute("end_conversation")
     _no_followup = _request_attribute("no_followup")
     _whole_house = _request_attribute("whole_house")
+    _heating_on = _request_attribute("heating_on")
     _client = _request_attribute("client")
     _address = _request_attribute("address")
 
@@ -1161,6 +1163,17 @@ class VoiceAssistantServer:
         logger.warning(f"Whole house not asked for: {function_name}({arguments}) not run")
         return _WHICH_ROOM
 
+    def _heating_mode_said(self, function_name: str, arguments: dict) -> dict:
+        """The arguments of a call, a heating set to Confort or Réduit that the request did not say set to Auto:
+        « allume le chauffage » is its program (AD-071). gemma drifted to Confort, 10 of 10, as the prompt grew
+        (AD-082); dry runs show it too."""
+        if function_name != "set_heating" or not self._heating_on:
+            return arguments
+        if fold(str(arguments.get("mode", ""))) not in ("confort", "reduit"):
+            return arguments
+        logger.warning(f"Heating mode not asked for: {arguments.get('mode')}, set to Auto")
+        return {**arguments, "mode": "Auto"}
+
     # The radio and volume tools; and all those whose `room` picks the speaker, music_control's only to resume
     _MEDIA_TOOLS = {"play_radio", "stop_media", "set_volume", "change_volume"}
     _SPEAKER_TOOLS = _MEDIA_TOOLS | {"play_music", "move_media"}
@@ -1907,6 +1920,7 @@ class VoiceAssistantServer:
         logger.info(f'LLM input: "{text}"')
         self._keep_llm_loaded()
         self._whole_house = asks_whole_house(text)
+        self._heating_on = asks_heating_on(text)
 
         from timer import format_timers_for_prompt
 
@@ -1999,6 +2013,10 @@ class VoiceAssistantServer:
                     logger.warning(f"Malformed arguments for {function_name}: {tool_call['function']['arguments']!r}")
                     return {"function": function_name, "args": {}, "error": "arguments"}, "Erreur: arguments illisibles"
                 logger.info(f"Function call: {function_name}({function_args})")
+                if (said := self._heating_mode_said(function_name, function_args)) is not function_args:
+                    # The call as run, in the history too: the next turn reads what was set
+                    function_args = said
+                    tool_call["function"]["arguments"] = json.dumps(said, ensure_ascii=False)
                 tc_entry = {"function": function_name, "args": function_args}
                 # The same call again in a later round (show_image ran 3 times, 2026-10-11): its result
                 key = (function_name, json.dumps(function_args, sort_keys=True))

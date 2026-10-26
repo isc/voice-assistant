@@ -75,9 +75,11 @@ def instead(want: str, never: str):
     return lambda d: (want in tool_names(d) and never not in tool_names(d), f"{want}, no {never}")
 
 
-heating_auto_at_charras = has(
-    "set_heating", lambda tc: at_charras(tc) and arg(tc, "mode") == "auto", "set_heating Auto at Charras"
-)
+def heating_mode(mode: str, where=lambda tc: True, expect: str = ""):
+    return has("set_heating", lambda tc: where(tc) and arg(tc, "mode") == norm(mode), expect or f"set_heating {mode}")
+
+
+heating_auto_at_charras = heating_mode("Auto", at_charras, "set_heating Auto at Charras")
 
 
 def reads_charras(d):
@@ -86,6 +88,11 @@ def reads_charras(d):
 
 def small_talk(d):
     return not acts(d) and bool(reply(d)) and len(ENGLISH.findall(reply(d))) < 2, "no action, a French reply"
+
+
+def answers_charras(d):
+    said = re.search("charras|charente", norm(reply(d)))
+    return not acts(d) and bool(said), "no action, says Charras (or Charente)"
 
 
 def goodbye(d):
@@ -97,10 +104,19 @@ def never_heats_charras(d):
 
 
 def garbled_shutters(d):
-    # A room the request did not say: the whole house, which the dry run answers as the server does (AD-058,
-    # « which room? »), or one made up, which it answers « OK »
-    no_room_made_up = all(not arg(tc, "room") or tc.get("result") != "OK" for tc in calls(d, "close_cover"))
-    return no_room_made_up and not calls(d, "open_cover") and "?" in reply(d), "no room made up, a question"
+    # A room the request did not say: the whole house, which the dry run answers as the server does (« which
+    # room? », AD-058), or one made up, which it answers « OK ». No room at all, the server's resolution asks
+    # which one; the dry run cannot
+    closes = calls(d, "close_cover")
+    made_up = any(arg(tc, "room") and tc.get("result") == "OK" for tc in closes)
+    asked = "?" in reply(d) or any(not arg(tc, "room") for tc in closes)
+    return not made_up and not calls(d, "open_cover") and asked, "no room made up, a question"
+
+
+def reopens_or_reads(d):
+    # The shutter read first: what follows its real state, a dry run's « OK » cannot show (AD-082)
+    read = any(re.search("volet|comble", arg(tc, "entity")) for tc in calls(d, "get_state"))
+    return bool(calls(d, "open_cover")) or read, "open_cover, or the shutter read"
 
 
 def zoe_closed_or_asked(d):
@@ -137,13 +153,16 @@ CASES = [
     ("AD-071 maison Achara", "paris", [
         ("Est-ce que tu peux activer le chauffage dans la maison Achara ?", heating_auto_at_charras),
         ("Combien il fait dans la maison là-bas ?", reads_charras),
-        ("Tu parles de Paris ou de la maison en Charente ?",
-         lambda d: (not acts(d) and "charras" in norm(reply(d)), "no action, says Charras")),
+        ("Tu parles de Paris ou de la maison en Charente ?", answers_charras),
     ]),
     ("AD-071 heating over there", "paris", [
         ("Il fait combien à Charras dans la maison ?", reads_charras),
         ("Allume le chauffage là-bas", heating_auto_at_charras),
     ]),
+    # The modes at home: « allume » is Auto, a mode named is that mode (AD-071, AD-082)
+    ("AD-071 heating on", "charras", [("allume le chauffage", heating_mode("Auto"))]),
+    ("AD-071 heating in confort", "charras", [("mets le chauffage en confort", heating_mode("Confort"))]),
+    ("AD-071 heating off", "charras", [("coupe le chauffage", heating_mode("Off"))]),
     ("AD-077 heating at Paris", "paris", [("allume le chauffage", never_heats_charras)]),
     ("AD-077 heating off at Paris", "paris", [("coupe le chauffage", never_heats_charras)]),
     ("AD-072 add the place", "paris", [
@@ -173,7 +192,7 @@ CASES = [
     ("AD-078 open it again", "charras", [
         ("Ferme le volet des combles", has("close_cover")),
         ("Tu peux le rouvrir", has("open_cover")),
-        ("il continue de se fermer, et il ne se rouvre pas", has("open_cover")),
+        ("il continue de se fermer, et il ne se rouvre pas", reopens_or_reads),
     ]),
     ("AD-080 Merci, bonne journée", "charras", [("Merci, bonne journée.", goodbye)]),
     ("AD-080 Bonne nuit", "charras", [("Bonne nuit.", goodbye)]),

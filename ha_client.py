@@ -85,6 +85,20 @@ def asks_whole_house(text: str) -> bool:
     return bool(_WHOLE_HOUSE_WORDS.search(_NOT_WHOLE_HOUSE.sub(" ", fold(text))))
 
 
+# « allume le chauffage », « active-le », « remets le chauffage »: on, with no mode said; « en confort », « en
+# réduit », « coupe » say one. The heating's « on » is Auto, its program (AD-071, AD-082)
+_TURN_ON_WORDS = re.compile(r"\b(?:r?allum|(?:re)?activ)\w*|\b(?:re)?(?:mets|met|mettre)\b")
+_HEATING_MODE_WORDS = re.compile(
+    r"\b(?:confort|comfort|reduit|eco|auto|automatique|programme|off|eteins|coupe|arrete?)\b"
+)
+
+
+def asks_heating_on(text: str) -> bool:
+    """Whether a request turns something on and names no heating mode: « allume le chauffage » is Auto."""
+    flat = fold(text)
+    return bool(_TURN_ON_WORDS.search(flat)) and not _HEATING_MODE_WORDS.search(flat)
+
+
 def _group_rooms(room: str) -> Optional[list[str]]:
     """The rooms of the group a room names, also said with more words (« les chambres des enfants »)."""
     room_words = set(normalize(room).split())

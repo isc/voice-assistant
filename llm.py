@@ -48,14 +48,18 @@ _TOOL_NAMES = {
 
 
 # Claims of having carried something out, or of being about to, matched on
-# accent-stripped lowercase. Deliberately about *actions*: a state report ("le
-# volet est fermé") must not match. Every verb also takes its re- form (« je
+# accent-stripped lowercase. Deliberately about what the model does: a state report
+# ("le volet est fermé") must not match. Every verb also takes its re- form (« je
 # rouvre », « j'ai refermé », « je relance »), and a promise counts (« je vais
 # essayer de le rouvrir »): a retry after « ça n'a pas marché » is where the
-# model answered with no call at all (AD-078).
-_PAST = "ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill"
-_PRESENT = "ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille"
-_INFINITIVE = "ouvrir|fermer|allumer|eteindre|regler|lancer|programmer|mettre|baisser|monter|verrouiller|activer|desactiver"
+# model answered with no call at all (AD-078). A check is a call too, done or
+# promised: « je vais vérifier son état », « j'ai vérifié », and nothing read (AD-082).
+_PAST = "ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill|verifi|regard|control"
+_PRESENT = "ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille|verifie|regarde|controle"
+_INFINITIVE = (
+    "ouvrir|fermer|allumer|eteindre|regler|lancer|programmer|mettre|baisser|monter|verrouiller|activer|desactiver"
+    "|verifier|regarder|controler"
+)
 _ACTION_CLAIM = re.compile(
     r"c'est fait|c'est entendu|voila|je m'en occupe|"
     rf"j'ai (?:bien )?(?:re|r)?(?:{_PAST})|"
@@ -69,7 +73,7 @@ _ACTION_CLAIM = re.compile(
 
 
 def claims_completed_action(text: str) -> bool:
-    """Whether a reply asserts an action was carried out.
+    """Whether a reply asserts an action, or a device read, was carried out or is about to be.
 
     Only meaningful when the model called no function at all — in that case the
     claim is false by construction, since nothing was executed. Questions are left
@@ -550,8 +554,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
             {
                 "name": "set_heating",
                 "description": (
-                    "Allumer, éteindre ou changer le mode du chauffage (« allume le chauffage », « coupe le "
-                    "chauffage », « mets le chauffage en confort »)"
+                    "Allumer le chauffage (« allume », « active » : mode Auto), l'éteindre (« coupe » : Off) ou "
+                    "changer son mode (« mets le chauffage en confort » : Confort)"
                 ),
                 "parameters": {
                     "type": "object",
@@ -567,8 +571,8 @@ def get_tool_definitions(ha_client, calendar_client=None, music=False, homes=(),
                                 # « (horaires inconnus) »: the box does not give them (AD-075)
                                 "Auto : selon le programme horaire de la chaudière (horaires inconnus), pour "
                                 "« allume » ou « active » sans autre précision. Confort : à la température de "
-                                "confort en permanence. Réduit : à la température réduite. Off : arrêté (« éteins », "
-                                "« coupe »)"
+                                "confort en permanence, seulement si la demande dit « confort ». Réduit : à la "
+                                "température réduite. Off : arrêté (« éteins », « coupe »)"
                             ),
                         },
                         **elsewhere,
