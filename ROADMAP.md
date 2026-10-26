@@ -76,6 +76,22 @@ Identify who is speaking. Two distinct problems:
 
 Today Parakeet turns audio into text and every voice cue is lost there, so voice ID means a separate component on the raw audio: a small speaker-verification model whose verdict ("Ivan / child / unknown") is injected into the prompt.
 
+## Sites
+
+### A third home: Ivan's parents
+They have a patchwork of ecosystems side by side (Alexa, Google Home, a HomePod, Velux roof windows, lights of several brands, a recent air conditioner, a Somfy alarm, a Nuki lock) and find each assistant poor at running the house, LLM or not. Served like Paris: a Home Assistant at their place gathers everything, and charras does STT, LLM and TTS for a third site in `SITES`. It makes Ivan their support: with charras or its line down, their voice control is down too (HA and the vendors' apps still work).
+
+- **At their place**: an HA Green or an N100 mini-PC with the Tailscale add-on, as `homeassistant-paris`; a Voice PE per living room, the web app on their phones; a relay for the satellite's API port and the reply audio, as the Paris web VM does (home-infra `charras/voice-paris/`), since their box is likely on `192.168.1.0/24` too. Echo, Nest and HomePod stay: HA can expose its devices back to them, so Siri keeps working, and the Nest speakers become HA players for the radio or a picture. Matter multi-admin shares a device already in Apple, Google or Alexa with HA without pairing it again.
+- **Their devices**: the Nuki through its bridge or Matter (Paris's is on Matter). Velux through HomeKit Controller with a Velux Active (KIX 300, which then leaves Apple Home) or the Velux integration with a KLF 200; a TaHoma also drives io-homecontrol Velux. The Somfy alarm depends on which system: Home Alarm with a TaHoma is Overkiz, local; Somfy Protect has no official integration (Charras's comes into HA through MQTT). The alarm tool written for Charras serves theirs once it is an `alarm_control_panel`. The air conditioner through its brand's integration: `set_temperature` sets its setpoint, its mode (cooling, heating, dry) has no tool yet. Alexa-only lights without Matter are a dead end.
+- **The server first** (checked 2026-10-26):
+  - Homes kept apart. Any request may reach another home (`home` on `lock`, `set_heating`, `get_state`…), and the web app has a single key (`WEB_UI_KEY`): with its link, they could set Charras's heating or ask to unlock its door. A key per household, naming the homes it reaches, and `home` limited to those.
+  - The calendar is one Google account, Ivan's: « qu'est-ce que j'ai demain ? » there would read his. Off for their site, or an account per site.
+  - Spotify is one go-librespot on one account, one stream: their music would stop ours. Off for their site to begin with (see "Two rooms, two musics").
+  - `family` and `room_groups` in `config.local.json` are shared by all sites, and the family goes into the prompt: one of each per site.
+  - One voice conversation at a time across all sites (`claim_voice`): an « Ok Nabu » there while someone speaks at Charras gets an error, likelier with three homes. Voice state per site; STT and TTS stay serialised by `onnx_gpu.run`.
+  - Their voices are kept 90 days in `recordings/` and the nightly review reads their exchanges: tell them, or keep their site out of both.
+- **Order**: the inventory first (brand and model of each device, or screenshots of their apps: Alexa, Google Home, Apple Home, Somfy, Velux, the air conditioner's), since it decides most of the above, above all which Somfy system and which Velux gateway; HA at their place, used on its own for a few weeks; the server's prerequisites; then a Voice PE and the site.
+
 ## Infrastructure
 
 ### Models worth trying (review of 2026-10-21)
