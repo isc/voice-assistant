@@ -253,6 +253,18 @@ class TestResolveEntity(unittest.TestCase):
         eid = self.client.resolve_entity("Volet", room="Chambre Charlie", domain_hints=["cover"])
         self.assertEqual(eid, "cover.volet_charlie")
 
+    def test_exact_name_of_a_device_in_no_room(self):
+        # 2026-10-26 18:16: get_state({'entity': 'Home mini Charlie', 'room': 'Chambre de Charlie'}) was
+        # « non trouvé », the speaker being in no room in HA
+        self.client.entities["media_player.home_mini_charlie"] = {
+            "friendly_name": "Home mini Charlie", "domain": "media_player", "area_name": "", "attributes": {}
+        }  # fmt: skip
+        for hints in (None, ["media_player"]):
+            eid = self.client.resolve_entity("Home mini Charlie", room="Chambre Charlie", domain_hints=hints)
+            self.assertEqual(eid, "media_player.home_mini_charlie")
+        # Only by its exact name: a room's generic speaker is still not one placed nowhere
+        self.assertIsNone(self.client.resolve_entity("Home mini", room="Chambre Charlie", domain_hints=["media_player"]))
+
 
 # ---------------------------------------------------------------------------
 # Tests: resolve_all_entities (groups, generic names, multi-entity)

@@ -636,6 +636,17 @@ class HAClient:
 
         candidates = self._candidates(norm_input, norm_room, domain_hints)
         in_known_room = bool(candidates) and bool(norm_room)
+        if norm_room and norm_input and not generic and norm_input not in candidates.values():
+            # The exact name of a device HA places in no room is that device, whatever room the model
+            # adds: « Home mini Charlie » in « Chambre de Charlie » was not found, being nowhere in HA
+            unplaced = [
+                eid
+                for eid, n in self._candidates(norm_input, None, domain_hints).items()
+                if n == norm_input and not self.entities[eid].get("area_name")
+            ]
+            if len(unplaced) == 1:
+                logger.info(f"Entity match: '{name}' (room='{room}') -> {unplaced[0]} (exact name, in no room)")
+                return unplaced[0]
         if not candidates and norm_room:
             # When the area exists and simply holds no such device, searching the rest of the house
             # is how "ouvre tous les volets sauf celui de Charlie" ended up opening Charlie's: the LLM
