@@ -23,17 +23,22 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Optional
 
 from yarl import URL
 
-SERVER = os.environ.get("VOICE_SERVER", "http://localhost:8888")
+from test_e2e import SERVER
 
 
 def get(path: str) -> dict:
-    with urllib.request.urlopen(f"{SERVER}{path}", timeout=10) as response:
-        return json.loads(response.read())
+    try:
+        response = urllib.request.urlopen(f"{SERVER}{path}", timeout=10)
+    except urllib.error.HTTPError as e:
+        response = e  # /health's 503, a part not ready: it still says which model answers
+    return json.loads(response.read())
 
 
 # === FAKE HOME ===
@@ -163,11 +168,11 @@ def build_server(snapshot: dict, site: str):
     from test_unit import make_server
 
     config = snapshot["config"]
-    for target, value in ((ha_client.LOCAL_CONFIG, config), (ha_client.ROOM_GROUPS, config.get("room_groups", {}))):
-        target.clear()
-        target.update(value)
-    for name in [name for name in ha_client.ROOM_GROUPS if ha_client.is_whole_house(name)]:
-        del ha_client.ROOM_GROUPS[name]  # as ha_client does with its own config
+    ha_client.LOCAL_CONFIG.clear()
+    ha_client.LOCAL_CONFIG.update(config)
+    ha_client.ROOM_GROUPS.clear()  # without the whole house's names, as ha_client loads its own
+    groups = config.get("room_groups", {}).items()
+    ha_client.ROOM_GROUPS.update((name, rooms) for name, rooms in groups if not ha_client.is_whole_house(name))
 
     homes = {home["name"]: copy.deepcopy(home) for home in snapshot["sites"]}
     server = make_server({"SITES": ",".join(homes)})
@@ -190,13 +195,14 @@ def build_server(snapshot: dict, site: str):
 
 @dataclass
 class Turn:
-    """A request's answer: the reply, the calls with their results, the service calls HA got."""
+    """A request's answer: the reply, the calls with their results, the service calls HA got, and the speaker
+    Spotify plays on after it."""
 
-    server: object
     reply: str
     calls: list[dict]
-    sent: list[tuple[str, str, dict]] = field(default_factory=list)
-    wall: float = 0.0
+    sent: list[tuple[str, str, dict]]
+    music: Optional[tuple[str, str]]
+    wall: float
 
     @property
     def said(self) -> str:
@@ -210,31 +216,28 @@ class Turn:
 
 
 def plays_on(entity_id: str):
-    return lambda t: (t.server._spotify_here == ("ha", entity_id), f"the music on {entity_id}")
-
-
-def plays_on_or_asks(entity_id: str, *names: str):
-    """There, or a question naming it."""
-
-    def check(t):
-        asked = "?" in t.reply and not t.played and any(name in t.said for name in names)
-        return t.server._spotify_here == ("ha", entity_id) or asked, f"the music on {entity_id}, or a question"
-
-    return check
+    return lambda t: (t.music == ("ha", entity_id), f"the music on {entity_id}")
 
 
 def offers_one_that_answers(*names: str):
     """Nothing played elsewhere unasked, and a speaker that answers named."""
+    return lambda t: (not t.played and any(name in t.said for name in names), "nothing played, one that answers named")
+
+
+def plays_on_or_asks(entity_id: str, *names: str):
+    """There, or an offer naming it: « … ? », « … si tu le souhaites »."""
 
     def check(t):
-        return not t.played and any(name in t.said for name in names), "nothing played, one that answers named"
+        offered = re.search(r"\?|si tu (?:le )?(?:veux|souhaites|preferes)", t.said)
+        asked = bool(offered) and offers_one_that_answers(*names)(t)[0]
+        return t.music == ("ha", entity_id) or asked, f"the music on {entity_id}, or an offer"
 
     return check
 
 
 def none_said_off(t):
     # A Google Home playing nothing says « off »: the reply took it for one that cannot play (2026-10-26)
-    return not t.played and not re.search(r"eteint", t.said), "nothing played, no speaker said off"
+    return not t.played and "eteint" not in t.said, "nothing played, no speaker said off"
 
 
 # The speakers of Charras that answered on 2026-10-26, as a reply may name them
@@ -257,12 +260,17 @@ SCENARIOS = [
         ("Est-ce que tu peux me jouer le prélude numéro deux de Bach sur la sonos ?",
          offers_one_that_answers(*CHARRAS_ANSWERING), {}),
         ("Y'a pas une sonos qui est joignable ?", none_said_off, {}),
-        ("Bah mets alors sur le Nest Hub Max.", plays_on("media_player.dining_room_display"), {}),
+        # HA names the Nest Hub Max « Dining room Display »: a question is fair, another speaker is not
+        ("Bah mets alors sur le Nest Hub Max.",
+         plays_on_or_asks("media_player.dining_room_display", "dining", "display"), {}),
         ("Tu peux basculer le son sur la sonos, normalement elle est connectée maintenant.",
          plays_on_or_asks("media_player.sonos_move_2", "cuisine", "move 2"), SONOS_BACK),
+        ("Oui, vas-y.", plays_on("media_player.sonos_move_2"), {}),
     ]),
+    # The music on the screen, by its name in HA, whatever the model makes of « Nest Hub Max »
     ("AD-084 c'est parfait ça", "charras", {**CHARRAS_SPEAKERS, **SONOS_BACK}, [
-        ("Mets le prélude numéro deux de Bach sur le Nest Hub Max.", plays_on("media_player.dining_room_display"), {}),
+        ("Mets le prélude numéro deux de Bach sur le Dining room Display.",
+         plays_on("media_player.dining_room_display"), {}),
         ("Y a quoi comme enceinte qui est connectée là ?", none_said_off, {}),
         ("Eh ben la sonos de la cuisine, c'est parfait ça.",
          plays_on_or_asks("media_player.sonos_move_2", "cuisine", "move 2"), {}),
@@ -271,19 +279,19 @@ SCENARIOS = [
 
 
 async def replay(snapshot: dict, site: str, states: dict, turns: list):
-    """One run of a scenario, from a new server; yields each turn."""
+    """One run of a scenario, from a new server; yields each turn with its index."""
     server = build_server(snapshot, site)
     fake = server.ha_client._session
     for eid, state in states.items():
         server.ha_client.entities[eid]["state"] = fake.states[eid] = state
-    for text, _, changes in turns:
+    for i, (text, _, changes) in enumerate(turns):
         fake.states.update(changes)
         sent, t0 = len(fake.calls), time.monotonic()
         server.new_request("replay")  # a browser of the web app, with its own conversation (AD-061)
         reply = await server.process_with_llm(None, text) or ""
         await asyncio.gather(*server._pending_service_calls, *server._background_tasks, return_exceptions=True)
         wall = round(time.monotonic() - t0, 2)
-        yield Turn(server, reply, list(server._last_tool_calls), fake.calls[sent:], wall)
+        yield i, Turn(reply, list(server._last_tool_calls), fake.calls[sent:], server._spotify_here, wall)
 
 
 async def main():
@@ -311,8 +319,7 @@ async def main():
         for name, site, states, turns in scenarios:
             passes = [0] * len(turns)
             for run in range(args.repeats):
-                i = 0
-                async for turn in replay(snapshot, site, states, turns):
+                async for i, turn in replay(snapshot, site, states, turns):
                     text, check, _ = turns[i]
                     ok, expect = check(turn)
                     passes[i] += ok
@@ -326,7 +333,6 @@ async def main():
                             "expect": expect, "wall": turn.wall, "response": turn.reply, "calls": found,
                         }, ensure_ascii=False) + "\n")  # fmt: skip
                         out.flush()
-                    i += 1
             passed += sum(passes)
             total += len(turns) * args.repeats
             print(f"  {name:38} " + "  ".join(f"{p}/{args.repeats}" for p in passes), flush=True)

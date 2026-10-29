@@ -673,10 +673,12 @@ class HAClient:
         # A generic name says which device only within a room: without one, « volets » held the
         # « Volet » of the guest room, first of three so named among nine shutters (AD-058)
         if norm_input and (norm_room or not generic):
-            # The closest name containing the request (the exact name first: it is the shortest);
-            # else the longest name the request contains (« lumière du salon » holds « salon »)
+            # The closest name containing the request: the exact name first, then one that answers
+            # (« la Sonos » at Charras is two, and the shorter name was off, 2026-10-26); else the
+            # longest name the request contains (« lumière du salon » holds « salon »)
             containing = sorted(
-                (eid for eid, n in candidates.items() if norm_input in n), key=lambda e: len(candidates[e])
+                (eid for eid, n in candidates.items() if norm_input in n),
+                key=lambda e: (candidates[e] != norm_input, self.unavailable(e), len(candidates[e])),
             )
             contained = sorted(
                 (eid for eid, n in candidates.items() if n and n in norm_input), key=lambda e: -len(candidates[e])
@@ -898,6 +900,10 @@ class HAClient:
         return self.format_state_for_speech(entity_id, state, setpoint)
 
     @property
+    def speakers(self) -> list[str]:
+        return [eid for eid, info in self.entities.items() if info["domain"] == "media_player"]
+
+    @property
     def alarm_panels(self) -> list[str]:
         return [eid for eid, info in self.entities.items() if info["domain"] == "alarm_control_panel"]
 
@@ -928,20 +934,20 @@ class HAClient:
         names = f"{len(entity_ids)} appareils" if len(entity_ids) > 3 else ", ".join(map(self.display_name, entity_ids))
         return f"{names} ne répondent pas (hors ligne)"
 
-    def _unavailable(self, entity_id: str) -> bool:
+    def unavailable(self, entity_id: str) -> bool:
         return self.entities.get(entity_id, {}).get("state") == "unavailable"
 
     async def reachable(self, entity_ids: list[str]) -> list[str]:
         """The devices HA can reach among these. Those the last refresh found unavailable are read
         again, in one short call: a speaker woken up since would otherwise be refused for five minutes."""
-        if suspects := [eid for eid in entity_ids if self._unavailable(eid)]:
+        if suspects := [eid for eid in entity_ids if self.unavailable(eid)]:
             template = "{% for e in " + json.dumps(suspects) + " %}{{ e }} {{ states(e) }}\n{% endfor %}"
             text = await self._render_template(template, timeout=2)
             for line in (text or "").splitlines():
                 eid, _, state = line.partition(" ")
                 if eid in self.entities:
                     self.entities[eid]["state"] = state
-        return [eid for eid in entity_ids if not self._unavailable(eid)]
+        return [eid for eid in entity_ids if not self.unavailable(eid)]
 
     async def playing_volumes(self) -> dict[str, float]:
         """The speakers playing, with their volume; not a voice satellite, which lowers its own music."""
@@ -1058,5 +1064,11 @@ class HAClient:
 
         if domain == "alarm_control_panel":
             return self.alarm_words(entity_id, state)
+
+        if domain == "media_player":
+            # Not « est off »: a Google Home playing nothing says off, which the model took for a speaker unable
+            # to play, and it said none was left (2026-10-26)
+            state_map = {"playing": "est en lecture", "buffering": "est en lecture", "paused": "est en pause"}
+            return f"{friendly} {state_map.get(state, 'ne joue rien, disponible')}"
 
         return f"{friendly} est {state}"

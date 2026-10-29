@@ -166,6 +166,7 @@ def make_client() -> HAClient:
         "chambre_zoe": "Chambre Zoé",
         "chambre_parents": "Chambre parents",
     }
+    client.home = {}
     client.screens = []
     client.setpoints = {}
     client.hidden = set()
@@ -619,6 +620,11 @@ class TestActionClaimDetection(unittest.TestCase):
             "Je vais le vérifier.",
             "Je vérifie l'état du volet.",
             "J'ai vérifié, le volet est fermé.",
+            # The music on the Nest Hub, no call (2026-10-26)
+            "C'est parfait, je laisse le son sur la Sonos de la cuisine alors.",
+            "Je passe la musique sur la Sonos.",
+            "J'ai transféré le son sur la Google Home.",
+            "J'envoie la musique sur la Sonos.",
         ]:
             self.assertTrue(claims_completed_action(text), text)
 
@@ -627,6 +633,9 @@ class TestActionClaimDetection(unittest.TestCase):
             "Je ne vais pas ouvrir la fenêtre, il pleut.",
             "Le volet va se rouvrir dans quelques secondes.",
             "Veux-tu que je le rouvre ?",
+            "Je te laisse profiter de la musique.",
+            "Je vais te laisser profiter de ta soirée.",
+            "Je peux mettre la musique sur la Sonos de la cuisine, si tu veux.",
         ]:
             self.assertFalse(claims_completed_action(text), text)
 
@@ -2940,34 +2949,43 @@ class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.loads(), [("media_player.sonos_paris", None)])
 
 
-class TestOfflineDevices(unittest.IsolatedAsyncioTestCase):
-    """Paris, one morning: the Sonos Roam asleep, left out of the devices, so « la radio sur
-    Sonos » became room « Living Room » and played on the Google Home."""
+class SpeakersAtHome:
+    """A server whose home has SPEAKERS (entity_id, name, state, area id, area), HA answering no read: the
+    refresh's states hold."""
+
+    SPEAKERS = ()
 
     def setUp(self):
         self.client = make_client()
-        speakers = (
-            ("media_player.google_home", "Google Home", "idle", "living_room", "Living Room"),
-            ("media_player.sonos_paris", "Sonos Paris", "unavailable", None, ""),
-        )
-        for eid, name, state, area_id, area in speakers:
+        for eid, name, state, area_id, area in self.SPEAKERS:
             self.client.entities[eid] = {
                 "friendly_name": name, "domain": "media_player", "state": state,
                 "attributes": {}, "area_id": area_id, "area_name": area,
             }  # fmt: skip
+            if area_id:
+                self.client.areas[area_id] = area
         self.client.call_service = AsyncMock(return_value="ok")
-        self.client._render_template = AsyncMock(return_value=None)  # HA not answering: the refresh's states hold
+        self.client._render_template = AsyncMock(return_value=None)
         self.server = make_server()
         self.server.ha_client = self.client
-        self.server.device_media_keys = {}
-        self.server._pending_service_calls = set()
+
+
+class TestOfflineDevices(SpeakersAtHome, unittest.IsolatedAsyncioTestCase):
+    """Paris, one morning: the Sonos Roam asleep, left out of the devices, so « la radio sur
+    Sonos » became room « Living Room » and played on the Google Home."""
+
+    SPEAKERS = (
+        ("media_player.google_home", "Google Home", "idle", "living_room", "Living Room"),
+        ("media_player.sonos_paris", "Sonos Paris", "unavailable", None, ""),
+    )
 
     def test_listed_for_the_llm(self):
         self.assertIn("Sonos Paris", self.client.get_entity_list_for_prompt())
 
     async def test_said_offline_not_played_elsewhere(self):
         result = await self.server.execute_function("play_radio", {"room": "Sonos", "station": "fip"})
-        self.assertEqual(result, "Sonos Paris ne répond pas (hors ligne)")
+        answering = "Enceintes qui répondent : Google Home (Living Room). Ne lance rien sur une autre sans demander"
+        self.assertEqual(result, f"Sonos Paris ne répond pas (hors ligne). {answering}")
         self.client.call_service.assert_not_awaited()
 
     async def test_woken_up_since_the_refresh(self):
@@ -2989,6 +3007,73 @@ class TestOfflineDevices(unittest.IsolatedAsyncioTestCase):
     def test_many_offline_counted(self):
         velux = [f"cover.velux_{i}" for i in range(18)]
         self.assertEqual(self.client.offline_reply(velux), "18 appareils ne répondent pas (hors ligne)")
+
+
+class TestTwoSonos(SpeakersAtHome, unittest.IsolatedAsyncioTestCase):
+    """Charras, 2026-10-26: « la Sonos » is two, and the model chose the Terrasse's, off. Told only « Sonos Move
+    ne répond pas », it asked for that one again once the Cuisine's answered, and took the Google Home, « off »,
+    for one that could not play: the music reached a Sonos five requests later."""
+
+    SPEAKERS = (
+        ("media_player.sonos_move", "Sonos Move", "unavailable", "terrasse", "Terrasse"),
+        ("media_player.sonos_move_2", "Sonos Move 2", "idle", "cuisine", "Cuisine"),
+        ("media_player.living_room_speaker", "Living Room speaker", "off", "salon", "Salon"),
+        ("media_player.dining_room_display", "Dining room Display", "idle", None, ""),
+        ("media_player.home_mini_zoe", "Home mini Zoé", "unavailable", None, ""),
+    )
+    ANSWERING = (
+        "Enceintes qui répondent : Sonos Move 2 (Cuisine), Living Room speaker (Salon), Dining room Display. "
+        "Ne lance rien sur une autre sans demander"
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.server.spotify = MagicMock()
+        self.server._point_at_spotify = AsyncMock(return_value=True)
+        self.server.new_request()
+
+    async def test_the_speakers_that_answer_named(self):
+        args = {"kind": "track", "query": "Prélude numéro 2 de Bach", "room": "Terrasse"}
+        result = await self.server.execute_function("play_music", args)
+        self.assertEqual(result, f"Sonos Move ne répond pas (hors ligne). {self.ANSWERING}")
+        self.server._point_at_spotify.assert_not_awaited()
+        result = await self.server.execute_function("play_radio", {"room": "Terrasse", "station": "fip"})
+        self.assertEqual(result, f"Sonos Move ne répond pas (hors ligne). {self.ANSWERING}")
+
+    async def test_back_online_since_the_refresh(self):
+        self.client.entities["media_player.sonos_move_2"]["state"] = "unavailable"
+        self.client._render_template.return_value = "media_player.sonos_move_2 idle\n"
+        result = await self.server.execute_function("move_media", {"room": "Terrasse"})
+        self.assertEqual(result, f"Sonos Move ne répond pas (hors ligne). {self.ANSWERING}")
+
+    async def test_none_listed_for_a_stop(self):
+        result = await self.server.execute_function("stop_media", {"room": "Terrasse"})
+        self.assertEqual(result, "Sonos Move ne répond pas (hors ligne)")
+
+    async def test_the_sonos_that_answers(self):
+        await self.server.execute_function("play_radio", {"room": "Sonos", "station": "fip"})
+        self.assertEqual(self.client.call_service.await_args.args[2], "media_player.sonos_move_2")
+
+    def test_a_room_or_its_exact_name_is_kept(self):
+        for said in ("Terrasse", "Sonos Move"):
+            self.assertEqual(self.server._resolve_media_target(said), ("ha", "media_player.sonos_move"), said)
+
+    def test_the_one_that_answers_read_too(self):
+        """« Y'a pas une sonos qui est joignable ? »"""
+        eid = self.client.resolve_entity("Sonos", domain_hints=["media_player"])
+        self.assertEqual(eid, "media_player.sonos_move_2")
+
+    def test_offline_ones_said_so_when_none_matches(self):
+        result = self.server._no_speaker("sous-douce")
+        self.assertIn("Sonos Move (Terrasse, hors ligne), Sonos Move 2 (Cuisine)", result)
+        self.assertIn("Home mini Zoé (hors ligne)", result)
+
+    def test_a_speaker_playing_nothing_can_play(self):
+        for state, said in (("off", "ne joue rien, disponible"), ("idle", "ne joue rien, disponible"),
+                            ("playing", "est en lecture"), ("paused", "est en pause")):  # fmt: skip
+            data = {"state": state, "attributes": {"friendly_name": "Living Room speaker"}}
+            spoken = self.client.format_state_for_speech("media_player.living_room_speaker", data)
+            self.assertEqual(spoken, f"Living Room speaker {said}")
 
 
 class TestDucking(unittest.IsolatedAsyncioTestCase):
@@ -3541,6 +3626,21 @@ class TestWebUICrossSite(unittest.IsolatedAsyncioTestCase):
             response = await client.post("/api/dry-run", data="{", headers={"Content-Type": "application/json"})
             self.assertEqual((response.status, await response.json()), (400, {"error": "invalid JSON"}))
             self.assertEqual((await client.post("/api/reset-conversation", json={})).status, 200)
+
+    async def test_the_snapshot_this_machine_only(self):
+        """The homes' devices and the family, for test_scenarios.py: not through Funnel, which arrives from
+        loopback too, even with the key."""
+        server = make_server()
+        server.site.ha_client = make_client()
+        app = web.Application()
+        with patch.dict(os.environ, {"WEB_UI_KEY": "s3cret"}):
+            setup_routes(app, server)
+        async with TestClient(TestServer(app)) as client:
+            snapshot = await (await client.get("/api/snapshot")).json()
+            self.assertIn("light.plafonnier_zoe", snapshot["sites"][0]["entities"])
+            self.assertIn("config", snapshot)
+            funnel = {"Tailscale-Funnel-Request": "?1", "Cookie": f"{KEY_COOKIE}=s3cret"}
+            self.assertEqual((await client.get("/api/snapshot", headers=funnel)).status, 403)
 
 
 class FakeSpeech:

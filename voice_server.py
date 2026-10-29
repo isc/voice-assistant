@@ -1563,27 +1563,44 @@ class VoiceAssistantServer:
         model offered « une autre enceinte », naming none, and France Inter took three requests more (2026-10-21)."""
         if not room:
             return "Aucune enceinte disponible"
-        speakers = [
-            f"{info['friendly_name']} ({info['area_name']})" if info["area_name"] else info["friendly_name"]
-            for info in (self.ha_client.entities.values() if self.ha_client else ())
-            if info["domain"] == "media_player"
-        ]
-        if satellite := self._satellite_speaker():
-            speakers.append(f"ici ({self._speaker_name(satellite)})")  # « ici » being how a call names it
-        if not speakers:
+        if not (speakers := self._speakers_said(self.ha_client.speakers if self.ha_client else [])):
             return f"Aucune enceinte trouvée pour {room}"
         return (
             f"Aucune enceinte trouvée pour {room}. Enceintes de la maison : {', '.join(speakers)}. "
             "Le nom a pu être mal entendu : demande si c'est l'une d'elles."
         )
 
-    async def _offline_reply(self, target: tuple[str, str]) -> Optional[str]:
+    def _speakers_said(self, entity_ids: list[str]) -> list[str]:
+        """These HA speakers as a result names them, with their room and whether they are offline, so that the
+        model offers none of those; and this site's satellite as « ici »."""
+        speakers = []
+        for eid in entity_ids:
+            info = self.ha_client.entities[eid]
+            notes = ", ".join(filter(None, (info["area_name"], self.ha_client.unavailable(eid) and "hors ligne")))
+            speakers.append(f"{info['friendly_name']} ({notes})" if notes else info["friendly_name"])
+        if satellite := self._satellite_speaker():
+            speakers.append(f"ici ({self._speaker_name(satellite)})")  # « ici » being how a call names it
+        return speakers
+
+    async def _offline_reply(self, target: tuple[str, str], others: bool = False) -> Optional[str]:
         """The result when the target is an HA speaker HA cannot reach (the satellite, being the one listening,
-        always answers)."""
+        always answers). others: name the speakers that answer, for what was to play there. Told only « Sonos Move
+        ne répond pas », the model asked for that Sonos again, the other one back online: the music reached it
+        five requests later (2026-10-26)."""
         kind, ident = target
-        if kind == "ha" and not await self.ha_client.reachable([ident]):
-            return self.ha_client.offline_reply([ident])
-        return None
+        if kind != "ha" or not self.ha_client.unavailable(ident):
+            return None
+        # One read of HA for the target and, to name them, the others the last refresh found offline
+        speakers = [eid for eid in self.ha_client.speakers if eid != ident] if others else []
+        answering = await self.ha_client.reachable([ident, *speakers])
+        if ident in answering:
+            return None
+        refusal = self.ha_client.offline_reply([ident])
+        names = self._speakers_said([eid for eid in answering if eid != ident]) if others else []
+        if not names:
+            return refusal
+        # Else the music went to the living room's speaker, 2 of 10 replays, the request saying « la Sonos »
+        return f"{refusal}. Enceintes qui répondent : {', '.join(names)}. Ne lance rien sur une autre sans demander"
 
     def _after_media_change(self, target: Optional[tuple[str, str]]) -> None:
         """Remember the speaker for volume follow-ups; no follow-up listening (an open mic would
@@ -1608,7 +1625,7 @@ class VoiceAssistantServer:
             target = self._resolve_media_target(room)
         if not target:
             return self._no_speaker(room)
-        if refusal := await self._offline_reply(target):
+        if refusal := await self._offline_reply(target, others=function_name == "play_radio"):
             return refusal
 
         if function_name == "play_radio":
@@ -1685,7 +1702,7 @@ class VoiceAssistantServer:
             target = target or self._resolve_media_target(room)
             if not target:
                 return self._no_speaker(room)
-            if refusal := await self._offline_reply(target):
+            if refusal := await self._offline_reply(target, others=True):
                 return refusal
             found = None
             if function_name == "play_music":
@@ -1756,7 +1773,7 @@ class VoiceAssistantServer:
             return "Rien n'a été fait : la demande ne dit pas vers quelle enceinte"
         if not (target := self._resolve_media_target(room)):
             return self._no_speaker(room)
-        if refusal := await self._offline_reply(target):
+        if refusal := await self._offline_reply(target, others=True):
             return refusal
         name = self._speaker_name(target)
         if source := self._spotify_heard_here:

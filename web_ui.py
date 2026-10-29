@@ -52,13 +52,21 @@ _REVIEW_SESSION = {"ssh_host": "charras", "ssh_folder": "/home/ivan/Code/voice-a
 _MAX_RECORDING = int(MAX_SECONDS) * 16000 * 2
 
 
+def _address(remote: str | None):
+    try:
+        return ipaddress.ip_address(remote or "")
+    except ValueError:
+        return None
+
+
 def is_trusted_client(remote: str | None) -> bool:
     """This machine and the tailnet. The web UI shows transcripts, plays recordings and runs commands."""
-    try:
-        address = ipaddress.ip_address(remote or "")
-    except ValueError:
-        return False
-    return address.is_loopback or address in _TAILNET
+    return (address := _address(remote)) is not None and (address.is_loopback or address in _TAILNET)
+
+
+def _proxied(request) -> bool:
+    """Through Funnel, whose proxy runs on this machine."""
+    return any(header in request.headers for header in _PROXY_HEADERS)
 
 
 def _is_key(given: str | None, key: str) -> bool:
@@ -71,7 +79,7 @@ def access_control(key: str):
 
     @web.middleware
     async def middleware(request, handler):
-        if not any(header in request.headers for header in _PROXY_HEADERS):
+        if not _proxied(request):
             if request.path.startswith(_LAN_PATHS) or is_trusted_client(request.remote):
                 return await handler(request)
             raise web.HTTPForbidden(text="Only speaker files are served on the LAN")
@@ -526,7 +534,7 @@ def setup_routes(app, server):
     async def handle_snapshot(request):
         """Each home's devices as this server knows them, and the local config, which test_scenarios.py replays
         conversations against. This machine only: the config has the family's details."""
-        if any(header in request.headers for header in _PROXY_HEADERS) or request.remote not in ("127.0.0.1", "::1"):
+        if _proxied(request) or (address := _address(request.remote)) is None or not address.is_loopback:
             raise web.HTTPForbidden(text="This machine only")
         homes = [
             {"name": site.name, **{key: getattr(site.ha_client, key) for key in _SNAPSHOT}}

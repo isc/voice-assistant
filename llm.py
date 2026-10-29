@@ -73,7 +73,10 @@ _ACTION_CLAIM = re.compile(
     # Any promised attempt, and an order named as a noun (« je vais essayer de forcer
     # l'ouverture », « je viens de renvoyer l'ordre »): the model rephrases its retries.
     r"\bje vais (?:essayer|tenter|reessayer) d|\bje (?:re)?essaie\b|"
-    r"\bje (?:viens de |viens d'|vais )?\w+ (?:l'ouverture|la fermeture|l'ordre|la commande)\b"
+    r"\bje (?:viens de |viens d'|vais )?\w+ (?:l'ouverture|la fermeture|l'ordre|la commande)\b|"
+    # The sound moved, whatever the verb: « je laisse le son sur la Sonos de la cuisine », the music
+    # on the Nest Hub (2026-10-26). By its object, as « laisser » and « passer » say other things
+    r"\b(?:je |j'ai |j')(?:vais |bien )?\w+ (?:le son|la musique|la radio) sur\b"
 )
 
 

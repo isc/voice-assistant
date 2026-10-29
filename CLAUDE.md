@@ -148,6 +148,17 @@ On a Mac (dev), `./run.sh` runs the server in the foreground, and `ctl.sh` wraps
 ./ctl.sh logs       # tail -f /tmp/voice-assistant.log
 ```
 
+## Tests
+
+Run them with the server's venv, on the server (`/opt/voice-assistant/venv/bin/python`).
+
+- `test_unit.py`: about 3 s, no network, no model. Before every commit.
+- A change to what the model reads (system prompt, tool descriptions, tool results) or to how a call finds its
+  device: `test_scenarios.py` (fake homes, every call run) and `test_hard_cases.py` (dry runs on the live server),
+  10 runs of the cases concerned, before and after. « Before » is a worktree at `main` running this checkout's
+  `test_scenarios.py`; the counts go into the decision in `DECISIONS.md`. A case DECISIONS.md records a model
+  getting wrong becomes a scenario, or a hard case when a dry run's « OK » cannot mislead it.
+
 ## Conventions
 
 - All code and comments in English. French only in user-facing LLM prompts and TTS output.
