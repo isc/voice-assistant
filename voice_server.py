@@ -1616,8 +1616,9 @@ class VoiceAssistantServer:
         names = self._speakers_said([eid for eid in answering if eid != ident]) if others else []
         if not names:
             return refusal
-        # Else the music went to the living room's speaker, 2 of 10 replays, the request saying « la Sonos »
-        return f"{refusal}. Enceintes qui répondent : {', '.join(names)}. Ne lance rien sur une autre sans demander"
+        # Else the music went to the living room's speaker, 2 of 10 replays, the request saying « la Sonos »; and
+        # without « propose-en une par son nom », « sur une autre enceinte ? » named none, 7 of 10 (AD-086)
+        return f"{refusal}. Enceintes qui répondent : {', '.join(names)}. Ne lance rien sur une autre sans demander : propose-en une par son nom"
 
     def _after_media_change(self, target: Optional[tuple[str, str]]) -> None:
         """Remember the speaker for volume follow-ups; no follow-up listening (an open mic would

@@ -241,7 +241,7 @@ def none_said_off(t):
 
 
 # The speakers of Charras that answered on 2026-10-26, as a reply may name them
-CHARRAS_ANSWERING = ("salon", "living", "nest", "hub", "display", "dining", "salle a manger")
+CHARRAS_ANSWERING = ("salon", "living", "nest", "hub", "display", "dining", "salle a manger", "charlie")
 
 CHARRAS_SPEAKERS = {
     "media_player.sonos_move": "unavailable",  # Terrasse

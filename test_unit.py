@@ -2989,7 +2989,10 @@ class TestOfflineDevices(SpeakersAtHome, unittest.IsolatedAsyncioTestCase):
 
     async def test_said_offline_not_played_elsewhere(self):
         result = await self.server.execute_function("play_radio", {"room": "Sonos", "station": "fip"})
-        answering = "Enceintes qui répondent : Google Home (Living Room). Ne lance rien sur une autre sans demander"
+        answering = (
+            "Enceintes qui répondent : Google Home (Living Room). "
+            "Ne lance rien sur une autre sans demander : propose-en une par son nom"
+        )
         self.assertEqual(result, f"Sonos Paris ne répond pas (hors ligne). {answering}")
         self.client.call_service.assert_not_awaited()
 
@@ -3028,7 +3031,7 @@ class TestTwoSonos(SpeakersAtHome, unittest.IsolatedAsyncioTestCase):
     )
     ANSWERING = (
         "Enceintes qui répondent : Sonos Move 2 (Cuisine), Living Room speaker (Salon), Dining room Display. "
-        "Ne lance rien sur une autre sans demander"
+        "Ne lance rien sur une autre sans demander : propose-en une par son nom"
     )
 
     def setUp(self):

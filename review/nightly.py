@@ -69,7 +69,7 @@ UNSTABLE = {
     "AD-080 Bonne nuit",  # end_conversation 1/3, 3/3, 0/3 (AD-083, AD-084)
     "AD-077 games room shutter",  # 0/3, then 3/3 (AD-083)
     "AD-075 the setpoint, three turns · Ben normalement il est déjà allumé hein",  # 3 of 5 (AD-082)
-    # 6 of 10, 9 since HA names the screen so; the two turns after it fall with it, 7 of 10 each (AD-084, AD-085)
+    # 6 of 10, 9 and 10 since HA names the screen so; the two turns after it fall with it (AD-084 to AD-086)
     "AD-084 the Sonos back online · Bah mets alors sur le Nest Hub Max.",
     "AD-084 the Sonos back online · Tu peux basculer le son sur la sonos, normalement elle est connectée maintenant.",
     "AD-084 the Sonos back online · Oui, vas-y.",
