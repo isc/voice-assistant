@@ -11,9 +11,12 @@ Usage:
 """
 
 import asyncio
+import contextvars
 import json
+import logging
 import os
 import socket
+import sys
 import tempfile
 import unittest
 import wave
@@ -34,7 +37,8 @@ import llm
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
 from recordings import Recordings
-from review.nightly import UNSTABLE, compare, scores_of, without_tests
+from review.collect import NOISE
+from review.nightly import UNSTABLE, compare, scores_of
 from sites import load_sites, site_at_address
 from vad import FRAME_BYTES, SpeechEnd
 from web_ui import KEY_COOKIE, access_control, cross_site_guard, handle_review_open, is_trusted_client, setup_routes
@@ -4047,15 +4051,25 @@ class TestNightlyTests(unittest.TestCase):
         self.assertEqual(scores, {self.KEY: 1, "AD-002 a scenario · a request": 1})
         self.assertEqual((model, failures), ("gemma4:12b-8k", {self.KEY: runs[1]}))
 
-    def test_journal_without_the_tests(self):
-        """Their dry runs are not the family's: the next review reads the journal without them."""
-        lines = ["2026-10-30 03:59:58,120 - INFO - LLM input: \"allume la cuisine\"\n",
-                 "2026-10-30 04:00:02,431 - INFO - LLM input: \"Bonne nuit.\"\n",
-                 "Traceback (most recent call last):\n",
-                 "2026-10-30 04:20:00,002 - INFO - LLM input: \"éteins\"\n"]
-        window = ("2026-10-30 04:00:00", "2026-10-30 04:12:31")
-        self.assertEqual(without_tests(lines, [window]), [lines[0], lines[3]])
-        self.assertEqual(without_tests(lines, []), lines)
+    def test_journal_without_dry_runs(self):
+        """Their lines are not the family's: the server tags each, a traceback's too, and the next review's journal
+        leaves them out."""
+        from voice_server import _current_request, _LogFormat, _Request
+
+        try:
+            raise TimeoutError("timed out")
+        except TimeoutError:
+            record = logging.LogRecord("llm", logging.ERROR, "", 0, "LLM error", (), sys.exc_info())
+
+        def lines(dry_run):
+            _current_request.set(_Request(dry_run=dry_run))
+            return _LogFormat("%(levelname)s - %(message)s").format(record).split("\n")
+
+        family, tests = (contextvars.copy_context().run(lines, dry_run) for dry_run in (False, True))
+        self.assertEqual((family[0], family[-1]), ("ERROR - LLM error", "TimeoutError: timed out"))
+        self.assertEqual(tests, [f"[dry run] {line}" for line in family])
+        self.assertEqual([any(noise in line for noise in NOISE) for line in family], [False] * len(family))
+        self.assertEqual([any(noise in line for noise in NOISE) for line in tests], [True] * len(tests))
 
 
 class TestCalendarAtStartup(unittest.IsolatedAsyncioTestCase):

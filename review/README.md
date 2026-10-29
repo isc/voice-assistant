@@ -17,7 +17,8 @@ session on it (AD-074). Then the model-backed tests run, and a turn that regress
 
 1. `collect.py` (`sudo`, from `/opt/voice-assistant`: never the clone Claude edits) writes into
    `~/.local/state/voice-assistant-review/<day>/` the day's requests (`exchanges.json`'s entries
-   merged with `recordings/<day>/*.json`), the journal without the HTTP and streaming noise, and the WAVs.
+   merged with `recordings/<day>/*.json`), the journal without the HTTP and streaming noise nor the dry
+   runs (the server starts their lines with `[dry run]`: the tests', a development session's), and the WAVs.
 2. Whisper large-v3 (`~/.local/bin/transcrire`) transcribes
    each WAV again, beside Parakeet's transcript; the WAVs are then deleted.
 3. Claude (Opus, `claude -p --restricted`, `dontAsk`) works in a clone of `main`
@@ -45,10 +46,9 @@ session on it (AD-074). Then the model-backed tests run, and a turn that regress
    anyway. Also on a night with no request, which gets no review.
 
 Each day's folder keeps `interactions.json`, `journal.log`, `claude.json` (Claude's full answer),
-`review.json`, `proposals/`, `tests.json` (each turn's passes, the commit, the model, the tests' window),
+`review.json`, `proposals/`, `tests.json` (each turn's passes, the commit, the model),
 `test_hard_cases.jsonl`, `test_scenarios.jsonl` (each run of each turn) and `email.html`. The next nights read `review.json` of the
-last 30 to not propose the same thing again, and the journal they collect leaves out the tests' window:
-their dry runs are not the family's.
+last 30 to not propose the same thing again.
 
 ## Install
 

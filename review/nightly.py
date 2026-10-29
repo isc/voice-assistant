@@ -69,13 +69,11 @@ UNSTABLE = {
     "AD-080 Bonne nuit",  # end_conversation 1/3, 3/3, 0/3 (AD-083, AD-084)
     "AD-077 games room shutter",  # 0/3, then 3/3 (AD-083)
     "AD-075 the setpoint, three turns · Ben normalement il est déjà allumé hein",  # 3 of 5 (AD-082)
-    # 6 of 10, and the two turns after it fall with it (AD-084)
+    # 6 of 10, 9 since HA names the screen so; the two turns after it fall with it, 7 of 10 each (AD-084, AD-085)
     "AD-084 the Sonos back online · Bah mets alors sur le Nest Hub Max.",
     "AD-084 the Sonos back online · Tu peux basculer le son sur la sonos, normalement elle est connectée maintenant.",
     "AD-084 the Sonos back online · Oui, vas-y.",
 }
-# A line of the server's journal, by its time (Paris, as the tests' window is written)
-STAMP = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d")
 
 
 def run(*cmd, cwd=None, check=True, timeout=600):
@@ -93,9 +91,6 @@ def commits_since(ref):
 def collect(day, out):
     """The day's data into out; returns the interactions, each with Whisper's transcript of its audio."""
     run("sudo", "-n", "/usr/bin/python3", str(HERE / "collect.py"), day, str(out), os.environ["USER"])
-    journal = out / "journal.log"
-    windows = [(night["started"], night["ended"]) for night in test_nights(day) if "ended" in night]
-    journal.write_text("".join(without_tests(journal.read_text().splitlines(keepends=True), windows)))
     interactions = json.loads((out / "interactions.json").read_text())
     wavs = sorted((out / "audio").glob("*.wav"))
     if wavs:
@@ -266,10 +261,6 @@ def wait_healthy(seconds=300):
     return False
 
 
-def paris_now():
-    return datetime.datetime.now(PARIS).strftime("%Y-%m-%d %H:%M:%S")
-
-
 def test_nights(day):
     """The tests.json of the last nights before day's, oldest first."""
     nights = []
@@ -279,17 +270,6 @@ def test_nights(day):
         except (OSError, ValueError):
             pass
     return nights
-
-
-def without_tests(lines, windows):
-    """The journal's lines outside the nightly tests' runs: their dry runs are not the family's."""
-    kept, inside = [], False
-    for line in lines:
-        if stamp := STAMP.match(line):
-            inside = any(start <= stamp[0] <= end for start, end in windows)
-        if not inside:
-            kept.append(line)
-    return kept
 
 
 def fell(before, now):
@@ -352,7 +332,7 @@ def tests(day, out):
         why = {None: "le serveur ne répond pas", "degraded": "un modèle tourne sur le CPU"}
         return Tested([f"Pas lancés : {why.get(status, f'le serveur dit « {status} »')}."])
     tested, failures, totals = Tested(), {}, []
-    night = {"commit": live_head(), "runs": TEST_RUNS, "started": paris_now(), "scores": {}}
+    night = {"commit": live_head(), "runs": TEST_RUNS, "scores": {}}
     for name, label in TESTS.items():
         turns = out / f"{Path(name).stem}.jsonl"
         turns.unlink(missing_ok=True)  # -o appends
@@ -371,7 +351,6 @@ def tests(day, out):
         night["scores"].update(scores)
         failures.update(failed)
         totals.append(f"{label} {sum(scores.values())}/{len(scores) * TEST_RUNS}")
-    night["ended"] = paris_now()
     (out / "tests.json").write_text(json.dumps(night, ensure_ascii=False, indent=1) + "\n")
     if night["scores"]:
         tested.notes.append(f"`{night['model']}`, {TEST_RUNS} passages, commit `{night['commit'][:7]}` : "

@@ -3,7 +3,7 @@
 
 Run as root: the recordings and the exchange log are root-only. Writes into OUT_DIR, chowned to OWNER:
   interactions.json  each request of the day: the exchange log's entry, merged with its recording's details
-  journal.log        the server's journal for the day, without the HTTP and Spotify streaming noise
+  journal.log        the server's journal for the day, without the HTTP and Spotify streaming noise, nor dry runs
   audio/             the day's WAVs, for a second transcription by Whisper (deleted after the review)
 
   sudo review/collect.py 2026-10-21 /path/to/out ivan
@@ -16,8 +16,9 @@ from datetime import date, timedelta
 from pathlib import Path
 
 LIVE = Path("/opt/voice-assistant")
-# Lines that say nothing of a request: each speaker's fetch, the stream's listeners
-NOISE = ("GET /", "POST /", "Spotify: listener", "Spotify: stream", "Phonemes:", "Kokoro output:")
+# Lines that say nothing of the family's requests: each speaker's fetch, the stream's listeners, the dry runs of
+# the tests and of development sessions (AD-085)
+NOISE = ("GET /", "POST /", "Spotify: listener", "Spotify: stream", "Phonemes:", "Kokoro output:", "[dry run] ")
 
 
 def interactions(day: str) -> list:

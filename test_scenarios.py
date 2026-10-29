@@ -260,16 +260,15 @@ SCENARIOS = [
         ("Est-ce que tu peux me jouer le prélude numéro deux de Bach sur la sonos ?",
          offers_one_that_answers(*CHARRAS_ANSWERING), {}),
         ("Y'a pas une sonos qui est joignable ?", none_said_off, {}),
-        # HA names the Nest Hub Max « Dining room Display »: a question is fair, another speaker is not
-        ("Bah mets alors sur le Nest Hub Max.",
-         plays_on_or_asks("media_player.dining_room_display", "dining", "display"), {}),
+        # « Dining room Display » in HA then, where a question was fair; « Nest Hub Max » since 2026-10-29
+        ("Bah mets alors sur le Nest Hub Max.", plays_on("media_player.dining_room_display"), {}),
         ("Tu peux basculer le son sur la sonos, normalement elle est connectée maintenant.",
          plays_on_or_asks("media_player.sonos_move_2", "cuisine", "move 2"), SONOS_BACK),
         ("Oui, vas-y.", plays_on("media_player.sonos_move_2"), {}),
     ]),
-    # The music on the screen, by its name in HA, whatever the model makes of « Nest Hub Max »
+    # The music on the screen, then the kitchen's Sonos named
     ("AD-084 c'est parfait ça", "charras", {**CHARRAS_SPEAKERS, **SONOS_BACK}, [
-        ("Mets le prélude numéro deux de Bach sur le Dining room Display.",
+        ("Mets le prélude numéro deux de Bach sur le Nest Hub Max.",
          plays_on("media_player.dining_room_display"), {}),
         ("Y a quoi comme enceinte qui est connectée là ?", none_said_off, {}),
         ("Eh ben la sonos de la cuisine, c'est parfait ça.",

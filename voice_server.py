@@ -60,7 +60,6 @@ from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected, Spotif
 from timer import Timer
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 try:
@@ -332,6 +331,7 @@ class _Request:
     heating_on: bool = False  # the request turns on and names no mode: the heating goes to Auto (AD-082)
     client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
     address: Optional[str] = None  # through Funnel, the internet address it came from (AD-050, AD-070)
+    dry_run: bool = False  # a test's (AD-047): its log lines say so, and the nightly review leaves them out (AD-085)
 
 
 @dataclass
@@ -357,6 +357,22 @@ class _Offer:
 
 
 _current_request: ContextVar[_Request] = ContextVar("current_request")
+
+
+class _LogFormat(logging.Formatter):
+    """Each line a dry run logs, a traceback's too, starts with « [dry run] »: the nightly review leaves them out
+    (AD-085)."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        if (request := _current_request.get(None)) and request.dry_run:
+            text = "\n".join(f"[dry run] {line}" for line in text.split("\n"))
+        return text
+
+
+_log = logging.StreamHandler()
+_log.setFormatter(_LogFormat("%(asctime)s - %(levelname)s - %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_log])
 
 
 def _request_attribute(name: str) -> property:
@@ -402,6 +418,7 @@ class VoiceAssistantServer:
     _heating_on = _request_attribute("heating_on")
     _client = _request_attribute("client")
     _address = _request_attribute("address")
+    _dry_run = _request_attribute("dry_run")
 
     def __init__(self):
         self.llm_config = (LLM_API_KEY, LLM_MODEL, LLM_URL)  # for /health
@@ -2013,6 +2030,7 @@ class VoiceAssistantServer:
             parse_text_tool_call,
         )
 
+        self._dry_run = dry_run
         logger.info(f'LLM input: "{text}"')
         self._keep_llm_loaded()
         self._whole_house = asks_whole_house(text)
@@ -2125,7 +2143,6 @@ class VoiceAssistantServer:
                     tc_entry["result"] = f"Fonction {function_name} non disponible"
                     return tc_entry, tc_entry["result"]
                 if dry_run:
-                    logger.info(f"Dry run: {function_name}({function_args})")
                     tc_entry["result"] = self._refused(function_name, function_args) or "OK"
                     return tc_entry, tc_entry["result"]
                 result = await self._run_call(tc_entry)
