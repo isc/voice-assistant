@@ -19,7 +19,7 @@ from aiohttp import WSMsgType, web
 from yarl import URL
 
 import onnx_gpu
-from ha_client import quiet
+from ha_client import LOCAL_CONFIG, quiet
 from sites import Site, site_at_address
 from spotify import CONTROLS
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
@@ -35,6 +35,8 @@ _SPEAKER_PATHS = ("/tts/", "/spotify/")
 _LAN_PATHS = (*_SPEAKER_PATHS, "/health")
 # Tailscale Funnel's proxy runs on this machine: the internet arrives from loopback, told apart by these
 _PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-Funnel-Request")
+# What a home's HAClient knows of its devices, all a replay needs to build one (test_scenarios.py)
+_SNAPSHOT = ("home_name", "entities", "areas", "entity_areas", "home", "screens", "setpoints")
 # Fetched without the cookie when Chrome installs the app, the icons by Google's WebAPK server. static/
 # holds only the shell and its icons: data stays behind api/, tts/, recordings/ and health
 _INSTALL_PATHS = ("/manifest.webmanifest", "/static/")
@@ -521,6 +523,18 @@ def setup_routes(app, server):
             }
         )
 
+    async def handle_snapshot(request):
+        """Each home's devices as this server knows them, and the local config, which test_scenarios.py replays
+        conversations against. This machine only: the config has the family's details."""
+        if any(header in request.headers for header in _PROXY_HEADERS) or request.remote not in ("127.0.0.1", "::1"):
+            raise web.HTTPForbidden(text="This machine only")
+        homes = [
+            {"name": site.name, **{key: getattr(site.ha_client, key) for key in _SNAPSHOT}}
+            for site in server.sites
+            if site.ha_client
+        ]
+        return web.json_response({"sites": homes, "config": LOCAL_CONFIG})
+
     async def handle_reset_conversation(request):
         """Clear a site's dry-run conversation ({"site": …}, else the default), for tests (AD-047)."""
         await use_site(request, await _read_body(request))
@@ -615,6 +629,7 @@ def setup_routes(app, server):
     app.router.add_post("/api/confirm", handle_confirm)
     app.router.add_post("/api/in-effect", handle_in_effect)
     app.router.add_post("/api/dry-run", handle_dry_run)
+    app.router.add_get("/api/snapshot", handle_snapshot)
     app.router.add_post("/api/timers/cancel", handle_cancel_timer)
     app.router.add_post("/api/music", handle_music)
     app.router.add_get("/api/push", handle_push_key)
