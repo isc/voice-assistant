@@ -35,7 +35,7 @@ try:
         _local_config = json.load(_f)
     ROOM_GROUPS: dict[str, list[str]] = _local_config.get("room_groups", {})
     LOCAL_CONFIG = _local_config
-except FileNotFoundError:
+except (FileNotFoundError, PermissionError):  # root's on the server: the nightly tests run as ivan (AD-085)
     ROOM_GROUPS = {}
     LOCAL_CONFIG = {}
 

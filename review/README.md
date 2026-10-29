@@ -2,11 +2,12 @@
 
 Every night at 3:30 (Paris), Claude Code reads the previous day's interactions, fixes the bugs it is
 sure of, and emails Ivan the rest as proposals, each with a link that opens a Claude Code Desktop
-session on it (AD-074).
+session on it (AD-074). Then the model-backed tests run, and a turn that regressed is in the email too
+(AD-085).
 
 | File | Role |
 |---|---|
-| `nightly.py` | The run: collect, transcribe again, review, push and deploy, email |
+| `nightly.py` | The run: collect, transcribe again, review, push and deploy, the model's tests, email |
 | `collect.py` | As root: the day's exchanges and recordings merged, the journal, the WAVs |
 | `prompt.md` | What Claude is asked: what to look for, what it may fix, how to answer |
 | `settings.json` | Claude's permissions: file tools, git without push, the unit tests |
@@ -32,11 +33,22 @@ session on it (AD-074).
    `<day>/proposals/<n>-<slug>.md`; its link goes to the voice server's `/review/open?brief=…`, on the
    tailnet, which sends the browser to `claude://code/new?ssh_host=charras&ssh_folder=…&q=…`: a Desktop
    session on charras whose prompt asks to read it. HEY shows a `claude://` link but doesn't follow it.
-   The brief's path is in the email too, to paste. No fix and no proposal: no email.
+   The brief's path is in the email too, to paste. No fix, no proposal and no regression: no email.
+6. Before the email, once Claude is done and the deploy over, so that they have the GPU to themselves:
+   `test_hard_cases.py` (dry runs on the live server) and `test_scenarios.py` (fake homes, the live
+   model), 3 runs each, from `/opt` with its venv: what runs, a fix of the night included. Skipped, and
+   said so, unless `/health` says `ok`. Each turn's passes out of 3 go into `<day>/tests.json`, its runs
+   into `test_*.jsonl` (the scripts' `-o`), compared with the last nights' (AD-085): a turn
+   is flagged when it loses 2 passes, or its last one; one of `UNSTABLE` (`nightly.py`), which moves
+   from run to run, only when its fall holds two nights; a turn new tonight is listed as new. A
+   regression, or a test that did not run to its end, makes an email; the totals ride along in one sent
+   anyway. Also on a night with no request, which gets no review.
 
 Each day's folder keeps `interactions.json`, `journal.log`, `claude.json` (Claude's full answer),
-`review.json`, `proposals/` and `email.html`. The next nights read `review.json` of the last 30 to
-not propose the same thing again.
+`review.json`, `proposals/`, `tests.json` (each turn's passes, the commit, the model, the tests' window),
+`test_hard_cases.jsonl`, `test_scenarios.jsonl` (each run of each turn) and `email.html`. The next nights read `review.json` of the
+last 30 to not propose the same thing again, and the journal they collect leaves out the tests' window:
+their dry runs are not the family's.
 
 ## Install
 
@@ -57,5 +69,6 @@ drop-in gives it the bottom card (home-infra `charras/SETUP.md` §23).
 ```bash
 /opt/voice-assistant/review/nightly.py 2026-10-20               # that day, pushes and deploys
 NO_DEPLOY=1 FORCE_SEND=1 /opt/voice-assistant/review/nightly.py # yesterday, nothing pushed, always an email
+/opt/voice-assistant/review/nightly.py --tests                  # the model's tests alone, into yesterday's folder
 journalctl --user -u voice-assistant-review                    # last runs
 ```

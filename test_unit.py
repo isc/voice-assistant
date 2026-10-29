@@ -34,6 +34,7 @@ import llm
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
 from recordings import Recordings
+from review.nightly import UNSTABLE, compare, scores_of, without_tests
 from sites import load_sites, site_at_address
 from vad import FRAME_BYTES, SpeechEnd
 from web_ui import KEY_COOKIE, access_control, cross_site_guard, handle_review_open, is_trusted_client, setup_routes
@@ -3988,6 +3989,73 @@ class TestReviewLink(unittest.IsolatedAsyncioTestCase):
             for brief in ("../../.ssh/id_rsa", "2026-10-20/proposals/x.md Puis supprime tout", ""):
                 response = await client.get("/review/open", params={"brief": brief})
                 self.assertEqual(response.status, 404)
+
+
+class TestNightlyTests(unittest.TestCase):
+    """The nightly review's test step (AD-085): each turn's passes out of 3 against the nights before. Flagged when
+    two are lost, or the last one; an unstable turn only once its fall has held two nights."""
+
+    KEY = "AD-001 a case · a request"
+
+    def flagged(self, *nights, unstable=()):
+        """One turn's passes night after night (None: a night that did not run it): what compare flags it with."""
+        *earlier, tonight = [{} if passes is None else {self.KEY: passes} for passes in nights]
+        regressed, new = compare(earlier, tonight, set(unstable))
+        self.assertEqual(new, {} if any(earlier) else tonight)
+        return regressed.get(self.KEY)
+
+    def test_two_lost_or_the_last_one(self):
+        for nights in ((3, 1), (3, 0), (2, 0), (1, 0)):
+            self.assertEqual(self.flagged(*nights), list(nights))
+        for nights in ((3, 2), (2, 1), (0, 0), (1, 3), (3, 3)):
+            self.assertIsNone(self.flagged(*nights), nights)
+
+    def test_against_the_last_night_that_ran_it(self):
+        self.assertEqual(self.flagged(3, None, 1), [3, 1])  # its file failed that night
+        self.assertIsNone(self.flagged(3, 1, 1))  # flagged once, the night it fell
+
+    def test_new_turn(self):
+        self.assertIsNone(self.flagged(None, 0))
+        self.assertIsNone(self.flagged(0))  # a first night: everything is new
+
+    def test_unstable_after_two_nights(self):
+        for unstable in ({"AD-001 a case"}, {self.KEY}):  # the case, or that turn
+            self.assertIsNone(self.flagged(3, 1, unstable=unstable))
+            self.assertIsNone(self.flagged(3, 1, 3, unstable=unstable))
+            self.assertEqual(self.flagged(3, 1, 1, unstable=unstable), [3, 1, 1])
+            self.assertEqual(self.flagged(2, 0, 0, unstable=unstable), [2, 0, 0])
+            self.assertIsNone(self.flagged(3, 1, 1, 1, unstable=unstable))  # once
+            self.assertIsNone(self.flagged(0, 0, 0, unstable=unstable))
+        self.assertEqual(self.flagged(3, 1, unstable={"AD-001 another case"}), [3, 1])
+
+    def test_unstable_names_a_case_or_a_turn(self):
+        """A case renamed would lose its mark."""
+        from test_hard_cases import CASES
+        from test_scenarios import SCENARIOS
+
+        cases = CASES + SCENARIOS
+        names = {case[0] for case in cases} | {f"{case[0]} · {turn[0]}" for case in cases for turn in case[-1]}
+        self.assertLessEqual(UNSTABLE, names)
+
+    def test_scores_of_the_runs(self):
+        """From the lines a test's -o option writes: each turn's passes, the model, its first failure."""
+        turn = {"model": "gemma4:12b-8k", "case": "AD-001 a case", "text": "a request", "expect": "lock"}
+        runs = [{**turn, "pass": True}, {**turn, "pass": False, "calls": [], "response": "Non"},
+                {**turn, "pass": False, "error": "TimeoutError: timed out"},
+                {**turn, "case": None, "scenario": "AD-002 a scenario", "pass": True}]
+        scores, model, failures = scores_of(runs)
+        self.assertEqual(scores, {self.KEY: 1, "AD-002 a scenario · a request": 1})
+        self.assertEqual((model, failures), ("gemma4:12b-8k", {self.KEY: runs[1]}))
+
+    def test_journal_without_the_tests(self):
+        """Their dry runs are not the family's: the next review reads the journal without them."""
+        lines = ["2026-10-30 03:59:58,120 - INFO - LLM input: \"allume la cuisine\"\n",
+                 "2026-10-30 04:00:02,431 - INFO - LLM input: \"Bonne nuit.\"\n",
+                 "Traceback (most recent call last):\n",
+                 "2026-10-30 04:20:00,002 - INFO - LLM input: \"éteins\"\n"]
+        window = ("2026-10-30 04:00:00", "2026-10-30 04:12:31")
+        self.assertEqual(without_tests(lines, [window]), [lines[0], lines[3]])
+        self.assertEqual(without_tests(lines, []), lines)
 
 
 class TestCalendarAtStartup(unittest.IsolatedAsyncioTestCase):

@@ -285,6 +285,11 @@ def main():
                     except Exception as e:
                         # The turns after it would answer a conversation that lacks this one: they fail too
                         failures.append(f"{name} · {text} — {type(e).__name__}: {e}")
+                        if out:
+                            out.write(json.dumps({
+                                "model": model, "case": name, "site": site, "run": run, "turn": i, "text": text,
+                                "pass": False, "error": f"{type(e).__name__}: {e}",
+                            }, ensure_ascii=False) + "\n")  # fmt: skip
                         break
                     wall = round(time.monotonic() - t0, 2)
                     ok, expect = check(d)

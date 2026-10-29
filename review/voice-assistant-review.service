@@ -6,5 +6,6 @@ Type=oneshot
 ExecStart=/usr/bin/python3 /opt/voice-assistant/review/nightly.py
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 UnsetEnvironment=CLAUDE_CODE_OAUTH_TOKEN
-# Whisper (on the CPU unless a drop-in names a card), Claude 40 min at most, the deploy's health wait
-TimeoutStartSec=90min
+# Whisper (on the CPU unless a drop-in names a card), Claude 40 min at most, the deploy's health wait,
+# the model's tests 30 min each at most
+TimeoutStartSec=150min

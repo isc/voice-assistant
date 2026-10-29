@@ -50,7 +50,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `ctl.sh` | Mac dev service control via launchd; `./ctl.sh install` generates the (gitignored) plist |
 | `test_e2e.py` / `test_hard_cases.py` | Dry runs (AD-047) judged on their tool calls: 23 everyday requests; the requests DECISIONS.md records a model getting wrong, several runs each (AD-081). `VOICE_SERVER` points them at a test server |
 | `test_scenarios.py` | Conversations replayed with the real LLM against fake homes whose device states each scenario sets, the server's own code running every call (AD-084): what a dry run's « OK » cannot show, a speaker offline, a state read. The homes' devices come from the live server's `/api/snapshot` (this machine only) |
-| `review/` | The nightly review (AD-074): Claude Code reads the day's interactions, fixes the obvious bugs (pushed and deployed), emails Ivan proposals that open a Desktop session (`review/README.md`) |
+| `review/` | The nightly review (AD-074): Claude Code reads the day's interactions, fixes the obvious bugs (pushed and deployed), emails Ivan proposals that open a Desktop session; then runs the model-backed tests and emails a turn that regressed (AD-085, `review/README.md`) |
 | `firmware/README.md` | How the Voice PE firmware is built and flashed (our build of 26.9.0 with ESPHome 2026.9.1, AD-054) |
 
 ## Pipeline flow (voice)
@@ -159,6 +159,10 @@ Run them with the server's venv, on the server (`/opt/voice-assistant/venv/bin/p
   10 runs of the cases concerned, before and after. « Before » is a worktree at `main` running this checkout's
   `test_scenarios.py`; the counts go into the decision in `DECISIONS.md`. A case DECISIONS.md records a model
   getting wrong becomes a scenario, or a hard case when a dry run's « OK » cannot mislead it.
+- Each night, after its review, `review/nightly.py` runs both, 3 times, against the code deployed, and emails Ivan
+  a turn that lost 2 passes or its last one (AD-085). Not on each commit: they take the GPU the family talks to
+  by day, and a turn's count moves by about 2 of 10 from run to run. A turn that moves so is listed in
+  `UNSTABLE` (`review/nightly.py`), flagged only when its fall holds two nights.
 
 ## Conventions
 
