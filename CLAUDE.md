@@ -152,7 +152,8 @@ On a Mac (dev), `./run.sh` runs the server in the foreground, and `ctl.sh` wraps
 
 Run them with the server's venv, on the server (`/opt/voice-assistant/venv/bin/python`).
 
-- `test_unit.py`: about 3 s, no network, no model. Before every commit.
+- `test_unit.py`: about 3 s, no network, no model. Before every commit: `.githooks/pre-commit` runs it, once
+  a clone has `git config core.hooksPath .githooks` (set on charras).
 - A change to what the model reads (system prompt, tool descriptions, tool results) or to how a call finds its
   device: `test_scenarios.py` (fake homes, every call run) and `test_hard_cases.py` (dry runs on the live server),
   10 runs of the cases concerned, before and after. « Before » is a worktree at `main` running this checkout's

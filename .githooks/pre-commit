@@ -1,0 +1,8 @@
+#!/bin/sh
+# The unit tests before each commit (CLAUDE.md, Tests), on the working tree rather than what is
+# staged. Skipped when only Markdown changes; `git commit --no-verify` skips them altogether.
+git diff --cached --name-only | grep -qv '\.md$' || exit 0
+for python in venv/bin/python /opt/voice-assistant/venv/bin/python; do
+    [ -x "$python" ] && exec "$python" -m unittest -q -b test_unit
+done
+echo "pre-commit: no venv found, unit tests not run" >&2
