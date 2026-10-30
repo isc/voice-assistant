@@ -41,7 +41,7 @@ CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 # A Web API call's two tries: a search takes under a second, so a first one past 2 s has hung (2026-10-20)
 _WEB_TIMEOUTS = (aiohttp.ClientTimeout(total=2), aiohttp.ClientTimeout(total=5))
-# go-librespot answered in 22 ms (2026-10-30), asking Spotify: a liked track only breaks a tie, not worth a wait
+# go-librespot answered in 22 ms (2026-10-30), asking Spotify: the liked tracks only steer a choice, not worth a wait
 _LIKED_TIMEOUT = aiohttp.ClientTimeout(total=0.5)
 
 # go-librespot's PCM: 44.1 kHz, stereo, s16le
@@ -277,11 +277,14 @@ def screen_metadata(title: str, artists: Sequence[str] = (), album: str = "", im
 
 
 class Music(NamedTuple):
-    """What play_music found: the context to play, what the LLM is told, what a screen shows."""
+    """What play_music found: the context to play, what the LLM is told it plays, what a screen shows; the track
+    the context starts at, and what the LLM is told besides (AD-090)."""
 
     uri: str
     description: str
     metadata: dict
+    start_at: str = ""
+    note: str = ""
 
 
 def _music(kind: str, item: dict) -> Music:
@@ -438,6 +441,26 @@ def composer_first(query: str, variant: Optional[str]) -> Optional[str]:
 
 
 _PLAYLIST_FILLER = {"playlist", "ma", "mon", "mes", "notre", "nos"}
+# How the liked tracks are named: « mes titres likés », « dans mes favoris », « mes coups de cœur »
+_LIKED_WORDS = re.compile(
+    r"\b(?:dans |parmi |de |d')?(?:mes |nos |vos |les )?(?:titres? |morceaux |chansons |musique )?"
+    r"(?:likee?s?|liked|favoris|favorites?|preferes?|preferees?|coups? de c(?:oe|œ)ur|aimes?)\b"
+)
+# Words left around them that name no track: « tous mes titres likés en aléatoire », « les titres que j'ai likés »
+_NAMES_NOTHING = _PLAYLIST_FILLER | {
+    "vos", "tous", "toutes", "tout", "titres", "titre", "morceaux", "chansons", "celui", "celle", "ceux", "qui",
+    "que", "est", "sont", "dans", "j", "ai", "spotify", "aleatoire", "hasard", "melange", "lecture",
+}  # fmt: skip
+# What play_music tells the model of a track named among the liked ones (AD-090)
+LIKED_THEN_COLLECTION = "dans vos titres likés, qui suivent"
+NOT_LIKED = "qui n'est pas dans vos titres likés"
+
+
+def liked_piece(query: str) -> Optional[str]:
+    """The track a request for the liked tracks names among them, folded, or None for the whole collection:
+    « prélude numéro deux de Bach Glengould », not « mes favoris »."""
+    rest = " ".join(_LIKED_WORDS.sub(" ", fold(query)).split())
+    return rest if set(_words(rest)) - _NAMES_NOTHING else None
 
 
 def match_playlist(playlists: list[dict], query: str) -> Optional[dict]:
@@ -448,6 +471,11 @@ def match_playlist(playlists: list[dict], query: str) -> Optional[dict]:
     names = [(compact(p["name"]), p) for p in playlists]
     exact = next((p for name, p in names if name == key), None)
     return exact or next((p for name, p in names if name and (key in name or name in key)), None)
+
+
+def _collection(status: dict) -> str:
+    """The liked tracks' context, from go-librespot's status."""
+    return f"spotify:user:{status['username']}:collection"
 
 
 class SpotifyError(Exception):
@@ -530,10 +558,10 @@ class Spotify:
     async def status(self) -> dict:
         return await self._api("GET", "/status")
 
-    async def play(self, uri: str, shuffle: bool = False) -> None:
+    async def play(self, uri: str, shuffle: bool = False, start_at: str = "") -> None:
         # Shuffle has to be set before play to start on a random track
         await self._api("POST", "/player/shuffle_context", json={"shuffle_context": shuffle})
-        await self._api("POST", "/player/play", json={"uri": uri})
+        await self._api("POST", "/player/play", json={"uri": uri} | ({"skip_to_uri": start_at} if start_at else {}))
 
     async def control(self, action: str) -> str:
         """Run a CONTROLS action; returns what the LLM is told."""
@@ -582,9 +610,9 @@ class Spotify:
 
         kind: artist, track, album, playlist (the user's own first, then search) or liked."""
         if kind == "liked":
-            status = await self.status()
-            liked = f"spotify:user:{status['username']}:collection"
-            return Music(liked, "vos titres likés", screen_metadata("Titres likés"))
+            if piece := liked_piece(query):
+                return await self._among_liked(piece)
+            return Music(_collection(await self.status()), "vos titres likés", screen_metadata("Titres likés"))
         if kind == "playlist":
             library = await self._api("GET", "/library/playlists", params={"limit": 500})
             own = match_playlist(library["items"], query)
@@ -593,8 +621,14 @@ class Spotify:
                 return Music(own["uri"], _describe("playlist", own), metadata)
         if kind not in ("artist", "track", "album", "playlist"):
             kind = "track"
-        # Spotify's search, ten results at most, is fuzzy: the request as said, as its catalog writes it,
-        # and with its composer first
+        if not (items := await self._results(query, kind)):
+            return None
+        liked = await self._liked([item["uri"] for item in items]) if kind == "track" else None
+        return _music(kind, best_match(query, items, liked or frozenset()))
+
+    async def _results(self, query: str, kind: str) -> list[dict]:
+        """Spotify's search, ten results at most, is fuzzy: the request as said, as its catalog writes it, and with
+        its composer first; their results in order, once each."""
         variant = search_variant(query)
         searches = dict.fromkeys(filter(None, (query, variant, composer_first(query, variant))))
         await self._search_token()  # once, not by each search
@@ -602,19 +636,30 @@ class Spotify:
         if isinstance(results[0], Exception):
             raise results[0]  # the others only help: one failing leaves the request's own results
         found = [items for items in results if not isinstance(items, Exception)]
-        items = list({item["uri"]: item for item in sum(found, [])}.values())  # in order, once each
+        return list({item["uri"]: item for item in sum(found, [])}.values())
+
+    async def _among_liked(self, piece: str) -> Optional[Music]:
+        """The track a request names among the liked ones, started in their collection, which goes on after it.
+        « Celui de Glengould, dans mes titres préférés » played the whole collection, the request left aside, and
+        the model said Gould's (2026-10-29). go-librespot tells whether tracks are liked, not which: a search
+        finds them, its liked results first."""
+        status, items = await asyncio.gather(self.status(), self._results(piece, "track"))
         if not items:
             return None
-        liked = await self._liked([item["uri"] for item in items]) if kind == "track" else frozenset()
-        return _music(kind, best_match(query, items, liked))
+        if (among := await self._liked([item["uri"] for item in items])) is None:
+            return _music("track", best_match(piece, items))  # whether it is among them, nobody can tell
+        if not (mine := [item for item in items if item["uri"] in among]):
+            return _music("track", best_match(piece, items))._replace(note=NOT_LIKED)
+        best = best_match(piece, mine)
+        return _music("track", best)._replace(uri=_collection(status), start_at=best["uri"], note=LIKED_THEN_COLLECTION)
 
-    async def _liked(self, uris: list[str]) -> frozenset[str]:
+    async def _liked(self, uris: list[str]) -> Optional[frozenset[str]]:
         """Those of these tracks the account liked: « j'ai mis ce morceau précis dans mes titres likés »
-        (2026-10-30). go-librespot can tell, not list them."""
+        (2026-10-30). go-librespot can tell, not list them; None when it cannot, not worth failing the music for."""
         try:
             body = await self._api("GET", "/library/liked", params={"uris": ",".join(uris)}, timeout=_LIKED_TIMEOUT)
         except SpotifyError:
-            return frozenset()  # it only breaks a tie: not worth failing the music for
+            return None
         return frozenset(item["uri"] for item in body.get("items", []) if item.get("liked"))
 
     async def now_metadata(self) -> Optional[dict]:

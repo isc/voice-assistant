@@ -1732,10 +1732,11 @@ class VoiceAssistantServer:
             if not await self._point_at_spotify(target, found.metadata if found else None):
                 return f"{self._speaker_name(target)} ne répond pas"
             if found:
-                await self.spotify.play(found.uri, shuffle=bool(arguments.get("shuffle")))
+                await self.spotify.play(found.uri, shuffle=bool(arguments.get("shuffle")), start_at=found.start_at)
                 self._spotify_query = normalize(arguments.get("query", ""))
-                self._spotify_asked = found.description if found.uri.startswith("spotify:track:") else None
-                result = f"Lecture sur Spotify : {found.description}"
+                track = (found.start_at or found.uri).startswith("spotify:track:")
+                self._spotify_asked = found.description if track else None
+                result = f"Lecture sur Spotify : {found.description}" + (f", {found.note}" if found.note else "")
             else:
                 result = await self.spotify.control("resume")
             self._after_media_change(target)

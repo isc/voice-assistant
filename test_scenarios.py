@@ -136,19 +136,29 @@ PRELUDE = "« Prelude & Fugue No. 2 in C Minor, BWV 847: Prelude » de Johann Se
 
 
 class FakeSpotify:
-    """go-librespot and the search: whatever is asked is found, and plays."""
+    """go-librespot and the search: whatever is asked is found, and plays. Of the liked tracks, the prelude."""
+
+    COLLECTION = "spotify:user:replay:collection"
 
     def __init__(self):
         self.stream, self.found, self.track = FakeStream(), None, None
+        self.next = None  # what the next search finds, as Spotify did that day (searched)
 
     async def find(self, query: str, kind):
         from ha_client import fold
-        from spotify import Music
+        from spotify import LIKED_THEN_COLLECTION, NOT_LIKED, Music, liked_piece
 
-        self.found = PRELUDE if "prelude" in fold(query) else f"« {query} »"
-        return Music(f"spotify:{kind}:replay", self.found, {})
+        self.found, self.next = self.next or (PRELUDE if "prelude" in fold(query) else f"« {query} »"), None
+        if kind != "liked":
+            return Music(f"spotify:{kind}:replay", self.found, {})
+        if not liked_piece(query):
+            self.found = "« Symphony No. 3 in C Minor, Op. 78 » de Camille Saint-Saëns"  # one of them
+            return Music(self.COLLECTION, "vos titres likés", {})
+        if self.found == PRELUDE:
+            return Music(self.COLLECTION, self.found, {}, "spotify:track:replay", LIKED_THEN_COLLECTION)
+        return Music("spotify:track:replay", self.found, {}, note=NOT_LIKED)
 
-    async def play(self, uri: str, shuffle: bool = False):
+    async def play(self, uri: str, shuffle: bool = False, start_at: str = ""):
         self.track = self.found
 
     async def playing(self):
@@ -254,6 +264,14 @@ def searches(*words: str, unlike: str = ""):
     return check
 
 
+def told_playing(description: str):
+    """play_music's result says it plays this."""
+    return lambda t: (
+        any(description in (c.get("result") or "") for c in t.calls if c["function"] == "play_music"),
+        f"told playing {description}",
+    )
+
+
 def none_said_off(t):
     # A Google Home playing nothing says « off »: the reply took it for one that cannot play (2026-10-26)
     return not t.played and "eteint" not in t.said, "nothing played, no speaker said off"
@@ -274,6 +292,15 @@ SONOS_BACK = {"media_player.sonos_move_2": "idle"}
 CONCERTO = (
     "« Bach, JS: Concerto for Four Pianos in A Minor, BWV 1065: I. Allegro » de Johann Sebastian Bach, Michel Béroff"
 )
+
+
+def searched(found: str):
+    """What Spotify's search found that day for the next request: a change not HA's."""
+
+    def change(server):
+        server.spotify.next = found
+
+    return change
 
 
 def went_on(track: str, forgotten: bool = False):
@@ -318,6 +345,16 @@ SCENARIOS = [
          went_on(CONCERTO, forgotten=True)),
         # What was asked before is not what is asked now
         ("Mets plutôt du Chopin.", searches("chopin", unlike="gould"), went_on(CONCERTO)),
+    ]),
+    # Maurane's song first, as Spotify found that day; then the model asked the liked tracks for Gould's, and all of
+    # them played, the request left aside, while the reply said Gould's (2026-10-29)
+    ("AD-090 celui de Glenn Gould dans mes titres likés", "charras", {**CHARRAS_SPEAKERS, **SONOS_BACK}, [
+        ("Est-ce que tu peux nous mettre le prélude numéro deux de Bach dans le salon ?",
+         plays_on("media_player.living_room_speaker"), searched("« Sur un prélude de Bach » de Maurane")),
+        ("Non c'est pas ça que je voulais écouter, je voulais jouer par Glengould, celui qui est dans mes titres "
+         "préférés.", told_playing(PRELUDE), {}),
+        # All of them, as asked on 2026-10-03 (« mes favoris »)
+        ("Mets plutôt tous mes titres likés en aléatoire.", told_playing("Lecture sur Spotify : vos titres likés"), {}),
     ]),
 ]  # fmt: skip
 

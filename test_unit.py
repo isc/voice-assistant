@@ -1858,6 +1858,22 @@ class TestSpotifySearchRanking(unittest.TestCase):
         ):  # fmt: skip
             self.assertEqual(_own_numbers(fold(title)), numbers, title)
 
+    def test_liked_piece(self):
+        """The model's queries for the liked tracks, 2026-10-03 to 2026-10-29, and others."""
+        from spotify import liked_piece
+
+        for query in (
+            "mes favoris", "vos titres likés", "mes coups de cœur", "liked", "celui dans mes titres préférés",
+            "tous mes titres likés", "mes titres likés en aléatoire", "mes favoris Spotify", "musique likée",
+            "les titres que j'ai likés",
+        ):  # fmt: skip
+            self.assertIsNone(liked_piece(query), query)
+        for query, piece in (
+            ("prélude numéro deux de Bach Glengould", "prelude numero deux de bach glengould"),
+            ("Glenn Gould dans mes titres likés", "glenn gould"),
+        ):
+            self.assertEqual(liked_piece(query), piece)
+
     def test_composer_first(self):
         from spotify import composer_first, search_variant
 
@@ -2894,25 +2910,36 @@ class TestSpotifyWebRetry(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSpotifyFind(unittest.IsolatedAsyncioTestCase):
-    """« Prélude numéro 2 de Bach »: three searches, and the account's liked tracks among equals (2026-10-30)."""
+    """« Prélude numéro 2 de Bach »: three searches, and the account's liked tracks among equals (2026-10-30); « celui
+    de Glengould, dans mes titres préférés » played the whole collection (2026-10-29)."""
 
     GOULD = {"name": TestSpotifySearchRanking.GOULD, "uri": "spotify:track:gould",
              "artists": [{"name": "Johann Sebastian Bach"}, {"name": "Glenn Gould"}], "album": {"name": ""}}
     OLAFSSON = {**GOULD, "uri": "spotify:track:olafsson"}
     OLAFSSON["artists"] = [GOULD["artists"][0], {"name": "Víkingur Ólafsson"}]
 
-    def spotify(self, liked):
+    COLLECTION = "spotify:user:ivan:collection"
+
+    def spotify(self, liked=frozenset()):
+        """go-librespot, with these liked tracks or failing so, and Spotify's search as on 2026-10-30."""
         from spotify import Spotify
+
+        async def api(method, path, **kwargs):
+            if path == "/status":
+                return {"username": "ivan"}
+            if isinstance(liked, Exception):
+                raise liked
+            return {"items": [{"uri": uri, "liked": uri in liked} for uri in kwargs["params"]["uris"].split(",")]}
 
         spotify = Spotify()
         spotify._search_token = AsyncMock()
         results = {"bach prelude 2": [self.OLAFSSON, self.GOULD]}
         spotify._search = AsyncMock(side_effect=lambda query, kind: results.get(query, []))
-        spotify._api = AsyncMock(side_effect=liked)
+        spotify._api = AsyncMock(side_effect=api)
         return spotify
 
     async def test_the_liked_recording(self):
-        spotify = self.spotify([{"items": [{"uri": "spotify:track:gould", "liked": True}]}])
+        spotify = self.spotify({"spotify:track:gould"})
         found = await spotify.find("Prélude numéro deux de Bach", "track")
         self.assertEqual(found.uri, "spotify:track:gould")
         searched = [c.args[0] for c in spotify._search.call_args_list]
@@ -2935,13 +2962,41 @@ class TestSpotifyFind(unittest.IsolatedAsyncioTestCase):
                 raise SpotifySearchError("GET search: TimeoutError")
             return [self.GOULD]
 
-        spotify = self.spotify([{"items": []}])
+        spotify = self.spotify()
         spotify._search.side_effect = search
         failing = "the others"
         self.assertEqual((await spotify.find("Prélude numéro deux de Bach", "track")).uri, "spotify:track:gould")
         failing = "all"
         with self.assertRaises(SpotifySearchError):
             await spotify.find("Prélude numéro deux de Bach", "track")
+
+    async def test_the_whole_collection(self):
+        spotify = self.spotify()
+        found = await spotify.find("mes favoris", "liked")
+        self.assertEqual((found.uri, found.description, found.start_at), (self.COLLECTION, "vos titres likés", ""))
+        spotify._search.assert_not_awaited()
+
+    async def test_a_track_among_the_liked_then_the_collection(self):
+        found = await self.spotify({"spotify:track:gould"}).find("prélude numéro deux de Bach", "liked")
+        self.assertEqual((found.uri, found.start_at), (self.COLLECTION, "spotify:track:gould"))  # not Ólafsson's
+        self.assertIn("Glenn Gould", found.description)
+        self.assertEqual(found.note, "dans vos titres likés, qui suivent")
+
+    async def test_a_track_not_among_the_liked(self):
+        found = await self.spotify().find("prélude numéro deux de Bach", "liked")
+        self.assertEqual((found.uri, found.start_at), ("spotify:track:olafsson", ""))
+        self.assertEqual(found.note, "qui n'est pas dans vos titres likés")
+
+    async def test_go_librespot_unable_to_tell_whether_it_is_liked(self):
+        from spotify import SpotifyError
+
+        found = await self.spotify(SpotifyError("go-librespot /library/liked: HTTP 500")).find(
+            "prélude numéro deux de Bach", "liked"
+        )
+        self.assertEqual((found.uri, found.note), ("spotify:track:olafsson", ""))  # nothing said of the liked ones
+
+    async def test_nothing_found_plays_nothing(self):
+        self.assertIsNone(await self.spotify().find("Gymnopédie de Satie dans mes favoris", "liked"))
 
 
 class SpotifySpeakers:
@@ -3129,16 +3184,16 @@ class TestSpotifyAskedForPrompt(SpotifySpeakers, unittest.IsolatedAsyncioTestCas
     CONCERTO = "« Concerto for Four Pianos in A Minor, BWV 1065 » de Johann Sebastian Bach"
 
     async def asyncSetUp(self):
-        self.server.spotify.play = AsyncMock()
-        self.server.spotify.stream.listeners = {object()}
-        await self.play("spotify:track:x", self.PRELUDE)
-
-    async def play(self, uri, description):
-        """On the satellite, as it has no room."""
         from spotify import Music
 
-        self.server.spotify.find = AsyncMock(return_value=Music(uri, description, {}))
-        await self.server.execute_function("play_music", {"query": "Prélude 2 de Bach", "kind": "track"})
+        self.server.spotify.play = AsyncMock()
+        self.server.spotify.stream.listeners = {object()}
+        await self.play(Music("spotify:track:x", self.PRELUDE, {}))
+
+    async def play(self, found, kind="track"):
+        """On the satellite, as it has no room; what play_music says."""
+        self.server.spotify.find = AsyncMock(return_value=found)
+        return await self.server.execute_function("play_music", {"query": "Prélude 2 de Bach", "kind": kind})
 
     async def prompt_playing(self, track):
         self.server.spotify.playing = AsyncMock(return_value=track)
@@ -3151,8 +3206,22 @@ class TestSpotifyAskedForPrompt(SpotifySpeakers, unittest.IsolatedAsyncioTestCas
         prompt = await self.prompt_playing(self.CONCERTO)
         self.assertIn(f"Dernière musique demandée : {self.PRELUDE} (pour la remettre", prompt)
 
+    async def test_a_track_among_the_liked(self):
+        """Started in the collection, which goes on after it (AD-090)."""
+        from spotify import Music
+
+        collection = TestSpotifyFind.COLLECTION
+        liked = Music(collection, self.PRELUDE, {}, "spotify:track:x", "dans vos titres likés")
+        result = await self.play(liked, "liked")
+        self.assertEqual(result, f"Lecture sur Spotify : {self.PRELUDE}, dans vos titres likés")
+        self.server.spotify.play.assert_awaited_with(collection, shuffle=False, start_at="spotify:track:x")
+        prompt = await self.prompt_playing(self.CONCERTO)
+        self.assertIn(f"Dernière musique demandée : {self.PRELUDE} (pour la remettre", prompt)
+
     async def test_an_artist_asked_is_not_said_at_each_of_its_tracks(self):
-        await self.play("spotify:artist:x", "Johann Sebastian Bach")
+        from spotify import Music
+
+        await self.play(Music("spotify:artist:x", "Johann Sebastian Bach", {}))
         self.assertNotIn("demandée", await self.prompt_playing(self.CONCERTO))
 
 
