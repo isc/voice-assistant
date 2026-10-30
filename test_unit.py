@@ -1808,6 +1808,21 @@ class TestSpotifySearchRanking(unittest.TestCase):
         for query in ("Get Lucky Daft Punk", "Get Lucky de Daft Punk", "Symphony 5 Beethoven"):
             self.assertIsNone(search_variant(query), query)
 
+    def test_a_number_said_in_words(self):
+        """Charras, 2026-10-29: Parakeet wrote « le prélude numéro deux de Bach », and Maurane's « Sur un
+        prélude de Bach » played: « deux » was no number, so no search as the catalog writes it, and a tie."""
+        from spotify import best_match, search_variant
+
+        self.assertEqual(search_variant("prélude numéro deux de Bach"), "prelude 2 bach")
+        self.assertEqual(search_variant("Prélude numéro un de Bach"), "prelude 1 bach")
+        results = [
+            self.track("Sur un prélude de Bach", "Maurane"),
+            self.track("Prelude No. 2 in C Minor, BWV 847", "Johann Sebastian Bach"),
+        ]
+        self.assertIn("BWV 847", best_match("prélude numéro deux de Bach", results)["name"])
+        self.assertEqual(best_match("Sur un prélude de Bach", results)["artists"][0]["name"], "Maurane")
+        self.assertIsNone(search_variant("Les deux amis"))
+
 
 class TestSpotifyStreamRead(unittest.TestCase):
     """The FIFO is read in whole stereo frames: a split frame would garble the rest of the stream."""

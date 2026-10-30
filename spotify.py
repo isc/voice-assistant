@@ -319,6 +319,22 @@ _FILLER = STOPWORDS | {
     "numero", "no", "n", "nr", "num", "number", "version", "musique", "music", "classique", "classical",
 }  # fmt: skip
 _TOKEN = re.compile(r"[a-z]+|\d+")
+# A number Parakeet writes in words after « numéro » or « n° »: « le prélude numéro deux de Bach »
+_NUMBER_WORDS = {
+    word: str(number) for number, word in enumerate((
+        "zero", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix",
+        "onze", "douze", "treize", "quatorze", "quinze", "seize", "dix-sept", "dix-huit", "dix-neuf", "vingt",
+    ))
+} | {"une": "1"}  # fmt: skip
+
+
+def _numbered(text: str) -> str:
+    """A folded text with a number said in words after « numéro » written in digits."""
+    return re.sub(
+        r"\b(numero|num|n)([^a-z\d]+)(dix-sept|dix-huit|dix-neuf|[a-z]+)\b",
+        lambda m: m[1] + m[2] + _NUMBER_WORDS.get(m[3], m[3]),
+        text,
+    )
 
 
 def _keys(text: str) -> list[str]:
@@ -332,10 +348,10 @@ def _keys(text: str) -> list[str]:
 
 
 def _words(text: str) -> list[str]:
-    """A folded text's words and numbers, keys and filler left out: « BWV847 » → bwv, 847."""
+    """A folded text's words and numbers, keys and filler left out: « BWV847 » → bwv, 847; « numéro deux » → 2."""
     for pattern, _ in _KEYS:
         text = pattern.sub(" ", text)
-    return [w for w in _TOKEN.findall(text) if w not in _FILLER]
+    return [w for w in _TOKEN.findall(_numbered(text)) if w not in _FILLER]
 
 
 def _same_word(asked: str, word: str) -> bool:
