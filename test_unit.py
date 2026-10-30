@@ -1760,8 +1760,12 @@ class TestSpotifySearchRanking(unittest.TestCase):
     major three times, Spotify's first result."""
 
     @staticmethod
-    def track(name, artist, album=""):
-        return {"name": name, "artists": [{"name": artist}], "album": {"name": album}, "uri": f"spotify:track:{name}"}
+    def track(name, artist, album="", uri=""):
+        artists = [artist] if isinstance(artist, str) else artist
+        return {
+            "name": name, "artists": [{"name": a} for a in artists], "album": {"name": album},
+            "uri": uri or f"spotify:track:{name}",
+        }  # fmt: skip
 
     def test_number_and_key_pick_the_piece(self):
         from spotify import best_match
@@ -1876,6 +1880,49 @@ class TestSpotifySearchRanking(unittest.TestCase):
         self.assertEqual(best_match(query, [olafsson, gould], frozenset({gould["uri"]}))["name"], self.GOULD)
         book_2 = self.track(self.BOOK_2, "Johann Sebastian Bach")
         self.assertEqual(best_match(query, [book_2, gould], frozenset({book_2["uri"]}))["name"], self.GOULD)
+
+    def test_the_artist_most_results_credit_among_equals(self):
+        """« Clair de lune de Debussy » found an upload by « Johann Debussy », first of five equals (2026-10-30)."""
+        from spotify import best_match
+
+        def results(found):  # two share a name
+            return [self.track(*result, uri=f"spotify:track:{i}") for i, result in enumerate(found)]
+
+        # What Spotify found that day, in its order
+        clair_de_lune = results([
+            ("Clair de Lune", ["Johann Debussy"], "Clair de Lune"),
+            ("Clair de Lune, L. 32", ["Claude Debussy", "Martin Jones"],
+             "Debussy: Clair De Lune and Other Piano Favourites"),
+            ("Clair de Lune", ["Claude Debussy", "Czech Symphony Orchestra", "Michaela Rózsa Růžičková"],
+             "Suite bergamasque, L. 75: III. Clair de lune"),
+            ("Debussy: Suite bergamasque, CD 82, L. 75: III. Clair de lune", ["Claude Debussy", "Aldo Ciccolini"],
+             "Focus on the Piano - An Essential Classical Stopover"),
+            ("La ronde des légumes", ["Isabelle Gaboriau", "Les amis de tous les enfants du monde", "Éric Bessot"],
+             "20 chansons et comptines pour les petits, Vol. 3"),
+            ("Debussy: Suite bergamasque, CD 82, L. 75: III. Clair de lune (Arr. Kaiser-Lindemann for Cello Ensemble)",
+             ["Claude Debussy", "Die 12 Cellisten der Berliner Philharmoniker"],
+             "Focus on the Cello - An Essential Classical Stopover"),
+            ("Crois en toi", ["Jok'air"], "Jok'Chirac"),
+            ("Girl In The Orchestra", ["HONNE"], "OUCH"),
+            ("Quand Paris s'éteint - Live", ["Jean-Louis Aubert"], "Concert privé M6"),
+            ("Quand Paris s'éteint", ["Jean-Louis Aubert"], "Comme On A Dit"),
+        ])  # fmt: skip
+        query = "Clair de lune de Debussy"
+        self.assertEqual(best_match(query, clair_de_lune)["name"], "Clair de Lune, L. 32")  # first of the four
+        self.assertEqual(best_match(query, clair_de_lune, frozenset({"spotify:track:0"}))["uri"], "spotify:track:0")
+        imagine = results([
+            ("Imagine", ["John Lennon Experience"], "Imagine - Remembering Lennon 40th Anniversary"),
+            ("Imagine - Remastered 2010", ["John Lennon"], "Imagine"),
+            ("Imagine - Ultimate Mix", ["John Lennon"], "GIMME SOME TRUTH. (Deluxe)"),
+            ("Imagine de John Lennon", ["Louisy Joseph"], "La Saison des Amours"),
+        ])  # fmt: skip
+        self.assertEqual(best_match("Imagine de John Lennon", imagine)["name"], "Imagine - Remastered 2010")
+        # An artist found credits no artist: Spotify's order
+        artists = [
+            {"name": "Daft Punk", "uri": "spotify:artist:a"},
+            {"name": "Daft Punk Tribute", "uri": "spotify:artist:b"},
+        ]
+        self.assertEqual(best_match("Daft Punk", artists)["name"], "Daft Punk")
 
 
 class TestSpotifyStreamRead(unittest.TestCase):

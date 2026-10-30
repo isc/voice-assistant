@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import time
+from collections import Counter
 from typing import Any, Callable, NamedTuple, Optional, Sequence
 
 import aiohttp
@@ -398,14 +399,21 @@ def _score(asked: list[str], keys: set[str], numbers: set[str], item: dict) -> i
 
 
 def best_match(query: str, items: list[dict], liked: frozenset[str] = frozenset()) -> dict:
-    """The search result that fits the request best; among equals, a track the account liked, then Spotify's order.
+    """The search result that fits the request best; among equals, a track the account liked, then one by the artist
+    the most results credit, then Spotify's order.
 
     Not an exact name first: « Get Lucky » was L.E.J's cover, « Sonate au clair de lune
-    Beethoven » a nursery version titled so."""
+    Beethoven » a nursery version titled so. The most credited artist: « Clair de lune de Debussy » found an upload
+    by « Johann Debussy », whom no other result credits, where 4 of the 10 credit Claude Debussy (2026-10-30)."""
     plain = fold(query)
     asked, keys, numbers = _words(plain), set(_keys(plain)), _told_numbers(plain)
-    # max keeps the first of equals
-    return max(items, key=lambda item: (_score(asked, keys, numbers, item), item["uri"] in liked))
+    credits = Counter(name for item in items for name in set(_artist_names(item)))
+
+    def rank(item: dict) -> tuple:
+        credited = max((credits[name] for name in _artist_names(item)), default=0)
+        return _score(asked, keys, numbers, item), item["uri"] in liked, credited
+
+    return max(items, key=rank)  # max keeps the first of equals
 
 
 def search_variant(query: str) -> Optional[str]:
