@@ -1761,7 +1761,7 @@ class TestSpotifySearchRanking(unittest.TestCase):
 
     @staticmethod
     def track(name, artist, album=""):
-        return {"name": name, "artists": [{"name": artist}], "album": {"name": album}}
+        return {"name": name, "artists": [{"name": artist}], "album": {"name": album}, "uri": f"spotify:track:{name}"}
 
     def test_number_and_key_pick_the_piece(self):
         from spotify import best_match
@@ -1822,6 +1822,60 @@ class TestSpotifySearchRanking(unittest.TestCase):
         self.assertIn("BWV 847", best_match("prélude numéro deux de Bach", results)["name"])
         self.assertEqual(best_match("Sur un prélude de Bach", results)["artists"][0]["name"], "Maurane")
         self.assertIsNone(search_variant("Les deux amis"))
+
+    # What Spotify found on 2026-10-30 for « Prélude numéro 2 de Bach », Book 2 first, and for « bach prelude 2 »
+    BOOK_2 = "Bach, JS: Well-Tempered Clavier, Book 2, Prelude and Fugue No. 23 in B Major, BWV 892: I. Prelude"
+    GOULD = "Prelude & Fugue No. 2 in C Minor, BWV 847: Prelude"
+
+    def test_the_number_asked_is_the_pieces_own(self):
+        """« Book 2 » matched « numéro 2 », and Bach's 23rd prelude tied his second (2026-10-30)."""
+        from spotify import best_match
+
+        for book_2 in (self.BOOK_2, "The Well-Tempered Clavier, Book 2: Prelude in C Major, BWV 870"):
+            results = [self.track(book_2, "Johann Sebastian Bach"), self.track(self.GOULD, "Johann Sebastian Bach")]
+            self.assertEqual(best_match("Prélude numéro 2 de Bach", results)["name"], self.GOULD, book_2)
+        nocturnes = [
+            self.track("Chopin: Nocturne No. 20 in C-Sharp Minor, Op. Posth.", "Frédéric Chopin"),
+            self.track("Nocturne No. 2 in E-Flat Major, Op. 9 No. 2", "Frédéric Chopin"),
+        ]
+        self.assertIn("Op. 9", best_match("Nocturne numéro deux de Chopin", nocturnes)["name"])
+        # A title that tells no number of its own: the number is a word like the others
+        symphonies = [self.track("Symphonie fantastique", "Hector Berlioz"), self.track("5ème symphonie", "Beethoven")]
+        self.assertEqual(best_match("Symphonie numéro 5 de Beethoven", symphonies)["name"], "5ème symphonie")
+
+    def test_own_numbers(self):
+        from ha_client import fold
+        from spotify import _own_numbers
+
+        for title, numbers in (
+            (self.BOOK_2, {"23"}), ("24 Préludes, Op. 28: No. 4, Largo", {"4"}), ("Prélude n°2", {"2"}),
+            ("Gymnopédie 1", {"1"}), ("5ème symphonie", {"5"}), ("Impromptu D. 899 No. 3", {"3"}),
+            ("The Well-Tempered Clavier, Book 2: Prelude in C Major, BWV 870", set()), ("Sonata K. 545", set()),
+        ):  # fmt: skip
+            self.assertEqual(_own_numbers(fold(title)), numbers, title)
+
+    def test_composer_first(self):
+        from spotify import composer_first, search_variant
+
+        for query, searched in (
+            ("le prélude numéro deux de Bach", "bach prelude 2"),
+            ("Prélude numéro 2 de Bach en Do mineur", "bach prelude 2 c minor"),
+            ("Concerto pour piano numéro 21 de Mozart", "mozart concerto piano 21"),
+            ("Get Lucky de Daft Punk", None), ("Symphony 5 Beethoven", None), ("Prélude numéro 2", None),
+        ):  # fmt: skip
+            self.assertEqual(composer_first(query, search_variant(query)), searched, query)
+
+    def test_a_liked_track_among_equals(self):
+        """« J'ai mis ce morceau précis dans mes titres likés » (2026-10-30)."""
+        from spotify import best_match
+
+        olafsson = self.track("Prelude & Fugue No. 2 in C Minor, BWV 847: I. Prelude", "Johann Sebastian Bach")
+        gould = self.track(self.GOULD, "Johann Sebastian Bach")
+        query = "Prélude numéro 2 de Bach"
+        self.assertEqual(best_match(query, [olafsson, gould])["name"], olafsson["name"])  # Spotify's order
+        self.assertEqual(best_match(query, [olafsson, gould], frozenset({gould["uri"]}))["name"], self.GOULD)
+        book_2 = self.track(self.BOOK_2, "Johann Sebastian Bach")
+        self.assertEqual(best_match(query, [book_2, gould], frozenset({book_2["uri"]}))["name"], self.GOULD)
 
 
 class TestSpotifyStreamRead(unittest.TestCase):
@@ -2790,6 +2844,57 @@ class TestSpotifyWebRetry(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(SpotifySearchError):
             await spotify._search("Prélude 2 de Bach", "track")
         self.assertEqual(spotify._request.await_count, 1)
+
+
+class TestSpotifyFind(unittest.IsolatedAsyncioTestCase):
+    """« Prélude numéro 2 de Bach »: three searches, and the account's liked tracks among equals (2026-10-30)."""
+
+    GOULD = {"name": TestSpotifySearchRanking.GOULD, "uri": "spotify:track:gould",
+             "artists": [{"name": "Johann Sebastian Bach"}, {"name": "Glenn Gould"}], "album": {"name": ""}}
+    OLAFSSON = {**GOULD, "uri": "spotify:track:olafsson"}
+    OLAFSSON["artists"] = [GOULD["artists"][0], {"name": "Víkingur Ólafsson"}]
+
+    def spotify(self, liked):
+        from spotify import Spotify
+
+        spotify = Spotify()
+        spotify._search_token = AsyncMock()
+        results = {"bach prelude 2": [self.OLAFSSON, self.GOULD]}
+        spotify._search = AsyncMock(side_effect=lambda query, kind: results.get(query, []))
+        spotify._api = AsyncMock(side_effect=liked)
+        return spotify
+
+    async def test_the_liked_recording(self):
+        spotify = self.spotify([{"items": [{"uri": "spotify:track:gould", "liked": True}]}])
+        found = await spotify.find("Prélude numéro deux de Bach", "track")
+        self.assertEqual(found.uri, "spotify:track:gould")
+        searched = [c.args[0] for c in spotify._search.call_args_list]
+        self.assertEqual(searched, ["Prélude numéro deux de Bach", "prelude 2 bach", "bach prelude 2"])
+        self.assertEqual(spotify._api.call_args.args, ("GET", "/library/liked"))
+        liked = spotify._api.call_args.kwargs["params"]
+        self.assertEqual(liked, {"uris": "spotify:track:olafsson,spotify:track:gould"})
+
+    async def test_go_librespot_unable_to_tell(self):
+        from spotify import SpotifyError
+
+        spotify = self.spotify(SpotifyError("go-librespot /library/liked: HTTP 500"))
+        self.assertEqual((await spotify.find("Prélude numéro deux de Bach", "track")).uri, "spotify:track:olafsson")
+
+    async def test_the_other_searches_only_help(self):
+        from spotify import SpotifySearchError
+
+        def search(query, kind):
+            if query != "Prélude numéro deux de Bach" or failing == "all":
+                raise SpotifySearchError("GET search: TimeoutError")
+            return [self.GOULD]
+
+        spotify = self.spotify([{"items": []}])
+        spotify._search.side_effect = search
+        failing = "the others"
+        self.assertEqual((await spotify.find("Prélude numéro deux de Bach", "track")).uri, "spotify:track:gould")
+        failing = "all"
+        with self.assertRaises(SpotifySearchError):
+            await spotify.find("Prélude numéro deux de Bach", "track")
 
 
 class SpotifySpeakers:

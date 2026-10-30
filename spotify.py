@@ -40,6 +40,8 @@ CLIENT_ID = os.environ.get("SPOTIFY_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
 # A Web API call's two tries: a search takes under a second, so a first one past 2 s has hung (2026-10-20)
 _WEB_TIMEOUTS = (aiohttp.ClientTimeout(total=2), aiohttp.ClientTimeout(total=5))
+# go-librespot answered in 22 ms (2026-10-30), asking Spotify: a liked track only breaks a tie, not worth a wait
+_LIKED_TIMEOUT = aiohttp.ClientTimeout(total=0.5)
 
 # go-librespot's PCM: 44.1 kHz, stereo, s16le
 _FRAME = 4
@@ -312,11 +314,13 @@ _KEYS = (
         {"b": "bb", "h": "b", "is": "#", "es": "b", "s": "b", "dur": "major", "moll": "minor"},
     ),
 )
+# The words before a piece's own number: « numéro deux », « n°2 », « No. 2 »
+_NUMBER_MARKERS = ("numero", "number", "num", "nr", "no", "n")
 # Words that tell no piece from another. « (version classique) » found « Prelude No. 1 in C
 # major (version n.2) » by The Piano Girls before Bach's second prelude
-_FILLER = STOPWORDS | {
+_FILLER = STOPWORDS | set(_NUMBER_MARKERS) | {
     "en", "et", "a", "au", "aux", "par", "pour", "the", "of", "in", "and", "by", "an", "for",
-    "numero", "no", "n", "nr", "num", "number", "version", "musique", "music", "classique", "classical",
+    "version", "musique", "music", "classique", "classical",
 }  # fmt: skip
 _TOKEN = re.compile(r"[a-z]+|\d+")
 # A number Parakeet writes in words after « numéro » or « n° »: « le prélude numéro deux de Bach »
@@ -328,13 +332,32 @@ _NUMBER_WORDS = {
 } | {"une": "1"}  # fmt: skip
 
 
+_MARKED = "|".join(_NUMBER_MARKERS)
+_TOLD_NUMBER = re.compile(rf"\b(?:{_MARKED})[^a-z\d]*(\d+)\b")
+# A number never a piece's own: its book's, volume's, disc's, opus's or catalogue's (« Book 2 », « BWV 892 »)
+_OTHER_NUMBER = re.compile(r"\b(?:book|livre|vol|volume|cd|disc|disque|op|opus|bwv|kv|k|hob|rv|hwv|d)[^a-z\d]*\d+")
+# Who wrote or plays it, last in a French request: « … de Bach », « … joué par Glenn Gould »
+_BY = re.compile(r".*\b(?:de|d|par)\b(.+)")
+
+
 def _numbered(text: str) -> str:
     """A folded text with a number said in words after « numéro » written in digits."""
     return re.sub(
-        r"\b(numero|num|n)([^a-z\d]+)(dix-sept|dix-huit|dix-neuf|[a-z]+)\b",
+        rf"\b({_MARKED})([^a-z\d]+)(dix-sept|dix-huit|dix-neuf|[a-z]+)\b",
         lambda m: m[1] + m[2] + _NUMBER_WORDS.get(m[3], m[3]),
         text,
     )
+
+
+def _told_numbers(text: str) -> set[str]:
+    """The numbers a folded text tells as a piece's own, after « numéro », « n° » or « No. »."""
+    return set(_TOLD_NUMBER.findall(_numbered(text)))
+
+
+def _own_numbers(title: str) -> set[str]:
+    """A folded title's numbers that may be the piece's own: those it tells so, else all but its book's,
+    volume's, opus's or catalogue's (« Gymnopédie 1 », « 5ème symphonie »; not « Book 2: Prelude in C Major »)."""
+    return _told_numbers(title) or set(re.findall(r"\d+", _OTHER_NUMBER.sub(" ", _numbered(title))))
 
 
 def _keys(text: str) -> list[str]:
@@ -359,26 +382,30 @@ def _same_word(asked: str, word: str) -> bool:
     return asked == word or (len(asked) >= 5 and len(word) >= 5 and asked[:5] == word[:5])
 
 
-def _score(asked: list[str], keys: set[str], item: dict) -> int:
-    """How well a search result fits the request: its words found, and its key."""
+def _score(asked: list[str], keys: set[str], numbers: set[str], item: dict) -> int:
+    """How well a search result fits the request: its words found, its key, and its number."""
     name = fold(item["name"])
     album = fold(item.get("album", {}).get("name", ""))
     words = _words(" ".join([name, album, *map(fold, _artist_names(item))]))
-    score = sum(any(_same_word(w, word) for word in words) for w in asked)
+    score = sum(any(_same_word(w, word) for word in words) for w in asked if w not in numbers)
+    # The number asked after « numéro » is the piece's own, never a book's or a catalogue's: « Prélude numéro 2
+    # de Bach » found « Well-Tempered Clavier, Book 2, Prelude and Fugue No. 23 » (2026-10-30)
+    score += len(numbers & _own_numbers(name))
     found = _keys(name) or _keys(album)
     if keys and found:
         score += 1 if found[0] in keys else -1  # « en do mineur » is not « en do majeur »
     return score
 
 
-def best_match(query: str, items: list[dict]) -> dict:
-    """The search result that fits the request best, Spotify's order among equals.
+def best_match(query: str, items: list[dict], liked: frozenset[str] = frozenset()) -> dict:
+    """The search result that fits the request best; among equals, a track the account liked, then Spotify's order.
 
     Not an exact name first: « Get Lucky » was L.E.J's cover, « Sonate au clair de lune
     Beethoven » a nursery version titled so."""
     plain = fold(query)
-    asked, keys = _words(plain), set(_keys(plain))
-    return max(items, key=lambda item: _score(asked, keys, item))  # max keeps the first of equals
+    asked, keys, numbers = _words(plain), set(_keys(plain)), _told_numbers(plain)
+    # max keeps the first of equals
+    return max(items, key=lambda item: (_score(asked, keys, numbers, item), item["uri"] in liked))
 
 
 def search_variant(query: str) -> Optional[str]:
@@ -390,6 +417,16 @@ def search_variant(query: str) -> Optional[str]:
         return None  # « Get Lucky de Daft Punk » needs one search
     variant = " ".join(words + keys)
     return variant if variant != " ".join(_TOKEN.findall(plain)) else None
+
+
+def composer_first(query: str, variant: Optional[str]) -> Optional[str]:
+    """The request's search_variant with who wrote or plays it first: Spotify gave Glenn Gould's « Prelude & Fugue
+    No. 2 » for « bach prelude 2 », and no second prelude for « prelude 2 bach » (2026-10-30)."""
+    if not variant or not (by := _BY.match(fold(query))):
+        return None
+    names = _words(by[1])
+    words = [w for w in variant.split() if w not in names]
+    return " ".join(names + words) if names and words else None
 
 
 _PLAYLIST_FILLER = {"playlist", "ma", "mon", "mes", "notre", "nos"}
@@ -548,12 +585,29 @@ class Spotify:
                 return Music(own["uri"], _describe("playlist", own), metadata)
         if kind not in ("artist", "track", "album", "playlist"):
             kind = "track"
-        # Spotify's search, ten results at most, is fuzzy: the request as said, and as its catalog writes it
+        # Spotify's search, ten results at most, is fuzzy: the request as said, as its catalog writes it,
+        # and with its composer first
         variant = search_variant(query)
+        searches = dict.fromkeys(filter(None, (query, variant, composer_first(query, variant))))
         await self._search_token()  # once, not by each search
-        results = await asyncio.gather(*(self._search(q, kind) for q in filter(None, (query, variant))))
-        items = list({item["uri"]: item for item in sum(results, [])}.values())  # in order, once each
-        return _music(kind, best_match(query, items)) if items else None
+        results = await asyncio.gather(*(self._search(q, kind) for q in searches), return_exceptions=True)
+        if isinstance(results[0], Exception):
+            raise results[0]  # the others only help: one failing leaves the request's own results
+        found = [items for items in results if not isinstance(items, Exception)]
+        items = list({item["uri"]: item for item in sum(found, [])}.values())  # in order, once each
+        if not items:
+            return None
+        liked = await self._liked([item["uri"] for item in items]) if kind == "track" else frozenset()
+        return _music(kind, best_match(query, items, liked))
+
+    async def _liked(self, uris: list[str]) -> frozenset[str]:
+        """Those of these tracks the account liked: « j'ai mis ce morceau précis dans mes titres likés »
+        (2026-10-30). go-librespot can tell, not list them."""
+        try:
+            body = await self._api("GET", "/library/liked", params={"uris": ",".join(uris)}, timeout=_LIKED_TIMEOUT)
+        except SpotifyError:
+            return frozenset()  # it only breaks a tie: not worth failing the music for
+        return frozenset(item["uri"] for item in body.get("items", []) if item.get("liked"))
 
     async def now_metadata(self) -> Optional[dict]:
         """What a screen shows for the track go-librespot plays, None when there is none."""
