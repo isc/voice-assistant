@@ -2969,6 +2969,41 @@ class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.loads(), [("media_player.sonos_paris", None)])
 
 
+class TestSpotifyAskedForPrompt(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """The prelude over, Spotify went on to a concerto it chose; the turn that asked for the prelude had left the
+    history, and « remets le prélude numéro deux » found another pianist's (2026-10-26, AD-087)."""
+
+    PRELUDE = "« Prelude & Fugue No. 2 in C Minor, BWV 847: Prelude » de Johann Sebastian Bach, Glenn Gould"
+    CONCERTO = "« Concerto for Four Pianos in A Minor, BWV 1065 » de Johann Sebastian Bach"
+
+    async def asyncSetUp(self):
+        self.server.spotify.play = AsyncMock()
+        self.server.spotify.stream.listeners = {object()}
+        await self.play("spotify:track:x", self.PRELUDE)
+
+    async def play(self, uri, description):
+        """On the satellite, as it has no room."""
+        from spotify import Music
+
+        self.server.spotify.find = AsyncMock(return_value=Music(uri, description, {}))
+        await self.server.execute_function("play_music", {"query": "Prélude 2 de Bach", "kind": "track"})
+
+    async def prompt_playing(self, track):
+        self.server.spotify.playing = AsyncMock(return_value=track)
+        return await self.server._music_for_prompt()
+
+    async def test_the_track_asked_still_playing_is_said_once(self):
+        self.assertNotIn("demandée", await self.prompt_playing(self.PRELUDE))
+
+    async def test_the_track_asked_is_said_once_spotify_went_on(self):
+        prompt = await self.prompt_playing(self.CONCERTO)
+        self.assertIn(f"Dernière musique demandée : {self.PRELUDE} (pour la remettre", prompt)
+
+    async def test_an_artist_asked_is_not_said_at_each_of_its_tracks(self):
+        await self.play("spotify:artist:x", "Johann Sebastian Bach")
+        self.assertNotIn("demandée", await self.prompt_playing(self.CONCERTO))
+
+
 class SpeakersAtHome:
     """A server whose home has SPEAKERS (entity_id, name, state, area id, area), HA answering no read: the
     refresh's states hold."""

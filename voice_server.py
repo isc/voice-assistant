@@ -405,6 +405,8 @@ class VoiceAssistantServer:
     _ducked: Optional[tuple[Site, dict[str, float]]] = None
     # What Spotify was last asked to play (normalized), for the web app's shortcuts (AD-066)
     _spotify_query: Optional[str] = None
+    # The track that search found, as the model was told (AD-087)
+    _spotify_asked: Optional[str] = None
 
     # Per home, read from the active site (sites.py)
     ha_client = _site_attribute("ha_client")
@@ -1732,6 +1734,7 @@ class VoiceAssistantServer:
             if found:
                 await self.spotify.play(found.uri, shuffle=bool(arguments.get("shuffle")))
                 self._spotify_query = normalize(arguments.get("query", ""))
+                self._spotify_asked = found.description if found.uri.startswith("spotify:track:") else None
                 result = f"Lecture sur Spotify : {found.description}"
             else:
                 result = await self.spotify.control("resume")
@@ -1762,6 +1765,12 @@ class VoiceAssistantServer:
                 if site is not self.site and site.name:
                     where += f", à {site.name.capitalize()}"
                 playing.append(f"Musique Spotify en cours sur {where} : {track}.")
+                # The track asked over, Spotify goes on to one it chooses: « remets le prélude », the turn that
+                # asked for it gone from the history, found another pianist's (2026-10-26). Without « titre et
+                # artistes », the model searched the title alone, which another recording may share (AD-087)
+                if (asked := self._spotify_asked) and asked != track:
+                    again = "pour la remettre : son titre et ses artistes"
+                    playing.append(f"Dernière musique demandée : {asked} ({again}).")
         if radio := self.site.radio:
             target, station, _ = radio
             playing.append(f"Radio lancée sur {self._speaker_name(target)} : {station}.")

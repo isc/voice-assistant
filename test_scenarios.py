@@ -131,6 +131,10 @@ class FakeStream:
         return True
 
 
+# What Spotify's search found for the prelude on 2026-10-26
+PRELUDE = "« Prelude & Fugue No. 2 in C Minor, BWV 847: Prelude » de Johann Sebastian Bach, Glenn Gould"
+
+
 class FakeSpotify:
     """go-librespot and the search: whatever is asked is found, and plays."""
 
@@ -138,9 +142,10 @@ class FakeSpotify:
         self.stream, self.found, self.track = FakeStream(), None, None
 
     async def find(self, query: str, kind):
+        from ha_client import fold
         from spotify import Music
 
-        self.found = f"« {query} »"
+        self.found = PRELUDE if "prelude" in fold(query) else f"« {query} »"
         return Music(f"spotify:{kind}:replay", self.found, {})
 
     async def play(self, uri: str, shuffle: bool = False):
@@ -235,6 +240,20 @@ def plays_on_or_asks(entity_id: str, *names: str):
     return check
 
 
+def searches(*words: str, unlike: str = ""):
+    """Spotify searched with one of these words, and not that one."""
+
+    def check(t):
+        from ha_client import fold
+
+        queries = [fold(c["args"].get("query", "")) for c in t.calls if c["function"] == "play_music"]
+        found = any(any(w in q for w in words) and not (unlike and unlike in q) for q in queries)
+        expect = f"a Spotify search with « {' » or « '.join(words)} »"
+        return found, expect + (f", without « {unlike} »" if unlike else "")
+
+    return check
+
+
 def none_said_off(t):
     # A Google Home playing nothing says « off »: the reply took it for one that cannot play (2026-10-26)
     return not t.played and "eteint" not in t.said, "nothing played, no speaker said off"
@@ -252,9 +271,24 @@ CHARRAS_SPEAKERS = {
     "media_player.home_mini_charlie": "off",
 }
 SONOS_BACK = {"media_player.sonos_move_2": "idle"}
+CONCERTO = (
+    "« Bach, JS: Concerto for Four Pianos in A Minor, BWV 1065: I. Allegro » de Johann Sebastian Bach, Michel Béroff"
+)
+
+
+def went_on(track: str, forgotten: bool = False):
+    """Spotify went on by itself to this track, and the conversation was forgotten since: a change not HA's."""
+
+    def change(server):
+        server.spotify.track = track
+        if forgotten:
+            server.conversation.last_time = 0
+
+    return change
+
 
 # (name, site, states, [(request, check, changes)]): states as the last refresh read them; changes, HA's before
-# that request, the server's own copy left as it was
+# that request, the server's own copy left as it was, or a function of the server (went_on)
 SCENARIOS = [
     ("AD-084 the Sonos back online", "charras", CHARRAS_SPEAKERS, [
         ("Est-ce que tu peux me jouer le prélude numéro deux de Bach sur la sonos ?",
@@ -274,6 +308,17 @@ SCENARIOS = [
         ("Eh ben la sonos de la cuisine, c'est parfait ça.",
          plays_on_or_asks("media_player.sonos_move_2", "cuisine", "move 2"), {}),
     ]),
+    # The prelude over, Spotify went on to a concerto it chose, and the turn that asked for it had left the
+    # history: « Prélude numéro 2 » found another pianist's (2026-10-26)
+    ("AD-087 remets le prélude", "charras", {**CHARRAS_SPEAKERS, **SONOS_BACK}, [
+        ("Mets le prélude numéro deux de Bach sur la Sonos de la cuisine.",
+         plays_on("media_player.sonos_move_2"), {}),
+        # Its pianist, or its title as Spotify writes it, which finds Gould's (2026-10-30)
+        ("Et maintenant j'aimerais que tu remettes le prélude numéro deux.", searches("gould", "bwv 847: prelude"),
+         went_on(CONCERTO, forgotten=True)),
+        # What was asked before is not what is asked now
+        ("Mets plutôt du Chopin.", searches("chopin", unlike="gould"), went_on(CONCERTO)),
+    ]),
 ]  # fmt: skip
 
 
@@ -284,9 +329,12 @@ async def replay(snapshot: dict, site: str, states: dict, turns: list):
     for eid, state in states.items():
         server.ha_client.entities[eid]["state"] = fake.states[eid] = state
     for i, (text, _, changes) in enumerate(turns):
-        fake.states.update(changes)
         sent, t0 = len(fake.calls), time.monotonic()
         server.new_request("replay")  # a browser of the web app, with its own conversation (AD-061)
+        if callable(changes):
+            changes(server)
+        else:
+            fake.states.update(changes)
         reply = await server.process_with_llm(None, text) or ""
         await asyncio.gather(*server._pending_service_calls, *server._background_tasks, return_exceptions=True)
         wall = round(time.monotonic() - t0, 2)
