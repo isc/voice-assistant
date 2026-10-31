@@ -125,6 +125,9 @@ class FakeStream:
     def __init__(self):
         self.joins, self.listeners = 0, set()
 
+    async def head_start(self):
+        pass
+
     async def wait_for_join(self, joins_before: int, timeout: float) -> bool:
         self.joins += 1
         self.listeners.add(self.joins)

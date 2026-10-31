@@ -65,9 +65,11 @@ _MP3_BYTES_PER_SECOND = 192_000 // 8
 # real-time pace, the living room's Google Home played 1 s of it, stalled, and played again only once it held about
 # 22 s, at every start; given 6 s at once or more, it played within 1.7 s and never stalled (2026-10-31, AD-091)
 _HEAD_START = 10.0
-# Read at up to this much a tick, the event loop never held long. The FIFO holds 0.37 s, which go-librespot refills
-# as it is read: a head start comes in about a second
+# Read at up to this much a tick, the event loop never held long
 _MOST_READ = 1.0
+# The FIFO holds 0.37 s, which go-librespot refills at once: a head start is read at this tick. At 50 ms, it took 1.4 s,
+# and the Google Home that joined 0.15 s after it was loaded, with 1.3 s, stalled 12.7 s (2026-10-31)
+_FILL_TICK = 0.005
 # When go-librespot sends nothing (paused from elsewhere, a track slow to come), silence keeps the speakers this far
 # ahead: they never starve
 _FLOOR = 2.0
@@ -112,6 +114,8 @@ class SpotifyStream:
         self._silences: deque[list[float]] = deque(maxlen=16)  # [start, end] of silence added in go-librespot's gaps
         self._backlog = bytearray()  # the MP3 from heard to position
         self.switching = False  # go-librespot is changing what it plays: what it sends meanwhile is dropped
+        self._filled = asyncio.Event()  # the head start is read
+        self._hurry = False  # it is being read
         self._held_until: Optional[float] = None  # heard waits for a speaker to join, until then at most
         self._joined_at: Optional[float] = None  # when the first one joined since
         self._unheard = self._silent = 0.0
@@ -122,12 +126,16 @@ class SpotifyStream:
         deadline = previous = time.monotonic()
         self._grace_until = deadline + _STARTUP_GRACE
         while True:
-            deadline += _TICK
-            delay = deadline - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            elif delay < -1:
-                deadline = time.monotonic()  # the event loop stalled: resync rather than catch up tick by tick
+            if self._hurry:
+                await asyncio.sleep(_FILL_TICK)
+                deadline = time.monotonic()
+            else:
+                deadline += _TICK
+                delay = deadline - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                elif delay < -1:
+                    deadline = time.monotonic()  # the event loop stalled: resync rather than catch up tick by tick
             now = time.monotonic()
             # An error here killed the stream silently for the life of the process
             try:
@@ -139,6 +147,7 @@ class SpotifyStream:
             previous = now
 
     async def _tick(self, now: float, elapsed: float) -> None:
+        self._hurry = False
         if self.switching:
             self._read()  # the old music's: dropped
             return
@@ -160,10 +169,13 @@ class SpotifyStream:
         # Past the head start, at real-time pace: waiting for its speaker, new music keeps all it read
         wanted = min(max(self.heard + _HEAD_START - self.position, elapsed), _MOST_READ)
         pcm = self._read(_pcm_bytes(wanted))
+        self._hurry = bool(pcm) and self._lead() + len(pcm) / _BYTES_PER_SECOND < _HEAD_START
         if not held:
             pcm = self._fill_gap(pcm, elapsed)
         if pcm:
             await self._encode(pcm)
+        if self._lead() >= _HEAD_START:
+            self._filled.set()
 
     def _alone(self, now: float, elapsed: float, pcm: bytes) -> None:
         """Music read while nobody listens: paused after a while."""
@@ -205,7 +217,15 @@ class SpotifyStream:
     def _drop(self) -> None:
         """Nobody will hear what was read ahead."""
         self._backlog.clear()
+        self._filled.clear()
         self.heard = self.position
+
+    async def head_start(self, timeout: float = _FILL_WAIT) -> None:
+        """Wait until the head start is read, `timeout` at most: a speaker loaded then gets it at once."""
+        try:
+            await asyncio.wait_for(self._filled.wait(), timeout)
+        except TimeoutError:
+            pass
 
     def switch(self) -> None:
         """go-librespot is changing what it plays: what it sent of the old music, and sends until restart(), is

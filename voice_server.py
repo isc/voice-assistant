@@ -1898,6 +1898,7 @@ class VoiceAssistantServer:
             metadata = await self.spotify.now_metadata()
         url = self._spotify_url(self.site)
         joins = stream.joins
+        await stream.head_start()  # given at once, or the Google Home stalls (AD-091)
         await self._media_play_url(target, url, metadata=metadata)
         # New music waits for it at its start (AD-091)
         if not await stream.wait_for_join(joins, timeout=8):

@@ -2003,14 +2003,18 @@ class TestSpotifyHeadStart(unittest.IsolatedAsyncioTestCase):
 
         stream = self.stream()
         stream.restart()
+        await stream._tick(time.monotonic(), 0.05)
+        self.assertTrue(stream._hurry)  # the rest of the head start read at once
+        self.assertFalse(stream._filled.is_set())
         now = await self.ticks(stream, 3, time.monotonic())
+        self.assertTrue(stream._filled.is_set())  # its speaker may be loaded
         self.assertEqual(stream.heard, 0)  # nobody plays it yet
-        self.assertAlmostEqual(stream.position, 12.5, delta=0.1)  # 10 s in half a second, then real time
-        self.assertAlmostEqual(len(stream._backlog), 12.5 * _MP3_BYTES_PER_SECOND, delta=100)  # all of it, for it
+        self.assertAlmostEqual(stream.position, 12.55, delta=0.1)  # 10 s at once, then real time
+        self.assertAlmostEqual(len(stream._backlog), 12.55 * _MP3_BYTES_PER_SECOND, delta=100)  # all of it, for it
         stream.listeners, stream._joined_at = {object()}, now  # its speaker joins
         await self.ticks(stream, 1, now)
         self.assertAlmostEqual(stream.heard, 1, delta=0.1)
-        self.assertAlmostEqual(stream.position - stream.heard, 12.5, delta=0.1)
+        self.assertAlmostEqual(stream.position - stream.heard, 12.55, delta=0.1)
 
     async def test_what_was_read_of_the_old_music_is_dropped(self):
         stream = self.stream()
@@ -3196,7 +3200,7 @@ class SpotifySpeakers:
         self.server.devices = {"": self.satellite}
         self.server.device_media_keys = {"": 1}
         # Joined, and no listener counted: the Sonos's first connection already closed
-        stream = MagicMock(listeners=set(), wait_for_join=AsyncMock(return_value=True))
+        stream = MagicMock(listeners=set(), wait_for_join=AsyncMock(return_value=True), head_start=AsyncMock())
         self.server.spotify = MagicMock(stream=stream, now_metadata=AsyncMock(return_value={"title": "Get Lucky"}))
 
     def add_speakers(self):
