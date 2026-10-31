@@ -1967,6 +1967,73 @@ class TestSpotifyStreamRead(unittest.TestCase):
                 os.close(stream._fd)
 
 
+class TestSpotifyHeadStart(unittest.IsolatedAsyncioTestCase):
+    """The living room's Google Home, sent the stream at real-time pace, played 1 s of it, stalled, and played
+    again 20 s later; given 6 s at once, it never stalled (2026-10-31, AD-091)."""
+
+    def stream(self):
+        """A stream whose FIFO always has music, encoded as it is read."""
+        from spotify import _BYTES_PER_SECOND, _MP3_BYTES_PER_SECOND, SpotifyStream
+
+        stream = SpotifyStream("/nonexistent")
+        self.music = True
+        stream._read = lambda size=4: bytes(size) if self.music else b""
+
+        async def encode(pcm):
+            stream.position += len(pcm) / _BYTES_PER_SECOND
+            stream._keep(bytes(int(len(pcm) / _BYTES_PER_SECOND * _MP3_BYTES_PER_SECOND)))
+
+        stream._encode = encode
+        return stream
+
+    async def ticks(self, stream, seconds, start=0.0):
+        """The stream run that long from `start`, tick by tick; the time it ended."""
+        from spotify import _TICK
+
+        now = start
+        for _ in range(round(seconds / _TICK)):
+            now += _TICK
+            await stream._tick(now, _TICK)
+        return now
+
+    async def test_new_music_waits_at_its_start_for_its_speaker(self):
+        from spotify import _MP3_BYTES_PER_SECOND
+
+        import time
+
+        stream = self.stream()
+        stream.restart()
+        now = await self.ticks(stream, 3, time.monotonic())
+        self.assertEqual(stream.heard, 0)  # nobody plays it yet
+        self.assertAlmostEqual(stream.position, 12.5, delta=0.1)  # 10 s in half a second, then real time
+        self.assertAlmostEqual(len(stream._backlog), 12.5 * _MP3_BYTES_PER_SECOND, delta=100)  # all of it, for it
+        stream.listeners, stream._joined_at = {object()}, now  # its speaker joins
+        await self.ticks(stream, 1, now)
+        self.assertAlmostEqual(stream.heard, 1, delta=0.1)
+        self.assertAlmostEqual(stream.position - stream.heard, 12.5, delta=0.1)
+
+    async def test_what_was_read_of_the_old_music_is_dropped(self):
+        stream = self.stream()
+        stream.listeners = {object()}
+        await self.ticks(stream, 2)
+        stream.switch()
+        position = stream.position
+        await self.ticks(stream, 1)
+        self.assertEqual((stream.position, stream.heard, len(stream._backlog)), (position, position, 0))
+
+    async def test_silence_when_go_librespot_sends_nothing(self):
+        from spotify import _FLOOR, _HEAD_START
+
+        stream = self.stream()
+        stream.listeners = {object()}
+        await self.ticks(stream, 1)
+        self.music = False  # paused from the phone
+        await self.ticks(stream, _HEAD_START)
+        self.assertAlmostEqual(stream.position - stream.heard, _FLOOR, delta=0.1)  # the music played out, then 2 s
+        start = stream._silences[0][0]
+        self.assertAlmostEqual(stream.silence(0, stream.position), stream.position - start)
+
+
 class TestFormatState(unittest.TestCase):
     def setUp(self):
         self.client = make_client()
@@ -2850,10 +2917,12 @@ class TestSpotifyTarget(unittest.IsolatedAsyncioTestCase):
         server.spotify.find = AsyncMock(return_value=Music("spotify:artist:x", "Daft Punk", {}))
         server.spotify.play = AsyncMock()
         server._resolve_media_target = lambda room: ("ha", "media_player.google_home")
+        server.spotify.pause = AsyncMock()
         server._point_at_spotify = AsyncMock(return_value=False)
         result = await server._execute_music_function("play_music", {"query": "Daft Punk", "kind": "artist"})
         self.assertIn("ne répond pas", result)
-        server.spotify.play.assert_not_awaited()
+        server.spotify.play.assert_awaited()  # first, so that its speaker gets its head start (AD-091)
+        server.spotify.pause.assert_awaited()  # and not left playing to nobody
 
     async def test_a_failed_search_does_not_blame_the_speaker(self):
         from spotify import SpotifySearchError
@@ -2999,6 +3068,119 @@ class TestSpotifyFind(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.spotify().find("Gymnopédie de Satie dans mes favoris", "liked"))
 
 
+class TestSpotifyHeard(unittest.IsolatedAsyncioTestCase):
+    """go-librespot plays a head start ahead of the speakers (AD-091): at a track's end, it is on the next one."""
+
+    BEFORE = {"uri": "spotify:track:before", "name": "Before", "artist_names": ["Glenn Gould"]}
+    PRELUDE = {"uri": "spotify:track:prelude", "name": "Prelude", "artist_names": ["Glenn Gould"]}
+    FUGUE = {"uri": "spotify:track:fugue", "name": "Fugue", "artist_names": ["Glenn Gould"]}
+
+    def setUp(self):
+        """The prelude marked at 0 on the stream, the fugue at 90: go-librespot plays the fugue."""
+        from spotify import Spotify
+
+        self.spotify = Spotify()
+        self.spotify._events = True
+        self.queue, self.index, self.paused = [self.BEFORE, self.PRELUDE, self.FUGUE, self.BEFORE], 2, False
+        self.calls = []
+        self.spotify._api = AsyncMock(side_effect=self.api)
+        self.at(0)
+        self.spotify._on_event({"type": "metadata", "data": {**self.PRELUDE, "position": 0}})
+        self.at(90)
+        self.spotify._on_event({"type": "metadata", "data": {**self.FUGUE, "position": 0}})
+
+    def at(self, position, heard=None):
+        self.spotify.stream.position = position
+        self.spotify.stream.heard = position if heard is None else heard
+
+    async def api(self, method, path, json=None, **kwargs):
+        """go-librespot over the queue, its events said as it would."""
+        if path == "/status":
+            return {"track": self.queue[self.index], "paused": self.paused}
+        self.calls.append((path, json))
+        track = self.queue[self.index]
+        match path:
+            case "/player/next" | "/player/prev":
+                self.index += 1 if path == "/player/next" else -1
+                event = {"type": "metadata", "data": {**self.queue[self.index], "position": 0}}
+            case "/player/seek":
+                event = {"type": "seek", "data": {"uri": track["uri"], **json}}
+            case _:
+                self.paused = path == "/player/pause"
+                event = {"type": "paused" if self.paused else "playing"}
+        self.spotify._on_event(event)
+
+    async def test_the_track_heard_at_another_s_end(self):
+        self.at(95, heard=85)
+        self.assertEqual(await self.spotify.playing(), "« Prelude » de Glenn Gould")
+        self.at(105, heard=95)
+        self.assertEqual(await self.spotify.playing(), "« Fugue » de Glenn Gould")
+
+    async def test_next_at_a_track_s_end_starts_the_one_after_it(self):
+        self.at(95, heard=85)
+        await self.spotify.control("next")
+        self.assertEqual(self.calls, [("/player/seek", {"position": 0})])
+
+    async def test_next(self):
+        self.at(110, heard=100)
+        await self.spotify.control("next")
+        self.assertEqual(self.calls, [("/player/next", None)])
+
+    async def test_previous_starts_the_track_again_past_its_first_seconds(self):
+        self.at(110, heard=100)
+        await self.spotify.control("previous")
+        self.assertEqual(self.calls, [("/player/seek", {"position": 0})])
+
+    async def test_previous_in_its_first_seconds(self):
+        """go-librespot's own would start it again: it is 10 s further."""
+        self.at(102, heard=92)
+        await self.spotify.control("previous")
+        self.assertEqual(self.calls, [("/player/seek", {"position": 0}), ("/player/prev", None)])
+        self.assertEqual(self.queue[self.index], self.PRELUDE)
+
+    async def test_previous_at_a_track_s_end_starts_it_again(self):
+        self.at(95, heard=85)
+        await self.spotify.control("previous")
+        self.assertEqual(self.calls, [("/player/seek", {"position": 0}), ("/player/prev", None)])
+
+    async def test_paused_where_the_speakers_were(self):
+        self.at(110, heard=100)
+        await self.spotify.control("pause")
+        self.assertEqual(self.calls, [("/player/pause", None), ("/player/seek", {"position": 10000})])
+        paused = "En cours sur Spotify : « Fugue » de Glenn Gould (en pause)"
+        self.assertEqual(await self.spotify.now_playing(), paused)
+        await self.spotify.control("resume")
+        self.assertEqual(self.calls[2:], [("/player/resume", None)])
+
+    async def test_paused_at_the_end_of_a_track(self):
+        self.at(95, heard=85)
+        await self.spotify.control("pause")
+        back = [("/player/seek", {"position": 0}), ("/player/prev", None), ("/player/seek", {"position": 85000})]
+        self.assertEqual(self.calls, [("/player/pause", None)] + back)
+        paused = "En cours sur Spotify : « Prelude » de Glenn Gould (en pause)"
+        self.assertEqual(await self.spotify.now_playing(), paused)
+
+    async def test_the_silence_added_is_not_the_track_s(self):
+        """go-librespot paused from the phone a minute, then resumed: the stream sent silence meanwhile."""
+        self.spotify.stream._silences.append([100.0, 160.0])
+        self.at(175, heard=165)
+        await self.spotify.control("pause")
+        self.assertEqual(self.calls[1:], [("/player/seek", {"position": 15000})])
+
+    async def test_the_stream_starts_again_at_the_new_music(self):
+        self.at(110, heard=100)
+        await self.spotify.control("next")
+        self.assertEqual((self.spotify.stream.heard, len(self.spotify.stream._backlog)), (110, 0))
+        self.assertIsNotNone(self.spotify.stream._held_until)  # for its speaker
+
+    async def test_without_events_go_librespot_s_track(self):
+        self.spotify._events = False
+        self.at(95, heard=85)
+        self.assertEqual(await self.spotify.playing(), "« Fugue » de Glenn Gould")
+        await self.spotify.control("next")
+        self.assertEqual(self.calls, [("/player/next", None)])
+
+
 class SpotifySpeakers:
     """A Paris server with its satellite, the Sonos and the Google Home, and a stream they all join."""
 
@@ -3028,6 +3210,27 @@ class SpotifySpeakers:
         satellite = [c for c in self.satellite.media_player_command.call_args_list if "command" in c.kwargs]
         ha = [c.args[2] for c in self.server.site.ha_client.call_service.call_args_list if c.args[1] == "media_stop"]
         return len(satellite), ha
+
+
+class TestSpotifyControlSpeaker(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """The speaker holds a head start of what it plays (AD-091): paused with go-librespot, loaded again when it
+    changes what it plays."""
+
+    async def asyncSetUp(self):
+        self.server.spotify.stream.listeners = {object()}
+        self.server.spotify.control = AsyncMock(return_value="ok")
+        self.server._point_at_spotify = AsyncMock(return_value=True)
+        self.server._spotify_at = (self.server.site, self.GOOGLE_HOME)
+
+    async def test_pause(self):
+        await self.server._spotify_control("pause")
+        call_service = self.server.site.ha_client.call_service
+        call_service.assert_awaited_with("media_player", "media_pause", self.GOOGLE_HOME[1])
+        self.server._point_at_spotify.assert_not_awaited()
+
+    async def test_next(self):
+        await self.server._spotify_control("next")
+        self.server._point_at_spotify.assert_awaited_with(self.GOOGLE_HOME, None, reload=True)
 
 
 class TestSpotifyMoves(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):

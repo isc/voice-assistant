@@ -170,7 +170,13 @@ class FakeSpotify:
     async def control(self, action: str) -> str:
         from spotify import CONTROLS
 
-        return CONTROLS[action][1]
+        return CONTROLS[action]
+
+    async def pause(self):
+        pass
+
+    async def resume(self) -> bool:
+        return True
 
     async def now_metadata(self):
         return {}

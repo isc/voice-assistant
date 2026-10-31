@@ -462,6 +462,7 @@ class VoiceAssistantServer:
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
+        self._spotify_events: Optional[asyncio.Task] = None
         # The speaker playing the Spotify stream, with its site: one stream, one speaker at a time
         self._spotify_at: Optional[tuple[Site, tuple[str, str]]] = None
 
@@ -651,6 +652,7 @@ class VoiceAssistantServer:
         self.spotify = spotify
         spotify.stream.on_silence = self._stop_silent_spotify
         self._spotify_task = asyncio.create_task(spotify.stream.run())
+        self._spotify_events = asyncio.create_task(spotify.watch())
         logger.info("Spotify enabled (go-librespot)")
 
     @staticmethod
@@ -1699,8 +1701,8 @@ class VoiceAssistantServer:
     async def _execute_music_function(self, function_name: str, arguments: dict) -> str:
         """Handle play_music / music_control: Spotify through go-librespot.
 
-        Controls act on go-librespot's single queue, whichever speaker plays it; only
-        play_music and resume need a speaker to point at the stream."""
+        Controls act on go-librespot's single queue, and on the speaker that plays it (_spotify_control);
+        play_music and resume point a speaker at the stream."""
         if not self.spotify:
             return "Spotify non disponible"
         await self._restore_speakers()
@@ -1710,7 +1712,7 @@ class VoiceAssistantServer:
                 if action == "current":
                     result = await self.spotify.now_playing()
                 elif action in CONTROLS:
-                    result = await self.spotify.control(action)
+                    result = await self._spotify_control(action)
                 else:
                     return f"Action {action} inconnue"
                 self._after_media_change(self._spotify_here)
@@ -1729,16 +1731,23 @@ class VoiceAssistantServer:
                 query = arguments.get("query", "")
                 if not (found := await self.spotify.find(query, arguments.get("kind"))):
                     return f"Rien trouvé sur Spotify pour {query}"
-            if not await self._point_at_spotify(target, found.metadata if found else None):
-                return f"{self._speaker_name(target)} ne répond pas"
+            # go-librespot first, the speaker loaded after: it would play the head start it holds of the old music
+            # (AD-091)
             if found:
                 await self.spotify.play(found.uri, shuffle=bool(arguments.get("shuffle")), start_at=found.start_at)
+            if bool(found) or await self.spotify.resume():
+                joined = await self._reload_spotify(target, found.metadata if found else None)
+            else:
+                joined = await self._point_at_spotify(target)
+            if not joined:
+                return f"{self._speaker_name(target)} ne répond pas"
+            if found:
                 self._spotify_query = normalize(arguments.get("query", ""))
                 track = (found.start_at or found.uri).startswith("spotify:track:")
                 self._spotify_asked = found.description if track else None
                 result = f"Lecture sur Spotify : {found.description}" + (f", {found.note}" if found.note else "")
             else:
-                result = await self.spotify.control("resume")
+                result = CONTROLS["resume"]
             self._after_media_change(target)
             return result
         except SpotifyNotConnected:
@@ -1844,12 +1853,38 @@ class VoiceAssistantServer:
             site, target = self._spotify_at
             await self._media_command(target, MediaPlayerCommand.STOP, ha_service="media_stop", site=site)
 
-    async def _point_at_spotify(self, target: tuple[str, str], metadata: Optional[dict] = None) -> bool:
+    async def _spotify_control(self, action: str) -> str:
+        """Pause, next, previous: go-librespot's, then its speaker's, which holds a head start of what it played
+        (AD-091): paused at once, or loaded again."""
+        if not (at := self._spotify_at if self.spotify.stream.listeners else None):
+            return await self.spotify.control(action)
+        site, target = at
+        if action == "pause":
+            pause = self._media_command(target, MediaPlayerCommand.PAUSE, ha_service="media_pause", site=site)
+            return (await asyncio.gather(self.spotify.control(action), pause))[0]
+        result = await self.spotify.control(action)
+        if not await self._at(site, self._reload_spotify(target)):
+            return f"{self._speaker_name(target, site)} ne répond pas"
+        return result
+
+    async def _reload_spotify(self, target: tuple[str, str], metadata: Optional[dict] = None) -> bool:
+        """The speaker loaded again, go-librespot having changed what it plays: it holds a head start of the old
+        music (AD-091). If it never joins, go-librespot is paused, rather than play to nobody."""
+        if await self._point_at_spotify(target, metadata, reload=True):
+            return True
+        await self.spotify.pause()
+        return False
+
+    async def _point_at_spotify(
+        self, target: tuple[str, str], metadata: Optional[dict] = None, reload: bool = False
+    ) -> bool:
         """Make the target speaker play the Spotify stream, and move it off the previous one.
-        False if it never connected: nothing changed, the music must not start nor be said playing.
+        False if it never connected: the music must not be said playing, nor go on to nobody.
 
         metadata: what a screen shows of new music. A screen already on the stream loads it
         again to show it; music moved to a screen shows the track playing.
+
+        reload: the target loads the stream again even if it plays it, as go-librespot changed what it plays.
 
         A speaker since given a radio or a picture is no longer _spotify_at, so that it is not
         stopped here; once the music plays to nobody, the stream pauses go-librespot."""
@@ -1857,14 +1892,14 @@ class VoiceAssistantServer:
         previous, new = self._spotify_at, (self.site, target)
         screen = target[0] == "ha" and target[1] in self.ha_client.screens
         metadata = metadata if screen else None
-        if previous == new and stream.listeners and not metadata:
+        if previous == new and stream.listeners and not metadata and not reload:
             return True
         if screen and not metadata:
             metadata = await self.spotify.now_metadata()
         url = self._spotify_url(self.site)
         joins = stream.joins
         await self._media_play_url(target, url, metadata=metadata)
-        # Start the music once the speaker listens, so that the first seconds play
+        # New music waits for it at its start (AD-091)
         if not await stream.wait_for_join(joins, timeout=8):
             logger.warning(f"Spotify: {target} did not connect to {url}")
             return False
