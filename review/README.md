@@ -62,7 +62,9 @@ Whisper runs on the GPU only when the unit names a card in `CUDA_VISIBLE_DEVICES
 left to itself, CUDA would take the first card, Ollama's and the voice server's. On charras, a
 drop-in gives it the bottom card (home-infra `charras/SETUP.md` §23).
 
-`ivan` needs `sudo` without a password (collect, deploy), `gh` logged in (push), and Claude Code's login.
+`ivan` needs `sudo` without a password (collect, deploy), `gh` logged in (push), and `claude-auto`
+(home-infra `charras/claude-auto`): Claude Code on the one-year token of charras's unattended jobs,
+since Ivan's own login ends about four weeks after each `/login`.
 
 ## Run by hand
 

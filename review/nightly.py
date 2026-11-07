@@ -26,7 +26,9 @@ from zoneinfo import ZoneInfo
 
 HERE = Path(__file__).resolve().parent
 LIVE = Path("/opt/voice-assistant")
-CLAUDE = Path.home() / ".local/bin/claude"
+# charras's one-year token for unattended jobs, not Ivan's login, which ends about four weeks after each
+# /login (home-infra charras/claude-auto)
+CLAUDE = Path.home() / ".local/bin/claude-auto"
 TRANSCRIBE = Path.home() / ".local/bin/transcrire"
 MODEL = "claude-opus-5-5"
 TIMEOUT = 40 * 60
