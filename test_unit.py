@@ -318,6 +318,43 @@ class TestResolveAllEntities(unittest.TestCase):
             self.client.resolve_all_entities("lumière", room="couloir", domain_hints=self.TURN_OFF), ["light.couloir"]
         )
 
+    def test_lights_holding_the_name_are_all_meant(self):
+        """« Les lumières de la terrasse » came as « Lumière terrasse », and only the first went off (AD-096)."""
+        self.client.areas["exterieur"] = "Extérieur"
+        self.add("light.terrasse_sejour", "Lumière terrasse séjour", "exterieur")
+        self.add("light.terrasse_parents", "Lumière terrasse parents", "exterieur")
+        self.add("light.balcon", "Lumière balcon", "exterieur")
+        both = ["light.terrasse_sejour", "light.terrasse_parents"]
+        for name, room in (("Lumière terrasse", "Extérieur"), ("Lumière terrasse", None), ("lumières", "terrasse")):
+            with self.subTest(name=name, room=room):
+                self.assertCountEqual(self.client.resolve_all_entities(name, room=room, domain_hints=self.TURN_OFF), both)
+        # The one named, and a name all its own, stay that one
+        for name, eid in (("Lumière terrasse parents", "light.terrasse_parents"), ("Lumière balcon", "light.balcon")):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self.client.resolve_all_entities(name, room="Extérieur", domain_hints=self.TURN_OFF), [eid]
+                )
+
+    def test_an_exact_name_is_that_light_alone(self):
+        self.client.areas["terrasse"] = "Terrasse"
+        self.add("light.spots", "Spots", "terrasse")
+        self.add("light.spots_terrasse", "Spots terrasse", "terrasse")
+        eids = self.client.resolve_all_entities("Spots", room="Terrasse", domain_hints=self.TURN_OFF)
+        self.assertEqual(eids, ["light.spots"])
+
+    def test_a_word_only_begun_is_not_held(self):
+        """« Spot » is in « Spots bar » and « Spots évier », but is not one of their words: the closest alone."""
+        self.add("light.spots_bar", "Spots bar")
+        self.add("light.spots_evier", "Spots évier")
+        self.assertEqual(self.client.resolve_all_entities("Spot", domain_hints=self.TURN_OFF), ["light.spots_bar"])
+
+    def test_a_speaker_is_one_speaker(self):
+        """« La Sonos » at Charras is two speakers, and plays on one (2026-10-26)."""
+        self.add("media_player.sonos_move", "Sonos Move")
+        self.add("media_player.sonos_move_2", "Sonos Move cuisine")
+        eids = self.client.resolve_all_entities("Sonos", domain_hints=["media_player"])
+        self.assertEqual(eids, ["media_player.sonos_move"])
+
     def test_generic_name_then_room_in_one(self):
         eids = self.client.resolve_all_entities("lumière du salon", domain_hints=self.TURN_OFF)
         self.assertEqual(eids, ["light.appliques_salon"])

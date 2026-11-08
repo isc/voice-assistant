@@ -507,6 +507,10 @@ class HAClient:
     # (AD-071); « l'alarme », the house's (AD-083)
     _HOME_WIDE = {"select", "alarm_control_panel"}
 
+    # Kinds of which a name several hold means them all (« Lumière terrasse », AD-096); « la Sonos » is one
+    # speaker, and a switch or a window is not acted on unnamed
+    _ALL_HOLDING_THE_NAME = {"light"}
+
     def is_generic(self, name: str) -> bool:
         """Whether a name says a kind of device (« volets », « la lumière ») rather than one device."""
         return normalize(name) in self._GENERIC_NAMES
@@ -604,12 +608,7 @@ class HAClient:
                 return entity_ids
 
         # Specific name: resolve individually per room
-        entity_ids = []
-        for r in rooms_to_search:
-            eid = self.resolve_entity(name, room=r, domain_hints=domain_hints)
-            if eid and eid not in entity_ids:
-                entity_ids.append(eid)
-        return entity_ids
+        return list(dict.fromkeys(eid for r in rooms_to_search for eid in self._match(name, r, domain_hints)))
 
     def _candidates(self, norm_name: str, norm_room: Optional[str], domain_hints: Optional[list[str]]) -> dict:
         """entity_id -> normalized name, for the domains and room given."""
@@ -630,6 +629,10 @@ class HAClient:
         self, name: str, room: str | None = None, domain_hints: list[str] | None = None
     ) -> Optional[str]:
         """Match a spoken name to an entity_id, optionally scoped to a room."""
+        return next(iter(self._match(name, room, domain_hints)), None)
+
+    def _match(self, name: str, room: str | None = None, domain_hints: list[str] | None = None) -> list[str]:
+        """The device a spoken name means, optionally scoped to a room: one, or the lights its words are part of."""
         norm_input = normalize(name)
         norm_room = normalize(room) if room else None
         generic = self.is_generic(name)
@@ -646,7 +649,7 @@ class HAClient:
             ]
             if len(unplaced) == 1:
                 logger.info(f"Entity match: '{name}' (room='{room}') -> {unplaced[0]} (exact name, in no room)")
-                return unplaced[0]
+                return unplaced
         if not candidates and norm_room:
             # When the area exists and simply holds no such device, searching the rest of the house
             # is how "ouvre tous les volets sauf celui de Charlie" ended up opening Charlie's: the LLM
@@ -654,7 +657,7 @@ class HAClient:
             # on the one room to avoid. Admitting there is no such device beats actuating another room's.
             if self._area_exists(norm_room):
                 logger.info(f"No match for '{name}' in room '{room}' (room exists, no such device)")
-                return None
+                return []
             # A room HA doesn't know: Paris names some lights after their room instead of placing
             # them in one (« Couloir », « Bibliothèque »), so the room's words in a name locate it
             room_words = set(norm_room.split())
@@ -666,9 +669,9 @@ class HAClient:
             if not candidates:
                 # "salon" for an area called "Living Room": the name alone may still say which
                 logger.info(f"Room '{room}' unknown to HA, retrying without room filter")
-                return self.resolve_entity(name, room=None, domain_hints=domain_hints)
+                return self._match(name, room=None, domain_hints=domain_hints)
         if not candidates:
-            return None
+            return []
 
         # A generic name says which device only within a room: without one, « volets » held the
         # « Volet » of the guest room, first of three so named among nine shutters (AD-058)
@@ -680,13 +683,22 @@ class HAClient:
                 (eid for eid, n in candidates.items() if norm_input in n),
                 key=lambda e: (candidates[e] != norm_input, self.unavailable(e), len(candidates[e])),
             )
+            # Lights whose names hold every word of the request, none named so exactly, are all meant: « les
+            # lumières de la terrasse » came as « Lumière terrasse », which « … séjour » and « … parents » both
+            # hold, and the first alone went off (AD-096). Not other kinds (_ALL_HOLDING_THE_NAME)
+            domains = {self.entities[e]["domain"] for e in containing}
+            if norm_input not in candidates.values() and domains <= self._ALL_HOLDING_THE_NAME:
+                asked = words(norm_input)
+                if len(holding := [eid for eid in containing if asked <= words(candidates[eid])]) > 1:
+                    logger.info(f"Entity match: '{name}' (room='{room}') -> {holding} (the lights holding the name)")
+                    return holding
             contained = sorted(
                 (eid for eid, n in candidates.items() if n and n in norm_input), key=lambda e: -len(candidates[e])
             )
             for how, found in (("containing", containing), ("contained", contained)):
                 if found:
                     logger.info(f"Entity match: '{name}' (room='{room}') -> {found[0]} ({how})")
-                    return found[0]
+                    return [found[0]]
 
         # The one device left is meant when the request names no particular device (« la lumière »,
         # or the room itself for a speaker), when a one-domain action is scoped to a room HA knows
@@ -698,13 +710,13 @@ class HAClient:
         if len(candidates) == 1 and (unnamed or any_name):
             eid = next(iter(candidates))
             logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (only match in room)")
-            return eid
+            return [eid]
 
-        # « la lumière » of a room with several: the first one
+        # « les lumières » of a room with several: all of them, as in a room HA knows; here, one HA does not
+        # know, whose words their names hold (« terrasse », AD-096). resolve_entity takes the first
         if norm_room and generic:
-            eid = next(iter(candidates))
-            logger.info(f"Entity match: '{name}' (room='{room}') -> {eid} (generic name, first in room)")
-            return eid
+            logger.info(f"Entity match: '{name}' (room='{room}') -> {list(candidates)} (generic name, all in room)")
+            return list(candidates)
 
         # A misheard or slightly different name; never for a generic one, which is no name at all
         if norm_input and not generic:
@@ -713,10 +725,10 @@ class HAClient:
             if matches:
                 eid = norm_to_eid[matches[0]]
                 logger.info(f"Entity match: '{name}' -> {eid} (fuzzy: {matches[0]})")
-                return eid
+                return [eid]
 
         logger.warning(f"No entity match for '{name}' (room={room})")
-        return None
+        return []
 
     # Never by voice, whatever route a call takes to get here (AD-041); unlocking is unlock()'s alone (AD-068),
     # disarming disarm()'s (AD-083). An alarm is never set off: no trigger, and its siren's switch is out of reach

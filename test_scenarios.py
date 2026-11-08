@@ -284,6 +284,14 @@ def told_playing(description: str):
     )
 
 
+def turns_off(*entity_ids: str):
+    """These devices turned off, and nothing else got a call."""
+    return lambda t: (
+        {(service, payload.get("entity_id")) for _, service, payload in t.sent} == {("turn_off", e) for e in entity_ids},
+        f"{' and '.join(entity_ids)} turned off, nothing else",
+    )
+
+
 def none_said_off(t):
     # A Google Home playing nothing says « off »: the reply took it for one that cannot play (2026-10-26)
     return not t.played and "eteint" not in t.said, "nothing played, no speaker said off"
@@ -303,6 +311,7 @@ CHARRAS_SPEAKERS = {
 SONOS_BACK = {"media_player.sonos_move_2": "idle"}
 PARIS_SPEAKERS = {"media_player.google_home": "off", "media_player.sonos_paris": "idle"}
 SONOS_PARIS_OFF = {"media_player.sonos_paris": "unavailable"}
+TERRACE_ON = {"light.lumiere_terrasse_sejour": "on", "light.lumiere_terrasse_parents": "on"}
 CONCERTO = (
     "« Bach, JS: Concerto for Four Pianos in A Minor, BWV 1065: I. Allegro » de Johann Sebastian Bach, Michel Béroff"
 )
@@ -379,6 +388,14 @@ SCENARIOS = [
     ]),
     ("AD-095 sous-douce, the Sonos offline", "paris", {**PARIS_SPEAKERS, **SONOS_PARIS_OFF}, [
         ("Tu peux mettre France Inter sur la sous-douce ?", offers_one_that_answers("google", "living", "salon", unlike="sonos"), {}),
+    ]),
+    # Two terrace lights, « Lumière terrasse séjour » and « … parents », in an area of the outside: the model
+    # sent « Lumière terrasse », and the first of the two names holding it was the one turned off (2026-11-08)
+    ("AD-096 les lumières de la terrasse", "paris", TERRACE_ON, [
+        ("Éteins les lumières de la terrasse.", turns_off(*TERRACE_ON), {}),
+    ]),
+    ("AD-096 the parents' terrace light alone", "paris", TERRACE_ON, [
+        ("Éteins la lumière de la terrasse côté chambre parentale.", turns_off("light.lumiere_terrasse_parents"), {}),
     ]),
 ]  # fmt: skip
 
