@@ -85,6 +85,11 @@ Identify who is speaking. Two distinct problems:
 
 Today Parakeet turns audio into text and every voice cue is lost there, so voice ID means a separate component on the raw audio: a small speaker-verification model whose verdict ("Ivan / child / unknown") is injected into the prompt.
 
+### Who asks from the web app
+The server knows a browser (its random id, AD-061), not a person, and the Funnel key is the family's one (`WEB_UI_KEY`): Ivan asking from his phone is « a phone » in the log (2026-11-08, « Allume la LED de la borne wifi chez Zoé »). The app can say who asks with no voice model:
+- **A setting, « Qui utilise ce téléphone ? »**, one of `family`, chosen once and sent with each request: the log names the asker, and the context message tells the model whom it answers (« mon agenda », « rappelle-moi »). A label, not a proof: a child can pick « Ivan ».
+- **A link per person**, each with its own key: the server then knows who asks. It is what per-speaker permissions need from the app, and the same mechanism as the key per household the parents' site needs first (see "A third home").
+
 ## Sites
 
 ### A third home: Ivan's parents
