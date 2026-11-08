@@ -5,8 +5,9 @@ test_hard_cases.py replays requests as dry runs: the server runs no call and ans
 that does not answer, or what a read finds, cannot be played out. Here each scenario sets the devices' states,
 and the server's code, this checkout's, runs every call in this process against a fake Home Assistant that
 holds them: the homes' devices as the live server knows them (its /api/snapshot), the scenario's states, the
-service calls kept and nothing sent. Spotify is fake too; there is no satellite and no calendar. The model is
-the live server's, through the same Ollama: run it on the server.
+service calls kept and nothing sent. Spotify is fake too, and the calendar empty, Google's API stubbed: its tools,
+which the live server offers, change what the model searches (AD-097). There is no satellite. The model is the
+live server's, through the same Ollama: run it on the server.
 
 Usage:
     python test_scenarios.py                 # every scenario, 3 times
@@ -80,16 +81,24 @@ class FakeHA:
     def __init__(self, entities: dict):
         self.entities = entities
         self.states = {eid: info["state"] for eid, info in entities.items()}
+        self.sensors: dict[str, dict] = {}  # a scenario's sensors, HA's whole state: the snapshot has no sensor
         self.calls: list[tuple[str, str, dict]] = []
 
     def _state(self, entity_id: str) -> dict:
         attributes = self.entities[entity_id]["attributes"]
         return {"entity_id": entity_id, "state": self.states[entity_id], "attributes": attributes}
 
+    def set(self, entity_id: str, state):
+        """HA's side: a device's state, or a sensor's whole state (sensors)."""
+        if isinstance(state, dict):
+            self.sensors[entity_id] = state
+        else:
+            self.states[entity_id] = state
+
     def get(self, url, **_):
         path = URL(url).path
         if path == "/api/states":
-            return _Response(200, [self._state(eid) for eid in self.states])
+            return _Response(200, [self._state(eid) for eid in self.states] + list(self.sensors.values()))
         if (eid := path.removeprefix("/api/states/")) in self.states:
             return _Response(200, self._state(eid))
         return _Response(404, {"message": "Entity not found."})
@@ -185,6 +194,16 @@ class FakeSpotify:
         return {}
 
 
+def empty_calendar():
+    """The calendar client, its Google API an empty calendar that refuses writes."""
+    from calendar_client import CalendarClient
+
+    client = CalendarClient.__new__(CalendarClient)
+    client._service, client._lock = object(), asyncio.Lock()
+    client._list_events = lambda *_: {"items": []}
+    return client
+
+
 def build_server(snapshot: dict, site: str):
     """A server with the snapshot's homes, each behind its FakeHA, serving `site`."""
     import ha_client
@@ -208,7 +227,7 @@ def build_server(snapshot: dict, site: str):
                 setattr(client, key, value)
         client._session = FakeHA(client.entities)
     server.site = server._voice_site = server.site_named(site)
-    server.calendar_client = None
+    server.calendar_client = empty_calendar()
     server.spotify = FakeSpotify()
     server._keep_llm_loaded = lambda: None
     return server
@@ -245,10 +264,8 @@ def plays_on(entity_id: str):
 
 def offers_one_that_answers(*names: str, unlike: str = ""):
     """Nothing played elsewhere unasked, a speaker that answers named, and not that one (offline, 2026-11-07)."""
-    return lambda t: (
-        not t.played and any(name in t.said for name in names) and not (unlike and unlike in t.said),
-        "nothing played, one that answers named" + (f", « {unlike} » not" if unlike else ""),
-    )
+    named = says(*names, unlike=unlike)
+    return lambda t: (not t.played and named(t)[0], "nothing played, " + named(t)[1])
 
 
 def plays_on_or_asks(entity_id: str, *names: str):
@@ -292,6 +309,20 @@ def turns_off(*entity_ids: str):
     )
 
 
+def says(*patterns: str, unlike: str = ""):
+    """The reply, folded, holds one of these patterns, and not that one."""
+    return lambda t: (
+        any(re.search(p, t.said) for p in patterns) and not (unlike and re.search(unlike, t.said)),
+        f"« {' » or « '.join(patterns)} » said" + (f", not « {unlike} »" if unlike else ""),
+    )
+
+
+def number(value: str) -> str:
+    """A pattern of a number with decimals as a reply may write it: 19,9, 19.9, 19 virgule 9."""
+    whole, decimals = value.split(".")
+    return rf"\b{whole}(?:[,.]| virgule ){decimals}\b"
+
+
 def none_said_off(t):
     # A Google Home playing nothing says « off »: the reply took it for one that cannot play (2026-10-26)
     return not t.played and "eteint" not in t.said, "nothing played, no speaker said off"
@@ -311,6 +342,43 @@ CHARRAS_SPEAKERS = {
 SONOS_BACK = {"media_player.sonos_move_2": "idle"}
 PARIS_SPEAKERS = {"media_player.google_home": "off", "media_player.sonos_paris": "idle"}
 SONOS_PARIS_OFF = {"media_player.sonos_paris": "unavailable"}
+
+
+def sensors(*rows: tuple[str, str, str, str]) -> dict:
+    """Sensors' states by entity id, from (entity id, name, value, unit)."""
+    from test_unit import sensor_state
+
+    return {row[0]: sensor_state(*row) for row in rows}
+
+
+# Charras's temperature sensors, read on 2026-10-31 (those that answered « température intérieure » shown that day,
+# 2026-11-08's values for the others), and the upstairs corridor's
+CHARRAS_TEMPERATURES = sensors(
+    ("sensor.couloir_etage_capteur_temperature_sensor", "Couloir étage température", "19.9", "°C"),
+    ("sensor.couloir_etage_capteur_humidity_sensor", "Couloir étage humidité", "54.0", "%"),
+    ("sensor.couloir_etage_capteur_carbon_dioxide_sensor", "Couloir étage CO2", "361.0", "ppm"),
+    ("sensor.chaudiere_temperature", "Chaudière température", "62.5", "°C"),
+    ("sensor.eau_chaude_temperature", "Eau chaude température", "37.9", "°C"),
+    ("sensor.temperature_ambiante_chaudiere", "Température ambiante chaudière", "13.8", "°C"),
+    ("sensor.temperature_exterieure_okofen", "Température extérieure (Ökofen)", "13.0", "°C"),
+    ("sensor.radiateurs_temperature_piece", "Radiateurs température pièce", "15.7", "°C"),
+    ("sensor.radiateurs_temperature_depart", "Radiateurs température départ", "16.1", "°C"),
+    ("sensor.plancher_temperature_piece", "Plancher température pièce", "16.5", "°C"),
+    ("sensor.plancher_temperature_depart", "Plancher température départ", "16.6", "°C"),
+    ("sensor.plancher_2_temperature_piece", "Plancher 2 température pièce", "21.7", "°C"),
+    ("sensor.plancher_2_temperature_depart", "Plancher 2 température départ", "24.4", "°C"),
+    ("sensor.jardin_piscine_water_temperature", "Piscine Water Temperature", "15", "°C"),
+    ("sensor.jardin_piscine_air_temperature", "Piscine Air Temperature", "7.2", "°C"),
+    ("sensor.freebox_v7_r1_temperature_1", "Freebox v7 (r1) Température 1", "34", "°C"),
+    ("sensor.freebox_v7_r1_temperature_2", "Freebox v7 (r1) Température 2", "34", "°C"),
+    ("sensor.freebox_v7_r1_temperature_3", "Freebox v7 (r1) Température 3", "33", "°C"),
+    ("sensor.freebox_v7_r1_temperature_cpu_ap", "Freebox v7 (r1) Température CPU AP", "53", "°C"),
+    ("sensor.freebox_v7_r1_temperature_cpu_cp_master", "Freebox v7 (r1) Température CPU CP Master", "65", "°C"),
+    ("sensor.freebox_v7_r1_temperature_cpu_cp_slave", "Freebox v7 (r1) Température CPU CP Slave", "65", "°C"),
+    ("sensor.sirene_exterieure_temperature", "Sirene exterieure temperature", "23.9", "°C"),
+    ("sensor.entree_temperature", "Entrée temperature", "20.8", "°C"),
+    ("sensor.escalier_temperature", "Escalier temperature", "19.3", "°C"),
+)
 TERRACE_ON = {"light.lumiere_terrasse_sejour": "on", "light.lumiere_terrasse_parents": "on"}
 CONCERTO = (
     "« Bach, JS: Concerto for Four Pianos in A Minor, BWV 1065: I. Allegro » de Johann Sebastian Bach, Michel Béroff"
@@ -337,8 +405,9 @@ def went_on(track: str, forgotten: bool = False):
     return change
 
 
-# (name, site, states, [(request, check, changes)]): states as the last refresh read them; changes, HA's before
-# that request, the server's own copy left as it was, or a function of the server (went_on)
+# (name, site, states, [(request, check, changes)]): states as the last refresh read them, a sensor's its whole HA
+# state (sensors); changes, HA's before that request, the server's own copy left as it was, or a function of the
+# server (went_on)
 SCENARIOS = [
     ("AD-084 the Sonos back online", "charras", CHARRAS_SPEAKERS, [
         ("Est-ce que tu peux me jouer le prélude numéro deux de Bach sur la sonos ?",
@@ -397,6 +466,11 @@ SCENARIOS = [
     ("AD-096 the parents' terrace light alone", "paris", TERRACE_ON, [
         ("Éteins la lumière de la terrasse côté chambre parentale.", turns_off("light.lumiere_terrasse_parents"), {}),
     ]),
+    # « température intérieure » searched, the upstairs corridor's sensor named « Capteur Temperature sensor »: the
+    # stairs' 19.3 °C was said to be upstairs (2026-10-31). Renamed in HA « Couloir étage température » (AD-097)
+    ("AD-097 la température à l'étage", "charras", CHARRAS_TEMPERATURES, [
+        ("Il fait quelle température à l'étage ?", says(number("19.9"), unlike=number("19.3")), {}),
+    ]),
 ]  # fmt: skip
 
 
@@ -405,14 +479,17 @@ async def replay(snapshot: dict, site: str, states: dict, turns: list):
     server = build_server(snapshot, site)
     fake = server.ha_client._session
     for eid, state in states.items():
-        server.ha_client.entities[eid]["state"] = fake.states[eid] = state
+        fake.set(eid, state)
+        if not isinstance(state, dict):
+            server.ha_client.entities[eid]["state"] = state
     for i, (text, _, changes) in enumerate(turns):
         sent, t0 = len(fake.calls), time.monotonic()
         server.new_request("replay")  # a browser of the web app, with its own conversation (AD-061)
         if callable(changes):
             changes(server)
         else:
-            fake.states.update(changes)
+            for eid, state in changes.items():
+                fake.set(eid, state)
         reply = await server.process_with_llm(None, text) or ""
         await asyncio.gather(*server._pending_service_calls, *server._background_tasks, return_exceptions=True)
         wall = round(time.monotonic() - t0, 2)
