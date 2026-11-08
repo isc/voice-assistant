@@ -301,12 +301,17 @@ def told_playing(description: str):
     )
 
 
-def turns_off(*entity_ids: str):
-    """These devices turned off, and nothing else got a call."""
-    return lambda t: (
-        {(service, payload.get("entity_id")) for _, service, payload in t.sent} == {("turn_off", e) for e in entity_ids},
-        f"{' and '.join(entity_ids)} turned off, nothing else",
-    )
+def turns_off(*entity_ids: str, allowed: tuple[str, ...] = ()):
+    """These devices turned off, and nothing else got a call but those allowed turned off."""
+
+    def check(t):
+        sent = {(service, payload.get("entity_id")) for _, service, payload in t.sent}
+        wanted = {("turn_off", e) for e in entity_ids}
+        return wanted <= sent <= wanted | {("turn_off", e) for e in allowed}, (
+            f"{' and '.join(entity_ids)} turned off, nothing else" + (f" but {', '.join(allowed)}" if allowed else "")
+        )
+
+    return check
 
 
 def says(*patterns: str, unlike: str = ""):
@@ -459,9 +464,10 @@ SCENARIOS = [
         ("Tu peux mettre France Inter sur la sous-douce ?", offers_one_that_answers("google", "living", "salon", unlike="sonos"), {}),
     ]),
     # Two terrace lights, « Lumière terrasse séjour » and « … parents », in an area of the outside: the model
-    # sent « Lumière terrasse », and the first of the two names holding it was the one turned off (2026-11-08)
+    # sent « Lumière terrasse », and the first of the two names holding it was the one turned off (2026-11-08). The
+    # garden's « Spots terrasse potager », there since, may go off too: Ivan, 2026-11-08
     ("AD-096 les lumières de la terrasse", "paris", TERRACE_ON, [
-        ("Éteins les lumières de la terrasse.", turns_off(*TERRACE_ON), {}),
+        ("Éteins les lumières de la terrasse.", turns_off(*TERRACE_ON, allowed=("light.spots_potager",)), {}),
     ]),
     ("AD-096 the parents' terrace light alone", "paris", TERRACE_ON, [
         ("Éteins la lumière de la terrasse côté chambre parentale.", turns_off("light.lumiere_terrasse_parents"), {}),
