@@ -69,6 +69,7 @@ TEST_TIMEOUT = 30 * 60
 UNSTABLE = {
     "AD-062 Femme les volets",  # closed them in the evening, opened them in the morning (AD-082)
     "AD-080 Bonne nuit",  # end_conversation 1/3, 3/3, 0/3 (AD-083, AD-084)
+    "AD-080 Merci, bonne journée",  # 1/3 on 2026-10-31, 2/3 on 11-03, 3/3 the other nights, the same code (AD-080)
     "AD-077 games room shutter",  # 0/3, then 3/3 (AD-083)
     "AD-075 the setpoint, three turns · Ben normalement il est déjà allumé hein",  # 3 of 5 (AD-082)
     # 6 of 10, 9 and 10 since HA names the screen so; the two turns after it fall with it (AD-084 to AD-086)
