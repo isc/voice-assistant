@@ -58,7 +58,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 
 1. ESP detects wake word → sends audio stream
 2. Silero VAD detects end of speech (31 frames / ~1s silence); a burst under 4 frames is no speech (AD-092)
-3. STT: Parakeet transcribes audio to French text
+3. STT: Parakeet transcribes audio to French text; speech after a wake word it writes as nothing gets « Je n'ai pas compris, tu peux répéter ? » and a follow-up, without the LLM (AD-094)
 4. LLM: sends a static system prompt (instructions, family, entity list) + tool definitions + conversation history + a short context message (date/time, timers, music) + the transcript
 5. If tool_calls → execute each, loop back to LLM with results + tools (up to 3 rounds) until text response
 6. If text response → check the fallback parser for a tool call written as text (`fn({...})`)

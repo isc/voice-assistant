@@ -3698,6 +3698,23 @@ class TestVADFrames(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(server.speech.vad, first)
 
 
+def satellite_server(test: unittest.TestCase, transcript: str, heard: bool = True, follow_up: bool = False):
+    """A server whose satellite heard (or not) speech that Parakeet writes as `transcript`; no LLM, no TTS."""
+    tmp = tempfile.TemporaryDirectory()
+    test.addCleanup(tmp.cleanup)
+    from web_ui import ExchangeLog
+
+    server = make_server()
+    server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
+    server.recordings = Recordings(Path(tmp.name) / "recordings", days=90)
+    server.stt = MagicMock(transcribe=AsyncMock(return_value=transcript))
+    server.process_with_llm = AsyncMock()
+    server.text_to_speech = AsyncMock()
+    server.speech = MagicMock(heard=heard)
+    server.is_followup = follow_up
+    return server
+
+
 class TestFollowUpLanguage(unittest.IsolatedAsyncioTestCase):
     """A follow-up in another language than its conversation's is the room talking, not a request (AD-093)."""
 
@@ -3732,22 +3749,48 @@ class TestFollowUpLanguage(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.conversation.is_request("Arrête la musique.", follow_up=True))
 
     async def test_the_satellite_ends_such_a_follow_up_quietly(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        from web_ui import ExchangeLog
-
-        server = make_server()
-        server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
-        server.recordings = Recordings(Path(tmp.name) / "recordings", days=90)
-        server.stt = MagicMock(transcribe=AsyncMock(return_value="She should be some team."))
-        server.process_with_llm = AsyncMock()
-        server.speech = MagicMock(heard=True)
-        server.is_followup = True
+        server = satellite_server(self, "She should be some team.", follow_up=True)
         api = MagicMock()
         await server.process_voice_pipeline(api, bytes(4096))
         server.process_with_llm.assert_not_awaited()
         api.send_voice_assistant_event.assert_called_once_with(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
         self.assertEqual(server.exchange_log.entries[-1]["response"], "[Autre langue]")
+
+
+class TestAskedAgain(unittest.IsolatedAsyncioTestCase):
+    """Speech after the wake word that Parakeet writes as nothing is asked again, then listened for (AD-094)."""
+
+    async def test_speech_written_as_nothing_is_asked_again(self):
+        server = satellite_server(self, "")
+        api = MagicMock()
+        await server.process_voice_pipeline(api, bytes(4096))
+        server.process_with_llm.assert_not_awaited()
+        server.text_to_speech.assert_awaited_once_with(api, "Je n'ai pas compris, tu peux répéter ?")
+        self.assertEqual(server.exchange_log.entries[-1]["response"], "[Rien compris]")
+
+    async def test_no_speech_after_the_wake_word_stays_silent(self):
+        """A wake word heard in a quiet room, or the TV's: nobody to ask (AD-036)."""
+        server = satellite_server(self, "", heard=False)
+        api = MagicMock()
+        await server.process_voice_pipeline(api, bytes(4096))
+        server.text_to_speech.assert_not_awaited()
+        server.stt.transcribe.assert_not_awaited()
+        self.assertEqual(api.send_voice_assistant_event.call_args_list[0].args[0], VoiceAssistantEventType.VOICE_ASSISTANT_ERROR)
+
+    async def test_nothing_heard_in_a_follow_up_ends_it_quietly(self):
+        server = satellite_server(self, "", follow_up=True)
+        api = MagicMock()
+        await server.process_voice_pipeline(api, bytes(4096))
+        server.text_to_speech.assert_not_awaited()
+        api.send_voice_assistant_event.assert_called_once_with(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
+
+    async def test_the_request_asked_again_sets_the_conversation_language(self):
+        """After an English conversation, the French request asked again is no other language's follow-up."""
+        server = satellite_server(self, "")
+        server.conversation.language = "en"
+        await server.process_voice_pipeline(MagicMock(), bytes(4096))
+        self.assertTrue(server.conversation.is_request("Verrouille la porte d'entrée.", follow_up=True))
+        self.assertEqual(server.conversation.language, "fr")
 
 
 class TestTimers(unittest.IsolatedAsyncioTestCase):

@@ -84,6 +84,8 @@ _DUCKED_SHARE = 0.2
 # 157 recorded by 2026-10-24, the slowest up to 15 s (the model loaded again)
 _WAIT_PHRASE_AFTER = 5
 _WAIT_PHRASE = "Un petit instant."  # « Un instant. » alone, Kokoro's came out « Un estompe » to Whisper
+# Said when speech after the wake word came out of Parakeet as nothing, then listened for again (AD-094)
+_ASK_AGAIN = "Je n'ai pas compris, tu peux répéter ?"
 
 
 # French web radio streams. All MP3: the Voice PE does not decode AAC.
@@ -1089,6 +1091,11 @@ class VoiceAssistantServer:
                     # Normal: nothing asked during follow-up, end conversation quietly
                     logger.info(f"No {'request' if transcript else 'speech'} during follow-up - ending conversation")
                     api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
+                elif self.speech.heard:
+                    # Speech, written as nothing: a red light alone left « Verrouille la porte d'entrée. » undone
+                    # (AD-094). The request said again is the conversation's, its language too (AD-093)
+                    self.conversation.language = None
+                    await self.text_to_speech(api, _ASK_AGAIN)
                 else:
                     await self.send_error_to_device(api, "STT failed")
                 return

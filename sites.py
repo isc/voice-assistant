@@ -32,14 +32,17 @@ class Conversation:
     last_time: float = 0
     shown_images: set = field(default_factory=set)  # pictures not to show twice
     events: list = field(default_factory=list)  # ids of the calendar events it made: « ce rendez-vous » (AD-072)
-    language: str = HOME  # that of its last request after a wake word: a follow-up in another isn't one (AD-093)
+    # That of its last request after a wake word: a follow-up in another isn't one (AD-093). None when that request
+    # came out of Parakeet as nothing: the one asked again sets it (AD-094)
+    language: Optional[str] = HOME
 
     def is_request(self, transcript: str, follow_up: bool) -> bool:
         """Whether a transcript is a request: a follow-up in another language than the conversation's is the
         room talking (« C'est bon, il y en a un qui va se laver » came out « De volta lá, você sabe. »). A
-        request after a wake word sets that language, French unless fastText is sure of another (AD-093)."""
+        request after a wake word sets that language, French unless fastText is sure of another (AD-093), as does one
+        asked again (AD-094)."""
         language = language_of(transcript)
-        if not follow_up:
+        if not follow_up or not self.language:
             self.language = language or HOME
         elif language and language != self.language:
             logger.info(f"Follow-up in {language}, the conversation in {self.language}: not a request")

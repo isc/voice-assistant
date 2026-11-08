@@ -10,6 +10,9 @@ On 2026-10-10 the Voice PE most likely rebooted after a reply asked for follow-u
 ### Back to the official Voice PE firmware
 The Voice PE runs our build of 26.9.0 with ESPHome 2026.9.1, for the mixer fix (AD-054). Once a release is built with 2026.9.1 or later (`esphome-version` in its `build.yml`), install it from the update entity. If an announcement hangs again before then (no sound, « Queue full » in the device log), it is a second bug: compare with [#643](https://github.com/esphome/home-assistant-voice-pe/issues/643) and take it upstream.
 
+### A request Parakeet writes as nothing
+Since AD-094 it is asked again. Two ways to hear it the first time, if the nightly reviews find more: Whisper (large-v3-turbo, ~1.6 GB, on the bottom card or the CPU) on the recordings Parakeet writes as nothing after a wake word, never in a follow-up, where it turns the room into French; it heard the three of October and November, and needs a filter for what it invents on music. Or pausing the music while the request is spoken, the cause of 2 of those 3, which AD-091's stream, 10 s ahead, makes delicate.
+
 ### Media target from live player state
 Media commands without a room go to `_last_media_target`, a value kept in memory: it is lost on restart (picked up from HA at startup since 2026-10-10) and goes stale when music is started or stopped from a phone or the Sonos app. Reading HA player states at command time would send "stop" and "plus fort" to whatever actually plays. It would also let the conversation stay open after a media command when nothing plays near the satellite (AD-035 ends it unconditionally). Cost: one HA read per media command, or a websocket subscription.
 
