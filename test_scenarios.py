@@ -243,9 +243,12 @@ def plays_on(entity_id: str):
     return lambda t: (t.music == ("ha", entity_id), f"the music on {entity_id}")
 
 
-def offers_one_that_answers(*names: str):
-    """Nothing played elsewhere unasked, and a speaker that answers named."""
-    return lambda t: (not t.played and any(name in t.said for name in names), "nothing played, one that answers named")
+def offers_one_that_answers(*names: str, unlike: str = ""):
+    """Nothing played elsewhere unasked, a speaker that answers named, and not that one (offline, 2026-11-07)."""
+    return lambda t: (
+        not t.played and any(name in t.said for name in names) and not (unlike and unlike in t.said),
+        "nothing played, one that answers named" + (f", « {unlike} » not" if unlike else ""),
+    )
 
 
 def plays_on_or_asks(entity_id: str, *names: str):
@@ -298,6 +301,8 @@ CHARRAS_SPEAKERS = {
     "media_player.home_mini_charlie": "off",
 }
 SONOS_BACK = {"media_player.sonos_move_2": "idle"}
+PARIS_SPEAKERS = {"media_player.google_home": "off", "media_player.sonos_paris": "idle"}
+SONOS_PARIS_OFF = {"media_player.sonos_paris": "unavailable"}
 CONCERTO = (
     "« Bach, JS: Concerto for Four Pianos in A Minor, BWV 1065: I. Allegro » de Johann Sebastian Bach, Michel Béroff"
 )
@@ -364,6 +369,16 @@ SCENARIOS = [
          "préférés.", told_playing(PRELUDE), {}),
         # All of them, as asked on 2026-10-03 (« mes favoris »)
         ("Mets plutôt tous mes titres likés en aléatoire.", told_playing("Lecture sur Spotify : vos titres likés"), {}),
+    ]),
+    # « la Google Home » heard « la boule de l'homme », the music on the satellite and the Sonos offline: the one
+    # speaker it could go to, asked about with the Sonos, and no follow-up to answer (2026-11-07). Here, with no
+    # satellite, the music on the Sonos
+    ("AD-095 la boule de l'homme", "paris", PARIS_SPEAKERS, [
+        ("Mets le prélude numéro deux de Bach sur la Sonos.", plays_on("media_player.sonos_paris"), {}),
+        ("Mets le son sur la boule de l'homme.", plays_on("media_player.google_home"), {}),
+    ]),
+    ("AD-095 sous-douce, the Sonos offline", "paris", {**PARIS_SPEAKERS, **SONOS_PARIS_OFF}, [
+        ("Tu peux mettre France Inter sur la sous-douce ?", offers_one_that_answers("google", "living", "salon", unlike="sonos"), {}),
     ]),
 ]  # fmt: skip
 

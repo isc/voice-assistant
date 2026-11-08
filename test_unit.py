@@ -3358,6 +3358,49 @@ class TestUnknownSpeaker(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.server._unknown_speaker(function, args) is not None, fails, (function, args))
 
 
+class TestOnlyDestination(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
+    """Paris, 2026-11-07: Bach on the satellite, the Sonos offline, « Mets le son sur la Google Home » heard « la
+    boule de l'homme ». The model asked « la Google Home ou la Sonos ? », and the satellite, playing, did not listen
+    for the answer: the wake word and the whole request again (AD-095)."""
+
+    MOVE = {"room": "boule de l'homme"}
+
+    def setUp(self):
+        super().setUp()
+        self.add_speakers()
+        self.server.ha_client.entities[self.SONOS[1]]["state"] = "unavailable"
+        self.server._spotify_at = (self.server.site, self.SATELLITE)
+        self.server.spotify.stream.listeners = {object()}
+        self.server._point_at_spotify = AsyncMock(return_value=True)
+        self.server.new_request()
+
+    async def test_the_music_goes_to_the_one_speaker_it_can_go_to(self):
+        self.assertIsNone(self.server._unknown_speaker("move_media", self.MOVE))
+        result = await self.server.execute_function("move_media", self.MOVE)
+        self.assertEqual(result, "Aucune enceinte ne s'appelle boule de l'homme : Google Home, la seule autre qui "
+                                 "répond. Musique Spotify passée de l'enceinte de l'appareil vocal à Google Home")
+        self.server._point_at_spotify.assert_awaited_once_with(self.GOOGLE_HOME)
+
+    def test_with_two_the_question_names_them_but_the_one_it_plays_on(self):
+        self.server.ha_client.entities[self.SONOS[1]]["state"] = "idle"
+        result = self.server._unknown_speaker("move_media", self.MOVE)
+        self.assertIn(": Sonos, Google Home (Living Room). ", result)  # not « ici »
+
+    async def test_moved_to_one_offline_the_others_named_with_the_one_it_plays_on(self):
+        self.server.ha_client._render_template = AsyncMock(return_value=None)  # HA reads it offline still
+        result = await self.server.execute_function("move_media", {"room": "Sonos"})
+        self.assertTrue(result.startswith("Sonos ne répond pas (hors ligne). Enceintes qui répondent : Google Home "
+                                          "(Living Room), ici (l'enceinte de l'appareil vocal). "), result)  # fmt: skip
+
+    def test_an_offline_speaker_is_not_offered(self):
+        result = self.server._unknown_speaker("play_radio", {"station": "fip", **self.MOVE})
+        self.assertIn(": Google Home (Living Room), ici (l'enceinte de l'appareil vocal). ", result)
+
+    def test_nothing_playing_nothing_moves(self):
+        self.server._spotify_at = None
+        self.assertIsNotNone(self.server._unknown_speaker("move_media", self.MOVE))
+
+
 class TestSpotifyOnScreen(SpotifySpeakers, unittest.IsolatedAsyncioTestCase):
     """The Nest Hub showed « Default Media Receiver » and « Live » over the music."""
 
@@ -3554,10 +3597,9 @@ class TestTwoSonos(SpeakersAtHome, unittest.IsolatedAsyncioTestCase):
         eid = self.client.resolve_entity("Sonos", domain_hints=["media_player"])
         self.assertEqual(eid, "media_player.sonos_move_2")
 
-    def test_offline_ones_said_so_when_none_matches(self):
+    def test_only_those_that_answer_named_when_none_matches(self):
         result = self.server._no_speaker("sous-douce")
-        self.assertIn("Sonos Move (Terrasse, hors ligne), Sonos Move 2 (Cuisine)", result)
-        self.assertIn("Home mini Zoé (hors ligne)", result)
+        self.assertIn(": Sonos Move 2 (Cuisine), Living Room speaker (Salon), Dining room Display.", result)
 
     def test_a_speaker_playing_nothing_can_play(self):
         for state, said in (("off", "ne joue rien, disponible"), ("idle", "ne joue rien, disponible"),
