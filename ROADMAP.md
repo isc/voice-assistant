@@ -28,6 +28,8 @@ Parakeet v3 already transcribes 25 European languages with automatic detection: 
 - The LLM answering in the language of the request: the system prompt is French and says nothing about it.
 - The TTS speaking that language: `ff_siwis` and the misaki G2P are set up for French. Kokoro has English voices; the reply's language has to pick the voice and the G2P, either detected on the reply text or stated by the LLM.
 
+The request's language is already known: `language.py` (fastText, AD-093) gives a conversation the language of its wake-word request, when sure of it.
+
 ## Screen
 
 ### Our own Cast receiver

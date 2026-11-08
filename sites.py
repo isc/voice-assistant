@@ -7,12 +7,16 @@ Without `SITES`, the unprefixed variables describe a single site, as before.
 
 import asyncio
 import ipaddress
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
+from language import HOME, language_of
 from timer import TimerManager
+
+logger = logging.getLogger(__name__)
 
 _Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 # Read as NAME_KEY for a named site; these may also be set once, unprefixed, for all sites
@@ -28,6 +32,19 @@ class Conversation:
     last_time: float = 0
     shown_images: set = field(default_factory=set)  # pictures not to show twice
     events: list = field(default_factory=list)  # ids of the calendar events it made: « ce rendez-vous » (AD-072)
+    language: str = HOME  # that of its last request after a wake word: a follow-up in another isn't one (AD-093)
+
+    def is_request(self, transcript: str, follow_up: bool) -> bool:
+        """Whether a transcript is a request: a follow-up in another language than the conversation's is the
+        room talking (« C'est bon, il y en a un qui va se laver » came out « De volta lá, você sabe. »). A
+        request after a wake word sets that language, French unless fastText is sure of another (AD-093)."""
+        language = language_of(transcript)
+        if not follow_up:
+            self.language = language or HOME
+        elif language and language != self.language:
+            logger.info(f"Follow-up in {language}, the conversation in {self.language}: not a request")
+            return False
+        return True
 
 
 # Compared by identity: a site is a home with live state, not a value

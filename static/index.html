@@ -451,6 +451,8 @@ function botMsg(e) {
   const r = e.response || '';
   let bubble;
   if (r === '[Rien compris]') bubble = '<div class="bubble failed">Rien compris</div>';
+  // A follow-up in another language than the conversation's: the room talking, left unanswered (AD-093)
+  else if (r === '[Autre langue]') bubble = '<div class="bubble failed">Pas pour moi : une autre langue</div>';
   else if (r.startsWith('[Erreur')) bubble = `<div class="bubble failed">${esc(r.startsWith('[Erreur LLM') ? 'Pas de réponse du modèle' : r.slice(1, -1))}</div>`;
   else bubble = `<div class="bubble">${esc(r)}</div>`;
   const calls = (e.tool_calls || []).filter((tc) => tc.function !== 'end_conversation');

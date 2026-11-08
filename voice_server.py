@@ -260,6 +260,7 @@ def _mark_outcome(tc_entry: dict, result: str) -> None:
 
 # The exchange log's replies to requests that got none
 NOTHING_HEARD = "[Rien compris]"
+NOT_FOR_US = "[Autre langue]"  # a follow-up in another language than its conversation's (AD-093)
 LLM_FAILED = "[Erreur LLM: pas de réponse]"
 
 
@@ -1082,11 +1083,11 @@ class VoiceAssistantServer:
                 transcript = ""
             timings["stt"] = round(time.time() - t0, 2)
             entry["transcript"] = transcript
-            if not transcript:
-                entry["response"] = NOTHING_HEARD
+            if unanswered := self._unanswered(transcript, self.is_followup):
+                entry["response"] = unanswered
                 if self.is_followup:
-                    # Normal: no speech during follow-up, end conversation quietly
-                    logger.info("No speech during follow-up - ending conversation")
+                    # Normal: nothing asked during follow-up, end conversation quietly
+                    logger.info(f"No {'request' if transcript else 'speech'} during follow-up - ending conversation")
                     api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
                 else:
                     await self.send_error_to_device(api, "STT failed")
@@ -1151,6 +1152,13 @@ class VoiceAssistantServer:
                     audio=entry["audio"],
                     site=entry["site"],
                 )
+
+    def _unanswered(self, transcript: str, follow_up: bool) -> Optional[str]:
+        """What the log says of a transcript that gets no answer, or None for a request: nothing heard, or a
+        follow-up in another language than its conversation's, which ends it quietly (AD-093)."""
+        if not transcript:
+            return NOTHING_HEARD
+        return None if self.conversation.is_request(transcript, follow_up) else NOT_FOR_US
 
     # === FUNCTION CALLING ===
 
@@ -2602,24 +2610,24 @@ class VoiceAssistantServer:
         # What became of the request, beside its recording, as for the satellite's
         entry = {"site": self.site.name, "source": "app", "follow_up": follow_up, "vad_speech": heard}
         entry.update(audio=self.recordings.save(audio), transcript="", timings=timings)
+        transcript = ""
         try:
             t0 = time.time()
-            entry["transcript"] = (await self.stt.transcribe(audio) if heard else None) or ""
+            transcript = entry["transcript"] = (await self.stt.transcribe(audio) if heard else None) or ""
             timings["stt"] = round(time.time() - t0, 2)
-            await on_transcript(entry["transcript"])
-            if entry["transcript"]:
-                reply = await self.answer(
-                    entry["transcript"], "app", timings, speak=True, audio=entry["audio"], on_wait=on_wait
-                )
+            unanswered = self._unanswered(transcript, follow_up)
+            await on_transcript("" if unanswered else transcript)  # the page ends a follow-up that got nothing
+            if not unanswered:
+                reply = await self.answer(transcript, "app", timings, speak=True, audio=entry["audio"], on_wait=on_wait)
                 entry.update(response=reply["response"], tool_calls=reply["tool_calls"])
                 return reply
             if heard or not follow_up:  # a follow-up nobody spoke in is how conversations end
-                entry["response"] = NOTHING_HEARD
+                entry["response"] = unanswered
                 self.exchange_log.add(
                     "app",
-                    "",
-                    "",
-                    NOTHING_HEARD,
+                    transcript,
+                    transcript,
+                    entry["response"],
                     timings=timings,
                     audio=entry["audio"],
                     site=self.site.name,
@@ -2628,7 +2636,6 @@ class VoiceAssistantServer:
             return None
         except Exception as e:
             entry["error"] = str(e)
-            transcript = entry["transcript"]
             self.exchange_log.add(
                 "app",
                 transcript,

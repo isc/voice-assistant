@@ -17,6 +17,7 @@ cryptography==49.0.0
 csvw==4.0.0
 dlinfo==2.0.0
 espeakng-loader==0.2.4
+fasttext-predict==0.9.2.4
 filelock==3.29.4
 flatbuffers==25.12.19
 frozenlist==1.8.0

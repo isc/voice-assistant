@@ -26,7 +26,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import aiohttp
-from aioesphomeapi import MediaPlayerCommand, VoiceAssistantConfigurationResponse, VoiceAssistantWakeWord
+from aioesphomeapi import (
+    MediaPlayerCommand,
+    VoiceAssistantConfigurationResponse,
+    VoiceAssistantEventType,
+    VoiceAssistantWakeWord,
+)
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from opening_hours import ParserError
@@ -3693,6 +3698,58 @@ class TestVADFrames(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(server.speech.vad, first)
 
 
+class TestFollowUpLanguage(unittest.IsolatedAsyncioTestCase):
+    """A follow-up in another language than its conversation's is the room talking, not a request (AD-093)."""
+
+    def test_a_follow_up_in_another_language_is_no_request(self):
+        server = make_server()
+        self.assertTrue(server.conversation.is_request("Ferme les volets dans la chambre des enfants.", follow_up=False))
+        self.assertFalse(server.conversation.is_request("De volta lá, você sabe.", follow_up=True))
+        self.assertFalse(server.conversation.is_request("So we'll have the whole West on that one.", follow_up=True))
+        self.assertTrue(server.conversation.is_request("Et dans la salle de jeux ?", follow_up=True))
+
+    def test_short_words_fasttext_is_unsure_of_go_through(self):
+        """Judged Italian at 0.65, English at 0.82…: below 0.9, a follow-up is the conversation's."""
+        server = make_server()
+        server.conversation.is_request("Ferme les volets.", follow_up=False)
+        for said in ("Merci.", "Vas-y.", "Non.", "Stop.", "La cuisine.", "Okay."):
+            self.assertTrue(server.conversation.is_request(said, follow_up=True), said)
+
+    def test_a_conversation_in_english_keeps_its_follow_ups(self):
+        server = make_server()
+        self.assertTrue(server.conversation.is_request("Turn off the lights in the living room.", follow_up=False))
+        self.assertEqual(server.conversation.language, "en")
+        self.assertTrue(server.conversation.is_request("That's all, thank you.", follow_up=True))
+        self.assertFalse(server.conversation.is_request("Ferme les volets dans la chambre de Zoé.", follow_up=True))
+
+    def test_a_request_of_a_language_unsure_leaves_the_conversation_french(self):
+        """On 2026-11-07 a request after the wake word came out « Помалый души. », Russian at 0.67: had it set
+        the conversation's language, the next follow-up, « Arrête la musique. », would have gone unheard."""
+        server = make_server()
+        server.conversation.language = "en"  # from an earlier request
+        self.assertTrue(server.conversation.is_request("Помалый души.", follow_up=False))
+        self.assertEqual(server.conversation.language, "fr")
+        self.assertTrue(server.conversation.is_request("Arrête la musique.", follow_up=True))
+
+    async def test_the_satellite_ends_such_a_follow_up_quietly(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        from web_ui import ExchangeLog
+
+        server = make_server()
+        server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
+        server.recordings = Recordings(Path(tmp.name) / "recordings", days=90)
+        server.stt = MagicMock(transcribe=AsyncMock(return_value="She should be some team."))
+        server.process_with_llm = AsyncMock()
+        server.speech = MagicMock(heard=True)
+        server.is_followup = True
+        api = MagicMock()
+        await server.process_voice_pipeline(api, bytes(4096))
+        server.process_with_llm.assert_not_awaited()
+        api.send_voice_assistant_event.assert_called_once_with(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
+        self.assertEqual(server.exchange_log.entries[-1]["response"], "[Autre langue]")
+
+
 class TestTimers(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_the_only_timer_without_its_name(self):
         from timer import TimerManager
@@ -4256,6 +4313,22 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(messages, [{"type": "heard"}, {"type": "transcript", "text": ""}])
         self.server.stt.transcribe.assert_not_awaited()
         self.assertEqual(self.server.exchange_log.entries, [])
+
+    async def test_a_follow_up_in_another_language_ends_quietly(self):
+        """On 2026-11-04 a « Chut ! Chut ! » came out « She should be some team. » in a follow-up, and got an
+        apology aloud: in another language than the conversation's, it is no request (AD-093)."""
+        self.server.stt.transcribe.return_value = "She should be some team."
+        self.server.process_with_llm = AsyncMock()
+        client = await self.client()
+        with patch("web_ui.SpeechEnd", FakeSpeech):
+            ws = await client.ws_connect("/api/listen?follow_up=1&client=phone42")
+            for _ in range(3):
+                await ws.send_bytes(bytes(2048))
+            messages = [await ws.receive_json() for _ in range(3)]
+        self.assertEqual(messages[1:], [{"type": "heard"}, {"type": "transcript", "text": ""}])  # the page ends it
+        self.server.process_with_llm.assert_not_awaited()
+        entry = self.server.exchange_log.entries[-1]
+        self.assertEqual((entry["input"], entry["response"]), ("She should be some team.", "[Autre langue]"))
 
     async def test_pages_of_other_sites_refused(self):
         client = await self.client()
