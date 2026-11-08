@@ -14,6 +14,9 @@ WAIT_FOR_SPEECH = 8.0  # a false wake kept the mic open 30 s, recording the room
 WAIT_FOR_FOLLOW_UP = 5.0
 MAX_SECONDS = 30.0
 _SPEECH = 0.5  # a frame scored above it is speech
+# A burst is speech from its 4th frame (128 ms): a click or a breath scored 1 to 3 and was answered, the
+# shortest request heard (« Stop. ») 6 (AD-092)
+_MIN_SPEECH_FRAMES = 4
 _SILENCE_FRAMES = 31  # ~1 s of silence after speech ends the request
 
 
@@ -25,9 +28,14 @@ class SpeechEnd:
         # previous request, it scored a clear request 0.26 instead of 0.99 (red LED)
         self.vad = SileroVAD(16000)
         self.offset = 0  # bytes of the recording read
-        self.heard = False  # speech, at least one frame
-        self.silent_frames = 0  # in a row, since speech
+        self.speech_frames = 0  # in the burst
+        self.silent_frames = 0  # in a row, since the burst's last speech frame
         self.ended = False
+
+    @property
+    def heard(self) -> bool:
+        """Speech: a burst of at least _MIN_SPEECH_FRAMES."""
+        return self.speech_frames >= _MIN_SPEECH_FRAMES
 
     def read(self, recording: bytes | bytearray) -> bool:
         """Read the recording's new frames; True once speech has ended.
@@ -44,12 +52,16 @@ class SpeechEnd:
                 continue
             if is_speech:
                 self.silent_frames = 0
-                if not self.heard:
-                    self.heard = True
+                self.speech_frames += 1
+                if self.speech_frames == _MIN_SPEECH_FRAMES:
                     logger.info("Speech detected")
-            elif self.heard:
+            elif self.speech_frames:
                 self.silent_frames += 1
                 if self.silent_frames >= _SILENCE_FRAMES:
-                    logger.info(f"Silence detected after speech ({self.silent_frames} frames)")
-                    self.ended = True
+                    if self.heard:
+                        logger.info(f"Silence detected after speech ({self.silent_frames} frames)")
+                        self.ended = True
+                    else:  # too short to be speech: forgotten, and the wait for speech goes on
+                        logger.info(f"Too short for speech ({self.speech_frames} frames)")
+                        self.speech_frames = self.silent_frames = 0
         return self.ended

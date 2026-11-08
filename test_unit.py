@@ -3644,20 +3644,43 @@ class TestVADFrames(unittest.IsolatedAsyncioTestCase):
         server.speech = SpeechEnd()
         server.speech.vad = MagicMock()
         server.speech.vad.process.return_value = 0.9
-        for _ in range(3):
+        for _ in range(6):
             await server.handle_voice_assistant_audio(server.site, bytes(700))
-        self.assertEqual(server.speech.vad.process.call_count, 2)  # 2100 bytes: two frames of 1024
+        self.assertEqual(server.speech.vad.process.call_count, 4)  # 4200 bytes: four frames of 1024
         self.assertTrue(server.speech.heard)
 
-    def test_a_second_of_silence_after_speech_ends_it(self):
+    @staticmethod
+    def scored(scores: list[float]) -> SpeechEnd:
+        """A SpeechEnd whose VAD scores its frames so, in turn."""
         speech = SpeechEnd()
         speech.vad = MagicMock()
-        speech.vad.process.side_effect = [0.1, 0.9] + [0.2] * 30 + [0.2]
-        self.assertFalse(speech.read(bytes(FRAME_BYTES * 32)))  # silence, speech, 30 silent frames
+        speech.vad.process.side_effect = scores
+        return speech
+
+    def test_a_second_of_silence_after_speech_ends_it(self):
+        speech = self.scored([0.1] + [0.9] * 4 + [0.2] * 31)
+        self.assertFalse(speech.read(bytes(FRAME_BYTES * 35)))  # silence, speech, 30 silent frames
         self.assertTrue(speech.heard)
-        self.assertTrue(speech.read(bytes(FRAME_BYTES * 33)))
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 36)))
         self.assertTrue(speech.read(bytes(FRAME_BYTES * 40)))  # ended: no more frames read
-        self.assertEqual(speech.vad.process.call_count, 33)
+        self.assertEqual(speech.vad.process.call_count, 36)
+
+    def test_a_burst_too_short_is_not_speech(self):
+        """On 2026-11-04 a noise of about one frame, in a follow-up, was transcribed « Yeah. » and answered
+        aloud: a burst under 4 frames is forgotten after a second of silence, and the wait for speech goes on."""
+        speech = self.scored([0.9] * 3 + [0.2] * 31 + [0.9] * 4)
+        self.assertFalse(speech.read(bytes(FRAME_BYTES * 34)))  # 3 frames, then a second of silence
+        self.assertFalse(speech.heard)
+        self.assertFalse(speech.read(bytes(FRAME_BYTES * 37)))
+        self.assertFalse(speech.heard)  # the 3 earlier frames no longer count
+        speech.read(bytes(FRAME_BYTES * 38))
+        self.assertTrue(speech.heard)
+
+    def test_frames_of_a_burst_need_not_follow_each_other(self):
+        """A short word whose frames Silero scores unevenly is still speech."""
+        speech = self.scored([0.9, 0.2, 0.9, 0.9, 0.3, 0.9])
+        speech.read(bytes(FRAME_BYTES * 6))
+        self.assertTrue(speech.heard)
 
     async def test_each_recording_gets_a_fresh_vad(self):
         """Silero keeps its state between windows: the previous request's must not carry over."""
