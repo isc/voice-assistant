@@ -25,6 +25,7 @@ The assistant speaks without wake word: washing machine done, doorbell, reminder
 
 ### Room of the voice satellite
 "Éteins la lumière" should target the room the request came from. The room of the satellite that heard the wake word is the reliable signal: give each satellite an HA area and use it as the default `room`. This replaces the earlier idea of tracking phones through UniFi Wi-Fi access points, set aside because an AP covers several rooms and the phone is not always on the person. Only matters once a site has more than one satellite. Ducking (AD-049) would use it too: it lowers every HA speaker playing at the site, where only those near the satellite need it.
+A bedroom with a bathroom of its own is two HA areas, so that « la lumière de la chambre » stays the ceiling light and the bathroom has its « douche » and « lavabo ». From a satellite in that bedroom, « allume la salle de bain » or « allume la douche » should still mean that bathroom without naming whose it is, and « éteins les lumières » both rooms: the satellite's room would carry the rooms that belong to it.
 
 ### Answer in the speaker's language
 Parakeet v3 already transcribes 25 European languages with automatic detection: spoken to in English, it understands (seen 2026-10-10), but the assistant answers in French. Two pieces are missing:
