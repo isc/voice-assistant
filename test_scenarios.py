@@ -465,9 +465,13 @@ SCENARIOS = [
     ]),
     # Two terrace lights, « Lumière terrasse séjour » and « … parents », in an area of the outside: the model
     # sent « Lumière terrasse », and the first of the two names holding it was the one turned off (2026-11-08). The
-    # garden's « Spots terrasse potager », there since, may go off too: Ivan, 2026-11-08
+    # garden's « Spots terrasse potager », there since, may go off too: Ivan, 2026-11-08. So may every light of the
+    # area, « Extérieur », which the registry's 12B turns off with them (AD-098): Ivan, 2026-11-09
     ("AD-096 les lumières de la terrasse", "paris", TERRACE_ON, [
-        ("Éteins les lumières de la terrasse.", turns_off(*TERRACE_ON, allowed=("light.spots_potager",)), {}),
+        ("Éteins les lumières de la terrasse.", turns_off(*TERRACE_ON, allowed=(
+            "light.spots_potager", "light.spots_balcon_enfants", "light.lumiere_balcon",
+            "light.dimmer_2_basic_11", "light.dimmer_2_basic_2_10", "light.dimmer_2_2_10",
+        )), {}),
     ]),
     ("AD-096 the parents' terrace light alone", "paris", TERRACE_ON, [
         ("Éteins la lumière de la terrasse côté chambre parentale.", turns_off("light.lumiere_terrasse_parents"), {}),
