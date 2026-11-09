@@ -2449,7 +2449,7 @@ class VoiceAssistantServer:
 
     def warm_llm(self) -> None:
         """A request starts to be spoken: meanwhile, the local model reads the prompt it will begin with, loaded
-        first if a job had taken the GPU back (AD-073). ddmr's OCR had, on the morning of 2026-10-20: 11.9 s
+        first if it had been unloaded (AD-073). ddmr's OCR had, before charras's second card, on the morning of 2026-10-20: 11.9 s
         before the first call returned, 1 s otherwise."""
         if LLM_API_KEY:
             return
