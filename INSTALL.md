@@ -53,9 +53,12 @@ The LLM, Ollama in Docker. With several cards, replace `--gpus all` by the voice
 `charras/SETUP.md` §7 and §23):
 
 ```bash
+# The full SWA cache (~125 ms less a request, +1.9 GB); the projector, for audio and images the
+# assistant does not send, on the CPU (-0.4 GB). AD-098, home-infra SETUP §7
 docker run -d --name ollama --gpus all --restart unless-stopped \
+  -e LLAMA_ARG_SWA_FULL=1 -e LLAMA_ARG_NO_MMPROJ_OFFLOAD=1 \
   -p 11434:11434 -v /opt/ollama:/root/.ollama ollama/ollama
-docker exec ollama ollama pull gemma4:12b
+docker exec ollama ollama pull gemma4:12b   # with its MTP draft, which Ollama runs: a turn in half the time
 # Ollama gives it a 4096-token context on a 16 GB card; the prompt of a house with ~70 devices
 # outgrows it. A derived model with 8192 shares the weights (+0.3 GB of VRAM):
 docker exec ollama sh -c 'printf "FROM gemma4:12b\nPARAMETER num_ctx 8192\n" > /tmp/Modelfile-8k && ollama create gemma4:12b-8k -f /tmp/Modelfile-8k'
