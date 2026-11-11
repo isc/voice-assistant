@@ -46,6 +46,7 @@ from ha_client import (
     asks_heating_on,
     asks_whole_house,
     compact,
+    cover_all_the_way,
     fold,
     is_whole_house,
     normalize,
@@ -332,6 +333,7 @@ class _Request:
     no_followup: bool = False  # a media command: no follow-up, history kept (AD-035)
     whole_house: bool = False  # the request says tout, tous, partout…: an action may sweep every room (AD-058)
     heating_on: bool = False  # the request turns on and names no mode: the heating goes to Auto (AD-082)
+    cover_all_the_way: Optional[str] = None  # open_cover or close_cover: the request says not how far (AD-099)
     client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
     address: Optional[str] = None  # through Funnel, the internet address it came from (AD-050, AD-070)
     dry_run: bool = False  # a test's (AD-047): its log lines say so, and the nightly review leaves them out (AD-085)
@@ -421,6 +423,7 @@ class VoiceAssistantServer:
     _no_followup = _request_attribute("no_followup")
     _whole_house = _request_attribute("whole_house")
     _heating_on = _request_attribute("heating_on")
+    _cover_all_the_way = _request_attribute("cover_all_the_way")
     _client = _request_attribute("client")
     _address = _request_attribute("address")
     _dry_run = _request_attribute("dry_run")
@@ -1241,16 +1244,19 @@ class VoiceAssistantServer:
         logger.warning(f"Whole house not asked for: {function_name}({arguments}) not run")
         return _WHICH_ROOM
 
-    def _heating_mode_said(self, function_name: str, arguments: dict) -> dict:
-        """The arguments of a call, a heating set to Confort or Réduit that the request did not say set to Auto:
-        « allume le chauffage » is its program (AD-071). gemma drifted to Confort, 10 of 10, as the prompt grew
-        (AD-082); dry runs show it too."""
-        if function_name != "set_heating" or not self._heating_on:
-            return arguments
-        if fold(str(arguments.get("mode", ""))) not in ("confort", "reduit"):
-            return arguments
-        logger.warning(f"Heating mode not asked for: {arguments.get('mode')}, set to Auto")
-        return {**arguments, "mode": "Auto"}
+    def _as_asked(self, function_name: str, arguments: dict) -> tuple[str, dict]:
+        """A call as the request said it, dry runs too. A heating set to Confort or Réduit that the request did not
+        say is Auto: « allume le chauffage » is its program (AD-071), and gemma drifted to Confort, 10 of 10, as the
+        prompt grew (AD-082). A shutter's position that the request, which opens or closes it and says not how far,
+        did not ask is all the way: « au niveau de la table à manger » was 50 %, 10 of 10 (AD-099)."""
+        if function_name == "set_cover_position" and (whole := self._cover_all_the_way):
+            logger.warning(f"Cover position not asked for: {arguments.get('position')}%, {whole} instead")
+            return whole, {key: value for key, value in arguments.items() if key != "position"}
+        if function_name == "set_heating" and self._heating_on:
+            if fold(str(arguments.get("mode", ""))) in ("confort", "reduit"):
+                logger.warning(f"Heating mode not asked for: {arguments.get('mode')}, set to Auto")
+                return function_name, {**arguments, "mode": "Auto"}
+        return function_name, arguments
 
     # The radio and volume tools; and all those whose `room` picks the speaker, music_control's only to resume
     _MEDIA_TOOLS = {"play_radio", "stop_media", "set_volume", "change_volume"}
@@ -2128,6 +2134,7 @@ class VoiceAssistantServer:
         self._keep_llm_loaded()
         self._whole_house = asks_whole_house(text)
         self._heating_on = asks_heating_on(text)
+        self._cover_all_the_way = cover_all_the_way(text)
 
         from timer import format_timers_for_prompt
 
@@ -2220,10 +2227,11 @@ class VoiceAssistantServer:
                     logger.warning(f"Malformed arguments for {function_name}: {tool_call['function']['arguments']!r}")
                     return {"function": function_name, "args": {}, "error": "arguments"}, "Erreur: arguments illisibles"
                 logger.info(f"Function call: {function_name}({function_args})")
-                if (said := self._heating_mode_said(function_name, function_args)) is not function_args:
-                    # The call as run, in the history too: the next turn reads what was set
-                    function_args = said
-                    tool_call["function"]["arguments"] = json.dumps(said, ensure_ascii=False)
+                if (asked := self._as_asked(function_name, function_args)) != (function_name, function_args):
+                    # The call as run, in the history too: the next turn reads what was done
+                    function_name, function_args = asked
+                    as_run = json.dumps(function_args, ensure_ascii=False)
+                    tool_call["function"].update(name=function_name, arguments=as_run)  # fmt: skip
                 tc_entry = {"function": function_name, "args": function_args}
                 # The same call again in a later round (show_image ran 3 times, 2026-10-11): its result
                 key = (function_name, json.dumps(function_args, sort_keys=True))
@@ -2305,6 +2313,7 @@ class VoiceAssistantServer:
         fn_name, fn_args = parse_text_tool_call(content)
         if fn_name in offered and fn_args and not dry_run:
             logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
+            fn_name, fn_args = self._as_asked(fn_name, fn_args)
             # In the log like any call: the web app shows it, and a picture with it (AD-069)
             tc_entry = {"function": fn_name, "args": fn_args}
             result = await self._run_call(tc_entry)

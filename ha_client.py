@@ -100,6 +100,29 @@ def asks_heating_on(text: str) -> bool:
     return bool(_TURN_ON_WORDS.search(flat)) and not _HEATING_MODE_WORDS.search(flat)
 
 
+# « ouvre le volet », « tu me le rouvres », « ferme-le »: all the way, unless the request says how far (« à moitié »,
+# « un peu », « à 30 % », « pas complètement »). gemma read « au niveau de la table à manger » (by it) as a level:
+# 50 %, 10 of 10 (AD-099). Words that may say how far are many, and any of them leaves the model's call as it is
+_COVER_OPEN_WORDS = re.compile(r"\b(?:r?ouvr(?:e|es|ez|ir)|(?:re)?mont(?:e|es|ez|er)|(?:re)?lev(?:e|es|ez|er))\b")
+_COVER_CLOSE_WORDS = re.compile(r"\b(?:re)?ferm(?:e|es|ez|er)\b|\bbaiss(?:e|es|ez|er)\b|\bdescend(?:s|ez|re)?\b")
+_COVER_HOW_FAR = re.compile(
+    r"\d|pour ?cent|moitie|\bmi\b|demi|quart|tiers|hauteur|\bpeu\b|poil|legerement|presque|a peine|entr'?ouv"
+    r"|entrebaill|\bcran|davantage|\bplus\b|\bmoins\b|\bpas (?:completement|entierement|tout|trop|jusqu)"
+    r"|\b(?:dix|vingt|trente|quarante|cinquante|soixante|quatre-vingts?|cent)\b"
+)
+
+
+def cover_all_the_way(text: str) -> Optional[str]:
+    """open_cover or close_cover for a request that opens or closes and says not how far, else None."""
+    flat = fold(text).replace("’", "'")
+    if _COVER_HOW_FAR.search(flat):
+        return None
+    opens, closes = bool(_COVER_OPEN_WORDS.search(flat)), bool(_COVER_CLOSE_WORDS.search(flat))
+    if opens == closes:  # neither, or both ways
+        return None
+    return "open_cover" if opens else "close_cover"
+
+
 def _group_rooms(room: str) -> Optional[list[str]]:
     """The rooms of the group a room names, also said with more words (« les chambres des enfants »)."""
     room_words = set(normalize(room).split())

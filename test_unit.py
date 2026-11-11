@@ -36,7 +36,15 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from opening_hours import ParserError
 
-from ha_client import HAClient, asks_heating_on, asks_whole_house, cover_kind, normalize, without_home
+from ha_client import (
+    HAClient,
+    asks_heating_on,
+    asks_whole_house,
+    cover_all_the_way,
+    cover_kind,
+    normalize,
+    without_home,
+)
 from images import Picture, is_about
 import llm
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
@@ -772,6 +780,25 @@ class TestWholeHouseAsked(unittest.IsolatedAsyncioTestCase):
             "désactive le chauffage", "remets le chauffage en auto", "quel temps fait-il ?", "la météo",
         ):  # fmt: skip
             self.assertFalse(asks_heating_on(text), text)
+
+    def test_cover_all_the_way(self):
+        """« ouvre », « ferme » with no amount said is all the way: « au niveau de » is no level (AD-099)."""
+        for text, whole in (
+            ("Ouvre le volet au niveau de la table à manger.", "open_cover"),
+            ("tu me le rouvres jusqu'en haut", "open_cover"),
+            ("Et celui que tu as descendu, il faut le remonter.", "open_cover"),
+            ("ferme le volet de Zoé", "close_cover"),
+            ("Baisse les volets du salon", "close_cover"),
+            ("Tu peux le refermer complètement ?", "close_cover"),
+        ):
+            self.assertEqual(cover_all_the_way(text), whole, text)
+        for text in (
+            "ferme le volet à moitié", "ouvre un peu le volet", "ouvre le volet à 30 %", "ferme-le presque",
+            "ouvre le volet à trente pour cent", "mets le volet à mi-hauteur", "ne le ferme pas complètement",
+            "entrouvre le volet", "ferme les volets aux trois quarts", "ouvre-le un peu plus",
+            "règle le volet à 40", "le volet est fermé, ouvre-le", "quel temps fait-il ?",
+        ):  # fmt: skip
+            self.assertIsNone(cover_all_the_way(text), text)
 
     async def test_not_asked_not_run(self):
         result = await self.server.execute_function("close_cover", {"entity": "volets", "room": "partout"})
@@ -2909,6 +2936,22 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
             await self.ask(dry_run=True, text=text)
             self.assertEqual(self.server._last_tool_calls[0]["args"]["mode"], expected, text)
             self.assertEqual(json.loads(heating["arguments"])["mode"], expected, text)  # the history's call, as run
+
+    async def test_a_position_not_asked_is_all_the_way(self):
+        """« Ouvre le volet au niveau de la table à manger » set it to 50 %, 10 of 10 (AD-099); an amount said is
+        kept."""
+        for text, expected in (
+            ("Ouvre le volet au niveau de la table à manger.", ("open_cover", {"entity": "Volet salle à manger"})),
+            ("ferme le volet au niveau du canapé", ("close_cover", {"entity": "Volet salle à manger"})),
+            ("ouvre le volet à moitié", ("set_cover_position", {"entity": "Volet salle à manger", "position": 50})),
+        ):
+            position = {"name": "set_cover_position", "arguments": '{"entity": "Volet salle à manger", "position": 50}'}
+            self.replies[0]["tool_calls"][0]["function"] = position
+            self.server.new_request()
+            await self.ask(dry_run=True, text=text)
+            call = self.server._last_tool_calls[0]
+            self.assertEqual((call["function"], call["args"]), expected, text)
+            self.assertEqual((position["name"], json.loads(position["arguments"])), expected, text)  # the history's
 
     async def test_a_speaker_the_home_lacks_too(self):
         """« la Sonos » heard « la sous-douce » (2026-10-21): replayed, the model must be told what it was told."""

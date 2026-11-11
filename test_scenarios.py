@@ -314,6 +314,19 @@ def turns_off(*entity_ids: str, allowed: tuple[str, ...] = ()):
     return check
 
 
+def opens_all_the_way(word: str):
+    """One shutter opened, the one the call names with this word, and no position set (AD-099)."""
+
+    def check(t):
+        from ha_client import fold
+
+        sent = [(service, payload.get("entity_id")) for _, service, payload in t.sent]
+        named = any(word in fold(c["args"].get("entity", "")) for c in t.calls if c["function"] == "open_cover")
+        return len(sent) == 1 and sent[0][0] == "open_cover" and named, f"the shutter « {word} » opened all the way"
+
+    return check
+
+
 def says(*patterns: str, unlike: str = ""):
     """The reply, folded, holds one of these patterns, and not that one."""
     return lambda t: (
@@ -480,6 +493,11 @@ SCENARIOS = [
     # stairs' 19.3 °C was said to be upstairs (2026-10-31). Renamed in HA « Couloir étage température » (AD-097)
     ("AD-097 la température à l'étage", "charras", CHARRAS_TEMPERATURES, [
         ("Il fait quelle température à l'étage ?", says(number("19.9"), unlike=number("19.3")), {}),
+    ]),
+    # « au niveau de » (by) read as a level: the shutter set to 50 %, half closed as it was open (2026-11-11)
+    ("AD-099 le volet au niveau de la table à manger", "paris",
+     {"cover.roller_shutter_3_3": "closed", "cover.roller_shutter_3_4": "open"}, [
+        ("Ouvre le volet au niveau de la table à manger.", opens_all_the_way("manger"), {}),
     ]),
 ]  # fmt: skip
 
