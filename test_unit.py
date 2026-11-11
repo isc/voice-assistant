@@ -50,11 +50,13 @@ import llm
 from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
 from places import week
 from recordings import Recordings
-from review.collect import NOISE
+from review.collect import NOISE, interactions
 from review.nightly import UNSTABLE, compare, scores_of
 from sites import load_sites, site_at_address
 from vad import FRAME_BYTES, SpeechEnd
-from web_ui import KEY_COOKIE, access_control, cross_site_guard, handle_review_open, is_trusted_client, setup_routes
+from web_ui import (
+    KEY_COOKIE, access_control, cross_site_guard, from_this_machine, handle_review_open, is_trusted_client, setup_routes
+)
 
 # ---------------------------------------------------------------------------
 # Fixture: fake entity registry (mirrors a typical HA setup)
@@ -167,6 +169,19 @@ def make_server(env=None):
     server.recording_task = None
     server.warm_llm = MagicMock()  # no LLM to warm; deleted for the real one
     return server
+
+
+async def app_client(test: unittest.IsolatedAsyncioTestCase, server, phone: bool = True) -> TestClient:
+    """The web app's routes, asked by a phone; else from this machine, as a development session's curl (AD-100):
+    TestClient's requests all come from loopback."""
+    if phone:
+        test.enterContext(patch("web_ui.from_this_machine", return_value=False))
+    app = web.Application()
+    setup_routes(app, server)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    test.addAsyncCleanup(client.close)
+    return client
 
 
 def make_client() -> HAClient:
@@ -921,12 +936,7 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         server.site = self.paris
 
     async def client(self):
-        app = web.Application()
-        setup_routes(app, self.server)
-        client = TestClient(TestServer(app))
-        await client.start_server()
-        self.addAsyncCleanup(client.close)
-        return client
+        return await app_client(self, self.server)
 
     async def offer(self, args: dict, browser: str = "phone42") -> dict:
         """The app's request to unlock, at Paris: the call as the log keeps it."""
@@ -1211,11 +1221,7 @@ class TestAlarmFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(_NOTHING_DONE.search(call["result"]))
         self.assertEqual((call["confirm"]["action"], call["confirm"]["target"]), ("Désarmer", "Alarme · Charras"))
         self.charras.ha_client.disarm.assert_not_awaited()
-        app = web.Application()
-        setup_routes(app, self.server)
-        client = TestClient(TestServer(app))
-        await client.start_server()
-        self.addAsyncCleanup(client.close)
+        client = await app_client(self, self.server)
         offer = call["confirm"]["id"]
         another = await client.post("/api/confirm", json={"offer": offer, "client": "tablet7"})
         self.assertEqual(another.status, 410)
@@ -2908,7 +2914,7 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
         # Neither read, nor kept alive, expired or renumbered
         self.assertNotIn(request, self.completion.await_args_list[0].args[3])
         self.assertEqual((live.history, live.id, live.last_time, live.shown_images), ([request], 1000, 1.0, {"a.jpg"}))
-        self.assertEqual(len(self.server.site.dry_run.history), 4)  # a conversation of its own, for tests
+        self.assertEqual(len(self.server.site.tests.history), 4)  # a conversation of its own, for tests
         self.server.execute_function.assert_not_awaited()
 
     async def test_whole_house_only_when_said(self):
@@ -4274,6 +4280,17 @@ class TestWebUIAccess(unittest.TestCase):
         for remote in ("192.168.1.42", "82.67.150.147", None, "garbage"):
             self.assertFalse(is_trusted_client(remote), remote)
 
+    def test_from_this_machine(self):
+        """Loopback, unless Funnel's proxy forwards it: a development session's request, a test (AD-100)."""
+
+        def asked(remote, headers=None):
+            return from_this_machine(make_mocked_request("POST", "/api/send", headers=headers).clone(remote=remote))
+
+        self.assertTrue(asked("127.0.0.1") and asked("::1"))
+        self.assertFalse(asked("127.0.0.1", {"X-Forwarded-For": "82.67.150.147", "Tailscale-Funnel-Request": "?1"}))
+        for remote in ("100.72.204.126", "192.168.1.42", None):
+            self.assertFalse(asked(remote), remote)
+
 
 async def run_middleware(middleware, request):
     """The response a middleware gives, or the HTTP error it raises, in front of a handler saying ok."""
@@ -4406,13 +4423,8 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
 
         server.process_with_llm = process_with_llm
 
-    async def client(self):
-        app = web.Application()
-        setup_routes(app, self.server)
-        client = TestClient(TestServer(app))
-        await client.start_server()
-        self.addAsyncCleanup(client.close)
-        return client
+    async def client(self, phone: bool = True):
+        return await app_client(self, self.server, phone)
 
     async def test_speech_heard_answered_and_logged(self):
         client = await self.client()
@@ -4533,6 +4545,24 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         self.server.text_to_speech_file.assert_not_awaited()
         entry = self.server.exchange_log.entries[-1]
         self.assertEqual((entry["source"], entry["client"]), ("web", None))  # not an id a browser makes
+
+    async def test_a_request_from_this_machine_is_a_test(self):
+        """On 2026-11-08, a session setting up Paris's lights sent 13 requests through /api/send to see which light
+        went out: the nightly review counted them as the family's typed requests, and they ran in the satellite's
+        conversation (AD-100)."""
+        server = self.server
+        heard = {}
+
+        async def process_with_llm(api, text, dry_run=False):
+            heard["conversation"] = server.conversation
+            server._last_tool_calls = []
+            return "C'est fait."
+
+        server.process_with_llm = process_with_llm
+        client = await self.client(phone=False)
+        await client.post("/api/send", json={"text": "éteins la lumière du balcon", "client": "claude-test"})
+        self.assertIs(heard["conversation"], server.site.tests)
+        self.assertEqual(server.exchange_log.entries[-1]["source"], "test")
 
     async def test_a_shortcut_runs_its_calls_again_without_the_model(self):
         """A shortcut said and sent again « Femme les volets… », as misheard; now it runs what was done (AD-065)."""
@@ -4803,15 +4833,29 @@ class TestNightlyTests(unittest.TestCase):
         except TimeoutError:
             record = logging.LogRecord("llm", logging.ERROR, "", 0, "LLM error", (), sys.exc_info())
 
-        def lines(dry_run):
-            _current_request.set(_Request(dry_run=dry_run))
+        def lines(**request):
+            _current_request.set(_Request(**request))
             return _LogFormat("%(levelname)s - %(message)s").format(record).split("\n")
 
-        family, tests = (contextvars.copy_context().run(lines, dry_run) for dry_run in (False, True))
+        family, dry_runs, tests = (
+            contextvars.copy_context().run(lines, **request) for request in ({}, {"dry_run": True}, {"test": True})
+        )
         self.assertEqual((family[0], family[-1]), ("ERROR - LLM error", "TimeoutError: timed out"))
-        self.assertEqual(tests, [f"[dry run] {line}" for line in family])
+        self.assertEqual(dry_runs, [f"[dry run] {line}" for line in family])
+        self.assertEqual(tests, [f"[test] {line}" for line in family])  # from this machine (AD-100)
         self.assertEqual([any(noise in line for noise in NOISE) for line in family], [False] * len(family))
-        self.assertEqual([any(noise in line for noise in NOISE) for line in tests], [True] * len(tests))
+        for test in (dry_runs, tests):
+            self.assertEqual([any(noise in line for noise in NOISE) for line in test], [True] * len(test))
+
+    def test_interactions_without_tests(self):
+        """A development session's requests from this machine are not the family's (AD-100)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            day = "2026-11-08"
+            log = [{"timestamp": f"{day}T14:18:35+01:00", "source": "test", "input": "Éteins la lumière du balcon"},
+                   {"timestamp": f"{day}T21:16:02+01:00", "source": "app", "input": "Éteins la terrasse"}]
+            (Path(tmp) / "exchanges.json").write_text(json.dumps(log))
+            with patch("review.collect.LIVE", Path(tmp)):
+                self.assertEqual([entry["input"] for entry in interactions(day)], ["Éteins la terrasse"])
 
 
 class TestCalendarAtStartup(unittest.IsolatedAsyncioTestCase):

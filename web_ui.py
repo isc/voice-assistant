@@ -69,6 +69,12 @@ def _proxied(request) -> bool:
     return any(header in request.headers for header in _PROXY_HEADERS)
 
 
+def from_this_machine(request) -> bool:
+    """From this machine itself, not through Funnel: a development session's curl, a script, never the family,
+    whose phones come through Funnel or the tailnet. Their requests are tests (AD-100)."""
+    return not _proxied(request) and (address := _address(request.remote)) is not None and address.is_loopback
+
+
 def _is_key(given: str | None, key: str) -> bool:
     return bool(key and given) and hmac.compare_digest(given.encode(), key.encode())
 
@@ -327,7 +333,7 @@ def setup_routes(app, server):
     async def serve(request, params: dict) -> None:
         """The request's site (use_site), and a request of its own, its browser's (AD-061)."""
         await use_site(request, params)
-        server.new_request(_client(params), _funnel_address(request))
+        server.new_request(_client(params), _funnel_address(request), from_this_machine(request))
 
     async def use_site(request, body: dict) -> None:
         """Serve the site the request names, else the one it comes from, for this request only: a
@@ -534,7 +540,7 @@ def setup_routes(app, server):
     async def handle_snapshot(request):
         """Each home's devices as this server knows them, and the local config, which test_scenarios.py replays
         conversations against. This machine only: the config has the family's details."""
-        if _proxied(request) or (address := _address(request.remote)) is None or not address.is_loopback:
+        if not from_this_machine(request):
             raise web.HTTPForbidden(text="This machine only")
         homes = [
             {"name": site.name, **{key: getattr(site.ha_client, key) for key in _SNAPSHOT}}
@@ -544,9 +550,9 @@ def setup_routes(app, server):
         return web.json_response({"sites": homes, "config": LOCAL_CONFIG})
 
     async def handle_reset_conversation(request):
-        """Clear a site's dry-run conversation ({"site": …}, else the default), for tests (AD-047)."""
+        """Clear a site's tests' conversation ({"site": …}, else the default), for tests (AD-047)."""
         await use_site(request, await _read_body(request))
-        server.site.dry_run.history = []
+        server.site.tests.history = []
         return web.json_response({"status": "ok"})
 
     async def handle_recording(request):

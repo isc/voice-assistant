@@ -68,13 +68,13 @@ class Site:
     ha_client: Optional[Any] = None  # ha_client.HAClient
     http_base_url: str = ""  # TTS URL announced to this site's speakers
     timer_manager: TimerManager = field(default_factory=TimerManager)
-    # The satellite's, and that of requests from no browser of the web app (curl)
+    # The satellite's, and that of requests from no browser of the web app (curl from the tailnet)
     conversation: Conversation = field(default_factory=Conversation)
     # Each browser of the web app has its own, by the id it gives itself: two devices, two conversations (AD-061)
     app_conversations: dict[str, Conversation] = field(default_factory=dict)
-    # Dry runs (tests) have one of their own: a multi-turn test needs one, and the family's must
-    # neither see it nor be kept alive by it (AD-047)
-    dry_run: Conversation = field(default_factory=Conversation)
+    # The tests have one of their own, dry runs and requests from this machine (a development session's curl): a
+    # multi-turn test needs one, and the family's must neither see it nor be kept alive by it (AD-047, AD-100)
+    tests: Conversation = field(default_factory=Conversation)
     last_media_target: Optional[tuple[str, str]] = None
     # The radio last started here: its speaker, station and URL, for « passe le son sur la Sonos » (AD-063)
     radio: Optional[tuple[tuple[str, str], str, str]] = None

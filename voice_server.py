@@ -337,6 +337,14 @@ class _Request:
     client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
     address: Optional[str] = None  # through Funnel, the internet address it came from (AD-050, AD-070)
     dry_run: bool = False  # a test's (AD-047): its log lines say so, and the nightly review leaves them out (AD-085)
+    # From this machine itself, not through Funnel: a development session's curl or a script, never the family's. It
+    # acts, but it is a test's all the same: the tests' conversation, its log lines and its exchange say so (AD-100)
+    test: bool = False
+
+    @property
+    def tag(self) -> Optional[str]:
+        """A test's, dry run or from this machine, what its log lines start with; None for the family's."""
+        return "[dry run]" if self.dry_run else "[test]" if self.test else None
 
 
 @dataclass
@@ -365,13 +373,13 @@ _current_request: ContextVar[_Request] = ContextVar("current_request")
 
 
 class _LogFormat(logging.Formatter):
-    """Each line a dry run logs, a traceback's too, starts with « [dry run] »: the nightly review leaves them out
-    (AD-085)."""
+    """Each line a dry run logs, a traceback's too, starts with « [dry run] », a request from this machine's with
+    « [test] »: the nightly review leaves them out (AD-085, AD-100)."""
 
     def format(self, record: logging.LogRecord) -> str:
         text = super().format(record)
-        if (request := _current_request.get(None)) and request.dry_run:
-            text = "\n".join(f"[dry run] {line}" for line in text.split("\n"))
+        if (request := _current_request.get(None)) and (tag := request.tag):
+            text = "\n".join(f"{tag} {line}" for line in text.split("\n"))
         return text
 
 
@@ -427,6 +435,8 @@ class VoiceAssistantServer:
     _client = _request_attribute("client")
     _address = _request_attribute("address")
     _dry_run = _request_attribute("dry_run")
+    _test = _request_attribute("test")
+    _test_tag = _request_attribute("tag")
 
     def __init__(self):
         self.llm_config = (LLM_API_KEY, LLM_MODEL, LLM_URL)  # for /health
@@ -518,14 +528,17 @@ class VoiceAssistantServer:
         return True
 
     @staticmethod
-    def new_request(client: Optional[str] = None, address: Optional[str] = None) -> None:
+    def new_request(client: Optional[str] = None, address: Optional[str] = None, test: bool = False) -> None:
         """A request starts in this task: its own tool calls and follow-up flags; from a browser of the web app,
-        its own conversation, and through Funnel, where it comes from (AD-070)."""
-        _current_request.set(_Request(client=client, address=address))
+        its own conversation, through Funnel, where it comes from (AD-070), and from this machine, a test (AD-100)."""
+        _current_request.set(_Request(client=client, address=address, test=test))
 
     @property
     def conversation(self) -> Conversation:
-        """The conversation of whoever asks: the site's satellite, or a browser of the web app (AD-061)."""
+        """The conversation of whoever asks: the site's satellite, a browser of the web app (AD-061), or a test,
+        which neither reads nor extends the family's (AD-047, AD-100)."""
+        if self._test_tag:
+            return self.site.tests
         return self.site.conversation_of(self._client)
 
     def site_named(self, name: str) -> Optional[Site]:
@@ -2148,8 +2161,7 @@ class VoiceAssistantServer:
         # Only these run: a name the model made up (« unlock ») or a tool this house lacks does not
         offered = {tool["name"] for tool in tools}
 
-        # A dry run reads and writes only its own conversation (AD-047)
-        conversation = self.site.dry_run if dry_run else self.conversation
+        conversation = self.conversation
         self._continue(conversation)
 
         # Build messages
@@ -2514,7 +2526,7 @@ class VoiceAssistantServer:
             timings["tts"] = round(time.time() - t0, 2)
         timings["total"] = round(sum(timings.values()), 2)
         self.exchange_log.add(
-            source,
+            self._source(source),
             text,
             text,
             response_text or LLM_FAILED,
@@ -2551,6 +2563,10 @@ class VoiceAssistantServer:
         results = await asyncio.gather(*(self._run_call(tc_entry) for tc_entry in tool_calls))
         return self._log_app_action("shortcut", label, tool_calls, results, {"total": round(time.time() - t0, 2)})
 
+    def _source(self, source: str) -> str:
+        """Where a request of the web app came from, for the exchange log; from this machine, a test (AD-100)."""
+        return "test" if self._test else source
+
     def _log_app_action(
         self, source: str, label: str, tool_calls: list, results: list[str], timings: Optional[dict] = None
     ) -> dict:
@@ -2560,7 +2576,7 @@ class VoiceAssistantServer:
             _mark_outcome(tc_entry, result)
         response = ". ".join(results)
         self.exchange_log.add(
-            source,
+            self._source(source),
             label,
             label,
             response,
@@ -2655,7 +2671,7 @@ class VoiceAssistantServer:
         (AD-079). None when nothing was said; errors are logged and raised."""
         timings = {}
         # What became of the request, beside its recording, as for the satellite's
-        entry = {"site": self.site.name, "source": "app", "follow_up": follow_up, "vad_speech": heard}
+        entry = {"site": self.site.name, "source": self._source("app"), "follow_up": follow_up, "vad_speech": heard}
         entry.update(audio=self.recordings.save(audio), transcript="", timings=timings)
         transcript = ""
         try:
@@ -2671,7 +2687,7 @@ class VoiceAssistantServer:
             if heard or not follow_up:  # a follow-up nobody spoke in is how conversations end
                 entry["response"] = unanswered
                 self.exchange_log.add(
-                    "app",
+                    self._source("app"),
                     transcript,
                     transcript,
                     entry["response"],
@@ -2684,7 +2700,7 @@ class VoiceAssistantServer:
         except Exception as e:
             entry["error"] = str(e)
             self.exchange_log.add(
-                "app",
+                self._source("app"),
                 transcript,
                 transcript,
                 f"[Erreur: {e}]",

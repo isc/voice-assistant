@@ -17,8 +17,9 @@ from pathlib import Path
 
 LIVE = Path("/opt/voice-assistant")
 # Lines that say nothing of the family's requests: each speaker's fetch, the stream's listeners, the dry runs of
-# the tests and of development sessions (AD-085)
-NOISE = ("GET /", "POST /", "Spotify: listener", "Spotify: stream", "Phonemes:", "Kokoro output:", "[dry run] ")
+# the tests and of development sessions (AD-085), the requests a development session sends for real (AD-100)
+NOISE = ("GET /", "POST /", "Spotify: listener", "Spotify: stream", "Phonemes:", "Kokoro output:", "[dry run] ",
+         "[test] ")
 
 
 def interactions(day: str) -> list:
@@ -41,6 +42,8 @@ def interactions(day: str) -> list:
     # The log keeps only its last 50 exchanges: older voice requests of the day are in the recordings alone
     for audio, details in recordings.items():
         merged.append({"source": "voice", "audio": audio, **details})
+    # A development session's requests, sent from this machine, are not the family's (AD-100)
+    merged = [entry for entry in merged if entry.get("source") != "test"]
     return sorted(merged, key=lambda e: e.get("timestamp") or e.get("audio") or "")
 
 
@@ -56,10 +59,13 @@ def journal(day: str) -> str:
 def main():
     day, out, owner = sys.argv[1], Path(sys.argv[2]), sys.argv[3]
     (out / "audio").mkdir(parents=True, exist_ok=True)
-    (out / "interactions.json").write_text(json.dumps(interactions(day), ensure_ascii=False, indent=1, default=str))
+    kept = interactions(day)
+    (out / "interactions.json").write_text(json.dumps(kept, ensure_ascii=False, indent=1, default=str))
     (out / "journal.log").write_text(journal(day))
-    for wav in (LIVE / "recordings" / day).glob("*.wav"):
-        shutil.copy(wav, out / "audio" / wav.name)
+    # Those of the requests kept: not a test's (AD-100)
+    for wav in {LIVE / "recordings" / entry["audio"] for entry in kept if entry.get("audio")}:
+        if wav.exists():
+            shutil.copy(wav, out / "audio" / wav.name)
     for path in [out, *out.rglob("*")]:
         shutil.chown(path, owner, owner)
         path.chmod(0o700 if path.is_dir() else 0o600)
