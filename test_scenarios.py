@@ -327,6 +327,17 @@ def opens_all_the_way(word: str):
     return check
 
 
+def moves(**services: str):
+    """These shutters, by entity id's object part, got these services, and nothing else got a call."""
+
+    def check(t):
+        sent = {(service, payload.get("entity_id")) for _, service, payload in t.sent}
+        wanted = {(service, f"cover.{name}") for name, service in services.items()}
+        return sent == wanted, ", ".join(f"{service} {name}" for name, service in services.items()) + ", nothing else"
+
+    return check
+
+
 def says(*patterns: str, unlike: str = ""):
     """The reply, folded, holds one of these patterns, and not that one."""
     return lambda t: (
@@ -498,6 +509,14 @@ SCENARIOS = [
     ("AD-099 le volet au niveau de la table à manger", "paris",
      {"cover.roller_shutter_3_3": "closed", "cover.roller_shutter_3_4": "open"}, [
         ("Ouvre le volet au niveau de la table à manger.", opens_all_the_way("manger"), {}),
+    ]),
+    # Two orders in one request: one carried out, on the shutter the request had just named otherwise, HA's two
+    # living-room names being swapped then (2026-11-11). Names right, both run
+    ("AD-099 two orders on the shutters", "paris",
+     {"cover.roller_shutter_3_3": "closed", "cover.roller_shutter_3_4": "open"}, [
+        ("Ferme le volet du salon.", moves(roller_shutter_3_4="close_cover"), {}),
+        ("Rouvre-le jusqu'en haut et ouvre aussi celui de la salle à manger.",
+         moves(roller_shutter_3_4="open_cover", roller_shutter_3_3="open_cover"), {}),
     ]),
 ]  # fmt: skip
 
