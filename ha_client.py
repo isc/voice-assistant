@@ -856,7 +856,8 @@ class HAClient:
         prompt: there are hundreds of them (273 at Charras vs 92 actionable
         entities) and they are only ever read, never controlled. Searching on
         demand keeps the prompt small while leaving every sensor reachable —
-        including those HA gives no device_class (pool pH, salinity, chlorine).
+        including those HA gives no device_class (pool pH, salinity, chlorine) —
+        but those hidden in HA (Paris's shutter switches measure by the window).
         States are read live rather than from the discovery snapshot, since the
         whole point of a sensor is that its value moves.
         """
@@ -885,7 +886,7 @@ class HAClient:
         matches = []
         for state in states:
             eid = state["entity_id"]
-            if not eid.startswith("sensor."):
+            if not eid.startswith("sensor.") or eid in self.hidden:
                 continue
             value = state["state"]
             select = circuits.get(eid)

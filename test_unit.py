@@ -1512,6 +1512,13 @@ class TestSensorSearch(unittest.TestCase):
     def test_ignores_non_sensor_domains(self):
         self.assertNotIn("Lumière piscine", self.search("piscine"))
 
+    def test_skips_sensors_hidden_in_ha(self):
+        """Paris's shutter switches measure by the window, a few degrees under the room: hidden, never read."""
+        self.client.hidden = {"sensor.piscine_air_temperature"}
+        out = self.search("piscine")
+        self.assertNotIn("Air Temperature", out)
+        self.assertIn("Piscine Water Temperature: 29.8 °C", out)
+
     def test_more_specific_query_ranks_first(self):
         """Both words matching beats one — 'piscine ph' must not lead with a temperature."""
         self.assertTrue(self.search("piscine ph").startswith("Piscine pH Level"))
