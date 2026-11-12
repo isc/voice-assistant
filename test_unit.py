@@ -4755,6 +4755,66 @@ class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await (await client.get("/health")).json())["status"], "ok")
 
 
+class TestModelKeptLoaded(unittest.IsolatedAsyncioTestCase):
+    """After charras restarted, Ollama had no model until a request loaded it: 9.5 and 14.5 s of « Un petit
+    instant. » (AD-101)."""
+
+    async def test_ollama_has(self):
+        loaded = [{"name": "gemma4:12b-8k", "model": "gemma4:12b-8k"}, {"name": "qwen:latest", "model": "qwen:latest"}]
+
+        async def ps(request):
+            return web.json_response({"models": loaded})
+
+        app = web.Application()
+        app.router.add_get("/api/ps", ps)
+        async with TestServer(app) as ollama:
+            url = str(ollama.make_url("/api/ps"))
+            self.assertIs(await llm.ollama_has(url, "gemma4:12b-8k"), True)
+            self.assertIs(await llm.ollama_has(url, "qwen"), True)  # Ollama's tag by default
+            self.assertIs(await llm.ollama_has(url, "gemma4:12b"), False)
+            loaded.clear()
+            self.assertIs(await llm.ollama_has(url, "gemma4:12b-8k"), False)
+            self.assertIsNone(await llm.ollama_has(str(ollama.make_url("/elsewhere")), "gemma4:12b-8k"))
+        self.assertIsNone(await llm.ollama_has(url, "gemma4:12b-8k"))  # Ollama not started yet
+
+    async def test_loaded_again_between_requests_once_gone(self):
+        server = make_server()
+        server._warm_up = AsyncMock()
+        server._keep_llm_loaded = MagicMock()
+        server._pipeline_running = True
+        answers = iter([None, True, False])  # not answering, loaded, gone
+        checked = asyncio.Event()
+
+        async def ollama_has(url, model):
+            self.assertEqual((url, model), ("http://localhost:11434/api/ps", "gemma4:12b-8k"))
+            if (answer := next(answers, ...)) is ...:
+                checked.set()
+                await asyncio.Event().wait()
+            return answer
+
+        with (
+            patch("voice_server._LLM_CHECK_SECONDS", 0),
+            patch("voice_server.LLM_URL", "http://localhost:11434/v1/chat/completions"),
+            patch("voice_server.LLM_MODEL", "gemma4:12b-8k"),
+            patch("llm.ollama_has", ollama_has),
+        ):
+            task = asyncio.create_task(server._keep_llm_resident())
+            await asyncio.sleep(0.05)
+            self.assertFalse(checked.is_set())  # not during a request
+            server._pipeline_running = False
+            await asyncio.wait_for(checked.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        server._warm_up.assert_awaited_once()
+        server._keep_llm_loaded.assert_called_once()
+
+    async def test_not_for_a_cloud_model(self):
+        server = make_server()
+        with patch("voice_server.LLM_API_KEY", "sk-test"), patch("voice_server.LLM_MODEL", "gpt-5.4-nano"):
+            await asyncio.wait_for(server._keep_llm_resident(), 1)
+
+
 class TestReviewLink(unittest.IsolatedAsyncioTestCase):
     """The nightly review's email links here, and the page opens a Desktop session on the brief (AD-074)."""
 

@@ -875,6 +875,21 @@ async def warm_up(url: str, model: str, messages: list, tools: list) -> None:
         logger.info(f"LLM warmed up in {seconds:.1f} s")
 
 
+async def ollama_has(url: str, model: str) -> Optional[bool]:
+    """Whether Ollama, at its `/api/ps` endpoint `url`, has `model` loaded; None when it does not answer."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    return None
+                loaded = (await response.json()).get("models") or []
+    except Exception as e:
+        logger.debug(f"Ollama's loaded models unknown: {e}")
+        return None
+    tagged = model if ":" in model else f"{model}:latest"
+    return any(entry.get("name") == tagged for entry in loaded)
+
+
 async def chat_completion(
     url: str,
     api_key: str,

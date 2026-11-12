@@ -77,6 +77,8 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 _HA_REFRESH_SECONDS = 300
 # STT or TTS on the CPU, CUDA having failed at load: how often to try it again (AD-055)
 _GPU_RETRY_SECONDS = 60
+# How often Ollama is asked whether it still has the model: gone after a restart of charras or of Ollama (AD-101)
+_LLM_CHECK_SECONDS = 60
 # A tool result kept in history this long at most (a weather or calendar answer runs to 1 kB)
 _HISTORY_RESULT_CHARS = 300
 # While a request is heard, the HA speakers playing are turned down to this share of their volume
@@ -118,6 +120,13 @@ _STATIONS = [
 RADIO_STATIONS: Dict[str, tuple[str, str]] = {
     compact(alias): (display, url) for display, url, aliases in _STATIONS for alias in (display, *aliases)
 }
+
+
+def _ollama_endpoint(path: str) -> Optional[str]:
+    """An endpoint of Ollama's own API, when the LLM is a local Ollama's model (llama-server answers it 404)."""
+    if LLM_API_KEY or not LLM_MODEL or not LLM_URL.endswith("/v1/chat/completions"):
+        return None
+    return LLM_URL.removesuffix("/v1/chat/completions") + path
 
 
 def _resolve_station(name: str) -> Optional[tuple[str, str]]:
@@ -569,6 +578,7 @@ class VoiceAssistantServer:
         self._ha_refresh_task = asyncio.create_task(self._keep_ha_fresh())
         self._calendar_task = asyncio.create_task(self._connect_calendar())
         await self.init_spotify()
+        self._llm_check_task = asyncio.create_task(self._keep_llm_resident())
         await self.start_http_server()
         self._recover_media_target()
         for site in self.sites:
@@ -2450,12 +2460,10 @@ class VoiceAssistantServer:
 
     def _keep_llm_loaded(self) -> None:
         """Ask Ollama to keep the model loaded: it unloads after 5 idle minutes, and the next request
-        then waited ~7 s (median of 10 cold requests, against 2.3 s warm). Sent with each request
-        rather than on a timer, so that a job that unloads it can (none does since charras's second card);
-        a wake word loads it back sooner (`warm_llm`), this pins it."""
-        if LLM_API_KEY or not LLM_MODEL or not LLM_URL.endswith("/v1/chat/completions"):
+        then waited ~7 s (median of 10 cold requests, against 2.3 s warm). Sent with each request; a wake
+        word loads it back sooner (`warm_llm`), and `_keep_llm_resident` once Ollama has lost it, this pins it."""
+        if not (url := _ollama_endpoint("/api/generate")):
             return
-        url = LLM_URL.removesuffix("/v1/chat/completions") + "/api/generate"
 
         async def ping():
             try:
@@ -2474,10 +2482,29 @@ class VoiceAssistantServer:
         before the first call returned, 1 s otherwise."""
         if LLM_API_KEY:
             return
+        self._in_background(self._warm_up(), drained=False)
+
+    def _warm_up(self) -> Awaitable[None]:
         from llm import warm_up
 
         messages = [*self._prompt_head(self.conversation), {"role": "user", "content": "…"}]
-        self._in_background(warm_up(LLM_URL, LLM_MODEL, messages, self._tools()), drained=False)
+        return warm_up(LLM_URL, LLM_MODEL, messages, self._tools())
+
+    async def _keep_llm_resident(self):
+        """Every minute, between requests, the local model loaded again, and its prompt read, when Ollama no longer
+        has it. After charras restarted, nothing loaded it before the first request, which waited for it with
+        « Un petit instant. »: 2026-11-11 at 12:39, 9.5 s, and 2026-11-12 at 20:21, 14.5 s (AD-101)."""
+        if not (url := _ollama_endpoint("/api/ps")):
+            return
+        from llm import ollama_has
+
+        while True:
+            # First after a minute: Ollama starting beside this server at boot, the calendar's tools connected
+            await asyncio.sleep(_LLM_CHECK_SECONDS)
+            if not (self.is_recording or self._pipeline_running) and await ollama_has(url, LLM_MODEL) is False:
+                logger.info("LLM no longer loaded in Ollama: loading it")
+                await self._warm_up()
+                self._keep_llm_loaded()
 
     @contextlib.asynccontextmanager
     async def _wait_phrase(self, play: Optional[Callable[[str], Awaitable]]):
