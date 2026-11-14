@@ -393,6 +393,7 @@ class HAClient:
         known = set(self.entities)
 
         self.entities.clear()
+        left_out = []
         for state in states:
             entity_id = state["entity_id"]
             domain = entity_id.split(".")[0]
@@ -405,21 +406,16 @@ class HAClient:
                     continue
                 friendly_name = _heating_name(friendly_name)
 
-            # Skip Fibaro sub-entities
-            if "Basic" in friendly_name or "basic" in entity_id:
-                continue
-            if friendly_name.endswith("(2)"):
-                continue
-            if "_2_2_" in entity_id or entity_id.endswith("_2_2"):
-                continue
-            # Skip entities with generic names
-            if friendly_name.strip() in (
-                "Dimmer 2",
-                "Double Smart Module",
-                "Single Switch 2",
-                "Smart Module",
-                "",
+            # Fibaro sub-entities and unnamed devices, told by the name HA shows, never by the id, which a
+            # rename keeps: Paris's `light.dimmer_2_basic_15` is « Canapés » where its light was hidden,
+            # and the light was out of reach for five weeks
+            if (
+                "Basic" in friendly_name
+                or friendly_name.endswith("(2)")
+                or friendly_name.strip() in ("Dimmer 2", "Double Smart Module", "Single Switch 2", "Smart Module", "")
             ):
+                if entity_id not in hidden:
+                    left_out.append(friendly_name)
                 continue
             # An unavailable one stays known: a sleeping battery speaker (the Paris Sonos Roam), left
             # out, let « la radio sur Sonos » go to the one speaker of the room the LLM made up
@@ -460,6 +456,8 @@ class HAClient:
             for area, items in sorted(by_area.items()):
                 logger.info(f"  {area}: {', '.join(items)}")
             logger.info(f"Total: {len(self.entities)} entities in {len(by_area)} areas")
+            if left_out:
+                logger.info(f"Left out by their name, not hidden in HA: {', '.join(sorted(left_out))}")
 
         screens = await self._fetch_screens()
         if screens != self.screens:

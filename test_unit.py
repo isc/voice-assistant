@@ -762,6 +762,33 @@ class TestNoCrossRoomFallback(unittest.TestCase):
         self.assertEqual(eid, "light.appliques_salon")
 
 
+class TestFibaroSubEntities(unittest.IsolatedAsyncioTestCase):
+    async def test_told_by_the_name_ha_shows(self):
+        """A sub-entity renamed in HA stands for its light: Paris's Canapés, gone 2026-10-10 to 11-14."""
+        client = make_client()
+
+        def light(entity_id, name):
+            return {"entity_id": f"light.{entity_id}", "state": "off", "attributes": {"friendly_name": name}}
+
+        states = [
+            light("dimmer_2_15", "Canapés"),  # the light, hidden in HA for its Basic, renamed
+            light("dimmer_2_basic_15", "Canapés"),
+            light("dimmer_2_basic_16", "Entrée Basic"),
+            light("dimmer_2_2_15", "Entrée (2)"),
+            light("dimmer_2_19", "Dimmer 2"),
+        ]
+        client._session = MagicMock()
+        response = MagicMock(status=200, json=AsyncMock(return_value=states))
+        client._session.get.return_value.__aenter__.return_value = response
+        client._fetch_areas, client._fetch_entity_areas = AsyncMock(), AsyncMock(return_value={})
+        client._fetch_hidden = AsyncMock(return_value={"light.dimmer_2_15"})
+        client._fetch_screens = AsyncMock(return_value=[])
+        with self.assertLogs("ha_client", "INFO") as logs:
+            await client.refresh_entities()
+        self.assertEqual(set(client.entities), {"light.dimmer_2_basic_15"})
+        self.assertIn("Left out by their name, not hidden in HA: Dimmer 2, Entrée (2), Entrée Basic", logs.output[-1])
+
+
 class TestWholeHouseAsked(unittest.IsolatedAsyncioTestCase):
     """Paris, 2026-10-12: « Tu peux fermer les volets là, je suis un désolé » (« … dans la chambre
     de Zoé », misheard) became close_cover room « partout », and every shutter of the flat closed (AD-058)."""
