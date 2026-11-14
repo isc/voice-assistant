@@ -302,14 +302,18 @@ def told_playing(description: str):
 
 
 def turns_off(*entity_ids: str, allowed: tuple[str, ...] = ()):
-    """These devices turned off, and nothing else got a call but those allowed turned off."""
+    """These devices turned off, and nothing else got a call but those allowed turned off: by id, or by a prefix
+    ending with « . » (« light. »: any light)."""
 
     def check(t):
-        sent = {(service, payload.get("entity_id")) for _, service, payload in t.sent}
-        wanted = {("turn_off", e) for e in entity_ids}
-        return wanted <= sent <= wanted | {("turn_off", e) for e in allowed}, (
-            f"{' and '.join(entity_ids)} turned off, nothing else" + (f" but {', '.join(allowed)}" if allowed else "")
-        )
+        sent = {(service, str(payload.get("entity_id"))) for _, service, payload in t.sent}
+        ok = (*entity_ids, *allowed)
+        others = sorted(f"{s} {e}" for s, e in sent if s != "turn_off" or not any(
+            e == a or (a.endswith(".") and e.startswith(a)) for a in ok
+        ))  # fmt: skip
+        missed = [e for e in entity_ids if ("turn_off", e) not in sent]
+        expect = f"{' and '.join(entity_ids)} turned off, nothing else" + (f" but {', '.join(allowed)}" if allowed else "")
+        return not others and not missed, expect + (f" (missed {missed}, others {others})" if missed or others else "")
 
     return check
 
@@ -409,6 +413,20 @@ CHARRAS_TEMPERATURES = sensors(
     ("sensor.escalier_temperature", "Escalier temperature", "19.3", "°C"),
 )
 TERRACE_ON = {"light.lumiere_terrasse_sejour": "on", "light.lumiere_terrasse_parents": "on"}
+# Paris's living room, kitchen and bar, one HA room
+PARIS_LIVING_LIGHTS = (
+    "light.dimmer_2_12", "light.dimmer_2_13", "light.dimmer_2_7", "light.dimmer_2_4",  # spots, sink, bar, sconces
+    "light.dimmer_2_14", "light.dimmer_2_15", "light.dimmer_2_9", "light.dimmer_2_18",  # billiard, table, sofas, bar
+)  # fmt: skip
+# An evening in Paris: lights on all over, the bedside lamps' power too, which their own switch turns off
+PARIS_EVENING_LIGHTS = PARIS_LIVING_LIGHTS + (
+    "light.salle_de_bain_parents_lavabo", "light.salle_de_bain_parents_douche", "light.dimmer_2_6", "light.dimmer_2_8",
+    "light.dimmer_2_16", "light.lumiere_balcon",
+)  # fmt: skip
+PARIS_EVENING = {
+    **dict.fromkeys(PARIS_EVENING_LIGHTS, "on"),
+    "switch.lampe_de_chevet_ivan": "on", "switch.lampe_de_chevet_emilie": "on", "switch.led_de_la_borne_de_zoe": "on",
+}  # fmt: skip
 CONCERTO = (
     "« Bach, JS: Concerto for Four Pianos in A Minor, BWV 1065: I. Allegro » de Johann Sebastian Bach, Michel Béroff"
 )
@@ -517,6 +535,17 @@ SCENARIOS = [
         ("Ferme le volet du salon.", moves(roller_shutter_3_4="close_cover"), {}),
         ("Rouvre-le jusqu'en haut et ouvre aussi celui de la salle à manger.",
          moves(roller_shutter_3_4="open_cover", roller_shutter_3_3="open_cover"), {}),
+    ]),
+    # The evening of 2026-11-13: a light HA said off was turned off again, « je viens de l'éteindre », while it shone;
+    # then the whole flat's lights named one by one, 14 of 30, and « toutes les lumières de la maison » said
+    ("AD-102 the evening of 2026-11-13", "paris", PARIS_EVENING, [
+        ("Tu peux éteindre toutes les lumières du salon et de la cuisine.", turns_off(*PARIS_LIVING_LIGHTS), {}),
+        ("Ah bah non, t'as pas éteint la lumière de la table à manger.",
+         says(r"\bdeja\b", r"\?", unlike=r"viens de|c'est fait"), {}),
+        ("Toujours pas, éteins toutes les lumières de l'appartement.", turns_off(*PARIS_EVENING_LIGHTS, allowed=("light.",)), {}),
+    ]),
+    ("AD-102 every light, the bedside lamps' power kept", "paris", PARIS_EVENING, [
+        ("Éteins toutes les lumières de l'appartement.", turns_off(*PARIS_EVENING_LIGHTS, allowed=("light.",)), {}),
     ]),
 ]  # fmt: skip
 

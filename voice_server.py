@@ -7,6 +7,7 @@ Replaces Home Assistant for the voice pipeline
 import asyncio
 import contextlib
 import datetime
+import json
 import locale
 import logging
 import os
@@ -43,6 +44,7 @@ from ha_client import (
     ALARM_MODES,
     LOCAL_CONFIG,
     alarm_mode,
+    asks_every_room,
     asks_heating_on,
     asks_whole_house,
     compact,
@@ -50,7 +52,7 @@ from ha_client import (
     fold,
     is_whole_house,
     normalize,
-    quiet,
+    quieted,
 )
 from images import find_image
 from places import address_of, find_place
@@ -341,6 +343,7 @@ class _Request:
     end_conversation: bool = False  # the end_conversation tool: no follow-up, history cleared
     no_followup: bool = False  # a media command: no follow-up, history kept (AD-035)
     whole_house: bool = False  # the request says tout, tous, partout…: an action may sweep every room (AD-058)
+    every_room: bool = False  # the request names the home itself: its lights named one by one are all (AD-102)
     heating_on: bool = False  # the request turns on and names no mode: the heating goes to Auto (AD-082)
     cover_all_the_way: Optional[str] = None  # open_cover or close_cover: the request says not how far (AD-099)
     client: Optional[str] = None  # the web app's browser that asks, whose conversation it is (AD-061)
@@ -439,6 +442,7 @@ class VoiceAssistantServer:
     _end_conversation = _request_attribute("end_conversation")
     _no_followup = _request_attribute("no_followup")
     _whole_house = _request_attribute("whole_house")
+    _every_room = _request_attribute("every_room")
     _heating_on = _request_attribute("heating_on")
     _cover_all_the_way = _request_attribute("cover_all_the_way")
     _client = _request_attribute("client")
@@ -1244,8 +1248,7 @@ class VoiceAssistantServer:
     def _only_home_with(self, entity: str, room: Optional[str], domains: list[str]) -> Optional[Site]:
         """The one other home where a device this one lacks is found, as Charras's heating from Paris; in the
         room said, if one is: « parcourt » (partout, misheard) is no room, and would read every shutter there."""
-        token = quiet.set(True)  # each failed read asks the other homes: their misses stay out of the log
-        try:
+        with quieted():  # each failed read asks the other homes: their misses stay out of the log
             homes = [
                 site
                 for site in self.sites
@@ -1254,8 +1257,6 @@ class VoiceAssistantServer:
                 and (not room or site.ha_client.knows_room(room))
                 and site.ha_client.resolve_all_entities(entity, room=room, domain_hints=domains)
             ]
-        finally:
-            quiet.reset(token)
         return homes[0] if len(homes) == 1 else None
 
     def _unasked_sweep(self, function_name: str, arguments: dict) -> Optional[str]:
@@ -1280,6 +1281,41 @@ class VoiceAssistantServer:
                 logger.warning(f"Heating mode not asked for: {arguments.get('mode')}, set to Auto")
                 return function_name, {**arguments, "mode": "Auto"}
         return function_name, arguments
+
+    def _one_sweep(self, tool_calls: list[dict]) -> list[dict]:
+        """A round's calls, where a request naming the home itself is answered light by light over three rooms or
+        more: one call for every light instead. gemma named 14 of Paris's 29, cut at 200 tokens, then said « toutes »
+        (2026-11-13). The switches named with them go too, as a sweep takes none: the bedside lamps' plugs, which their
+        own switch turns off (Ivan, 2026-11-14), and Zoé's LED (AD-102)."""
+        if not self._every_room or not self.ha_client:
+            return tool_calls
+        named: dict[str, tuple[list[dict], set[str]]] = {}  # turn_on or turn_off: its calls, their lights' rooms
+        with quieted():
+            for tool_call in tool_calls:
+                function_name = tool_call["function"]["name"]
+                if function_name not in ("turn_on", "turn_off"):
+                    continue
+                try:
+                    args = json.loads(tool_call["function"]["arguments"])
+                    found = self.ha_client.resolve_all_entities(
+                        args.get("entity", ""), room=args.get("room"), domain_hints=["light", "switch"]
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if found:
+                    calls, rooms = named.setdefault(function_name, ([], set()))
+                    calls.append(tool_call)
+                    rooms.update(self.ha_client.entities[eid]["area_name"] for eid in found)
+        for function_name, (calls, rooms) in named.items():
+            if len(calls) < 2 or len(rooms) < 3:
+                continue
+            logger.warning(f"Whole home asked, {len(calls)} {function_name} light by light: one for every light")
+            first, *rest = calls
+            sweep = {"entity": "lumières", "room": "toute la maison"}
+            first["function"]["arguments"] = json.dumps(sweep, ensure_ascii=False)
+            dropped = {id(tool_call) for tool_call in rest}
+            tool_calls = [tool_call for tool_call in tool_calls if id(tool_call) not in dropped]
+        return tool_calls
 
     # The radio and volume tools; and all those whose `room` picks the speaker, music_control's only to resume
     _MEDIA_TOOLS = {"play_radio", "stop_media", "set_volume", "change_volume"}
@@ -1468,6 +1504,15 @@ class VoiceAssistantServer:
                 return f"Mode {arguments.get('mode')} inconnu : {', '.join(modes.values())}"
             extra["option"] = mode
 
+        # A device HA says is already so: « je viens de l'éteindre » was said of a light off for 27 s while another
+        # shone, twice, and the model never asked which (2026-11-13). Sent again all the same: HA may be wrong
+        already = (
+            len(entity_ids) == 1
+            and function_name in ("turn_on", "turn_off")
+            and (state := await self.ha_client.get_entity_state(entity_ids[0], timeout=2)) is not None
+            and _device_in_effect(function_name, arguments, state)
+        )
+
         service = "select_option" if function_name == "set_heating" else function_name
         calls = [self.ha_client.call_service(eid.split(".")[0], service, eid, **extra) for eid in entity_ids]
         if function_name in ("lock", "set_heating"):
@@ -1505,6 +1550,9 @@ class VoiceAssistantServer:
                 }
             return action_map.get(function_name, "C'est fait")
 
+        if already:
+            state_said = "allumé" if function_name == "turn_on" else "éteint"
+            return f"{self.ha_client.display_name(entity_ids[0])} était déjà {state_said} selon Home Assistant"
         return self.ha_client._build_response(
             entity_ids[0].split(".")[0],
             function_name,
@@ -2156,6 +2204,7 @@ class VoiceAssistantServer:
         logger.info(f'LLM input: "{text}"')
         self._keep_llm_loaded()
         self._whole_house = asks_whole_house(text)
+        self._every_room = asks_every_room(text)
         self._heating_on = asks_heating_on(text)
         self._cover_all_the_way = cover_all_the_way(text)
 
@@ -2201,8 +2250,6 @@ class VoiceAssistantServer:
             conversation.history = history[starts[-5] :] if len(starts) > 5 else history
 
         # Tool call loop: keep calling LLM until it returns text (max 3 rounds)
-        import json
-
         self._last_tool_calls = []
         done: dict[tuple, str] = {}  # (function, arguments) -> result, this turn
         max_rounds = 3
@@ -2273,6 +2320,7 @@ class VoiceAssistantServer:
                     done[key] = result
                 return tc_entry, result
 
+            message["tool_calls"] = self._one_sweep(message["tool_calls"])  # the history too reads what ran
             outcomes = await asyncio.gather(*(run_tool(tc) for tc in message["tool_calls"]))
 
             tool_messages = []

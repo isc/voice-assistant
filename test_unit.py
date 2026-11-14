@@ -38,6 +38,7 @@ from opening_hours import ParserError
 
 from ha_client import (
     HAClient,
+    asks_every_room,
     asks_heating_on,
     asks_whole_house,
     cover_all_the_way,
@@ -853,6 +854,62 @@ class TestWholeHouseAsked(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "Tous les volets en cours de fermeture")
         await asyncio.gather(*self.server._pending_service_calls)
         self.assertEqual(self.client.call_service.call_count, 4)
+
+    def test_the_home_itself_said(self):
+        """What a light-by-light answer is folded into one sweep for (AD-102): the home named, not one room's « toutes »."""
+        for text in (
+            "Toujours pas, éteint toutes les lumières de l'appartement.", "éteins les lumières de la maison",
+            "allume partout", "éteins les lumières dans toutes les pièces", "éteins tout l'appart",
+        ):  # fmt: skip
+            self.assertTrue(asks_every_room(text), text)
+        for text in (
+            "Tu peux éteindre toutes les lumières du salon et de la cuisine.", "éteins tout", "éteins toutes les lumières",
+        ):  # fmt: skip
+            self.assertFalse(asks_every_room(text), text)
+
+    async def test_lights_named_one_by_one_are_one_sweep(self):
+        """« éteins toutes les lumières de l'appartement »: gemma named 14 of Paris's 30 lights, room by room, and said
+        « toutes » (2026-11-13). One sweep instead, the bedside lamp's plug left on (Ivan, 2026-11-14), AD-102."""
+        self.client.entities["switch.lampe_de_chevet_ivan"] = {
+            **self.client.entities["light.appliques_salon"], "friendly_name": "Lampe de chevet Ivan", "domain": "switch",
+            "state": "on", "area_name": "Chambre parents",
+        }  # fmt: skip
+
+        def calls(*named):
+            return [{"id": str(i), "function": {"name": f, "arguments": json.dumps(a)}} for i, (f, a) in enumerate(named)]
+
+        def said(tool_calls):
+            return [(c["function"]["name"], json.loads(c["function"]["arguments"])) for c in tool_calls]
+
+        one_by_one = [
+            ("turn_off", {"entity": "Appliques salon", "room": "Living Room"}),
+            ("turn_off", {"entity": "Plafonnier", "room": "Chambre Charlie"}),
+            ("close_cover", {"entity": "Volet", "room": "Chambre Zoé"}),
+            ("turn_off", {"entity": "Plafonnier", "room": "Chambre Zoé"}),
+            ("turn_off", {"entity": "Lampe de chevet Ivan", "room": "Chambre parents"}),
+        ]
+        self.assertEqual(said(self.server._one_sweep(calls(*one_by_one))), one_by_one)  # the home not named
+        self.server._every_room = self.server._whole_house = True
+        self.assertEqual(said(self.server._one_sweep(calls(*one_by_one[:2]))), one_by_one[:2])  # two rooms
+        swept = self.server._one_sweep(calls(*one_by_one))
+        self.assertEqual(said(swept), [
+            ("turn_off", {"entity": "lumières", "room": "toute la maison"}), ("close_cover", one_by_one[2][1]),
+        ])  # fmt: skip
+        self.assertEqual(await self.server.execute_function(*said(swept)[0]), "Toutes les lumières éteintes")
+        await asyncio.gather(*self.server._pending_service_calls)
+        self.assertNotIn("switch.lampe_de_chevet_ivan", [c.args[2] for c in self.client.call_service.call_args_list])
+
+    async def test_already_so_said(self):
+        """« je viens de l'éteindre » of a light HA said off, while another shone (2026-11-13): said so, sent again."""
+        self.client.get_entity_state = AsyncMock(return_value={"state": "off", "attributes": {}})
+        call = ("turn_off", {"entity": "Appliques salon", "room": "Living Room"})
+        self.assertEqual(await self.server.execute_function(*call), "Appliques salon était déjà éteint selon Home Assistant")
+        await asyncio.gather(*self.server._pending_service_calls)
+        self.client.call_service.assert_awaited_once_with("light", "turn_off", "light.appliques_salon")
+        self.client.get_entity_state.return_value = {"state": "on", "attributes": {}}
+        self.assertEqual(await self.server.execute_function(*call), "Appliques salon éteint")
+        self.client.get_entity_state.return_value = None  # HA did not say
+        self.assertEqual(await self.server.execute_function(*call), "Appliques salon éteint")
 
     async def test_reading_needs_no_asking(self):
         self.client.get_entity_state = AsyncMock(return_value={"state": "open", "attributes": {}})

@@ -4,6 +4,7 @@ Handles entity discovery with area grouping, fuzzy matching, and service calls.
 """
 
 import asyncio
+import contextlib
 import difflib
 import json
 import logging
@@ -21,6 +22,16 @@ logger = logging.getLogger(__name__)
 # runs stay out of the log, but for errors
 quiet: ContextVar[bool] = ContextVar("quiet", default=False)
 logger.addFilter(lambda record: record.levelno >= logging.ERROR or not quiet.get())
+
+
+@contextlib.contextmanager
+def quieted():
+    """This task's log lines below ERROR left out meanwhile (quiet)."""
+    token = quiet.set(True)
+    try:
+        yield
+    finally:
+        quiet.reset(token)
 
 # Domains we expose as LLM tools
 SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock", "select", "alarm_control_panel"}
@@ -75,15 +86,26 @@ def is_whole_house(room: Optional[str]) -> bool:
     return bool(room) and normalize(room) in _WHOLE_HOUSE
 
 
+# The home itself, said: « partout », « la maison », « l'appart »
+_HOME_WORDS = r"partout|maison|appart|appartement"
 # A request asks for every room only in so many words, those of _WHOLE_HOUSE and more; « tout de
 # suite » or « c'est tout » do not
-_WHOLE_HOUSE_WORDS = re.compile(r"\b(?:tout|tous|toute|toutes|partout|maison|appart|appartement)\b")
+_WHOLE_HOUSE_WORDS = re.compile(rf"\b(?:tout|tous|toute|toutes|{_HOME_WORDS})\b")
 _NOT_WHOLE_HOUSE = re.compile(r"\btout (?:de suite|a l'heure|a fait|le monde)\b|\bc'est tout\b")
 
 
 def asks_whole_house(text: str) -> bool:
     """Whether a request says the whole house: tout, tous, partout, la maison, l'appart…"""
     return bool(_WHOLE_HOUSE_WORDS.search(_NOT_WHOLE_HOUSE.sub(" ", fold(text))))
+
+
+# The home itself, not « toutes les lumières du salon », which asks_whole_house lets sweep too
+_EVERY_ROOM_WORDS = re.compile(rf"\b(?:{_HOME_WORDS}|toutes les pieces)\b")
+
+
+def asks_every_room(text: str) -> bool:
+    """Whether a request names the home itself: la maison, l'appartement, partout, toutes les pièces (AD-102)."""
+    return bool(_EVERY_ROOM_WORDS.search(fold(text)))
 
 
 # « allume le chauffage », « active-le », « remets le chauffage »: on, with no mode said; « en confort », « en
@@ -915,10 +937,13 @@ class HAClient:
         logger.info(f"Sensor search '{query}' -> {len(matches)} matches")
         return "\n".join(lines)
 
-    async def get_entity_state(self, entity_id: str) -> Optional[dict]:
-        """Get the current state of an entity."""
+    async def get_entity_state(self, entity_id: str, timeout: Optional[float] = None) -> Optional[dict]:
+        """Get the current state of an entity, None if HA does not say (within `timeout`, else the session's)."""
         try:
-            async with self._session.get(f"{self.base_url}/api/states/{entity_id}") as resp:
+            async with self._session.get(
+                f"{self.base_url}/api/states/{entity_id}",
+                timeout=aiohttp.ClientTimeout(total=timeout) if timeout else self._session.timeout,
+            ) as resp:
                 if resp.status == 200:
                     return await resp.json()
                 return None

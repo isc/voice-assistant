@@ -19,7 +19,7 @@ from aiohttp import WSMsgType, web
 from yarl import URL
 
 import onnx_gpu
-from ha_client import LOCAL_CONFIG, quiet
+from ha_client import LOCAL_CONFIG, quieted
 from sites import Site, site_at_address
 from spotify import CONTROLS
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
@@ -422,11 +422,8 @@ def setup_routes(app, server):
         if not isinstance(shortcuts := body.get("shortcuts"), list) or len(shortcuts) > 20:
             raise _json_error(web.HTTPBadRequest, "'shortcuts': up to 20 lists of calls")
         await serve(request, body)
-        token = quiet.set(True)  # asked at each poll of the page: its resolutions stay out of the log
-        try:
+        with quieted():  # asked at each poll of the page: its resolutions stay out of the log
             return web.json_response({"in_effect": await server.in_effect(shortcuts)})
-        finally:
-            quiet.reset(token)
 
     async def handle_test_prompt(request):
         text = await read_text(request)
