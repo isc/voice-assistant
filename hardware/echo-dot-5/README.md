@@ -8,8 +8,8 @@ Nothing is designed yet. This file records what was seen, so that the work can r
 device open on the table. Each claim says how it is known: **read** on the part, **counted** on a
 photo, **inferred**, or **from** a source listed at the end.
 
-No such board exists for this model. [LocalDot](https://github.com/ale1800/LocalDot) does it for the
-3rd generation; the Home Assistant forum thread on the 5th generation has no board and no firmware.
+No such board exists for this model, and nobody has published the pinout of its cables: see
+[Prior work](#prior-work-searched-on-2026-11-15).
 
 ## Telling the model without opening it
 
@@ -165,7 +165,8 @@ and two close-ups: the half with [`U23` and `U6`](photos/mic-board-closeup.jpg),
   **Read**, on two photos. Not identified. The Echo Spot's microphone board has a chip marked the
   same way, `46256` / `Z3111` / `UAB`, which Dorey's oscilloscope shows driving the LEDs and the
   microphone-off function: **inferred** to be the same kind of part here, a small programmed
-  controller for the microphone-off button and its LEDs.
+  controller for the microphone-off button and its LEDs. Aggarwal's unit carries `45575` / `N211J` /
+  `UAA` at `U1`, and he found no part by that marking either: `45575` is the part, the rest its lot.
 - `U3`: marked `CM5` after a bar, five or six pins. `CM5` is the marking of TI's SN74LVC1G125 in an
   SC70 package, a single buffer whose output can be switched off (**from** TI's and distributors'
   marking tables). What it gates is not known: a line of the converter, cut when the microphones are
@@ -212,13 +213,42 @@ The widths are read on photos of each tip against a ruler. A 10-contact cable at
 pitch is 5.5 mm wide. The 25 were counted as 24 gaps along four lines across the enlarged photo; the 10 on the connector and
 again on the cable. Each cable has `P1` and a small triangle printed at its tip: the mark of contact 1.
 
-## What differs from the published teardown
+## What differs from the published teardowns
 
 Brian Dorey opened a 5th generation without clock. This unit, with clock and made in 2022, differs:
 
-- the converter is an AKM AK5704, where his is a TI TLV320ADC5140;
+- the converter is an AKM AK5704, where his is a TI TLV320ADC5140, as is Pallav Aggarwal's, whose
+  microphone board is otherwise this one (`MK1`, `MK2`, `MK4` fitted, `MK3` empty, `U1` a `45575`):
+  **inferred**, Amazon built this board with either converter, and a replacement board that must
+  serve other units than this one has to drive both;
 - the light ring's driver is a TI LP5036, where he reads `W4970 3246`;
 - there is the display, its cable and its connector `J1`.
+
+## Prior work, searched on 2026-11-15
+
+Searched: the web in English and German, GitHub's repositories and LocalDot's issues, the Home
+Assistant forum, the three board numbers and `U1`'s marking. For this model:
+
+- **Teardowns** by Dorey and by Aggarwal: the chips of the main board, photos of both boards. Neither
+  traces a cable, counts its contacts or names a test point's signal.
+- **A replacement board: none.** LocalDot (ESP32-S3 and ESP32-P4, on Crowd Supply since November
+  2026, boards due in April 2027) is for the 3rd generation, whose microphone board and 40-contact
+  cable are others; its repository and its issues name no later generation. echo-419 drew an
+  EasyEDA schematic for the 4th generation in April 2023, four commits, nothing since.
+- **Amazon's own board made to run other software: not possible yet.** The projects that do it
+  (echo-dot-assist, EchoLocal, EchoMuse, TECHO5) cover the 2nd and 3rd generations and the Echo
+  Show; the 4th and 5th generations and the Echo Pop have no known exploit. One person has been
+  reading the 5th generation's boot chain (MT8519, « cannoli ») since October 2026, asking for a
+  signed download agent, with no way in so far.
+- **The nine pads under the base** (`J9`): one set of multimeter readings on the forum, its author's
+  own numbering, 12 V on one pad, no protocol found. Of use to a root, not to this board.
+- **The shell and the speaker reused**: the « Franken Dot » of August 2026 keeps those two, wires
+  soldered to the speaker's two pads, a Waveshare ESP32-S3 audio board and its screen glued over
+  the buttons. All of the Echo's electronics are taken out.
+
+So the pinout of the 25-contact cable, the display's, and a board to this outline are not
+published anywhere found. Worth searching again before a board is drawn: LocalDot's author, or a
+buyer of his board, is the likeliest to turn to the later generations.
 
 ## What a replacement board would carry
 
@@ -274,3 +304,12 @@ photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none 
 - Brian Dorey, [Amazon Echo Spot teardown](https://www.briandorey.com/post/echo-spot-smart-speaker-teardown),
   for its microphone board
 - Texas Instruments, [SN74LVC1G125](https://www.ti.com/lit/gpn/sn74lvc1g125b)
+- Pallav Aggarwal, [Inside the Amazon Echo Dot (5 Gen): a complete teardown](https://pallavaggarwal.in/2023/11/07/amazon-echo-dot-5gen-teardown/)
+- [echo-419](https://github.com/renaiku/echo-419), a schematic for the 4th generation
+- [echo-dot-assist](https://github.com/Gamer92000/echo-dot-assist), [EchoLocal](https://github.com/ygelfand/echolocal),
+  [EchoMuse](https://github.com/wilbowes/EchoMuse) and [TECHO5](https://github.com/HuskerMinion/techo5):
+  other software on Amazon's own board, older models
+- [kaeru issue 118](https://github.com/R0rt1z2/kaeru/issues/118), the 5th generation's boot chain
+- Liam Pettigrew, [The Franken Dot](https://fulloch.com/posts/the-franken-dot/)
+- [Turning an old Echo Dot into a local voice assistant](https://dev.to/adamjrg/turning-an-old-echo-dot-into-a-local-voice-assistant-1nlb),
+  for which models have an exploit
