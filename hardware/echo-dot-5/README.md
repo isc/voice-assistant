@@ -70,9 +70,9 @@ right and y up, in millimetres:
 | What | Where | Size |
 |---|---|---|
 | Flat cut of the outline | y ≈ +36.6 | |
-| Passages of the four case screws | (−17.4, +16.3), (+16.7, +16.3), (−16.8, −17.3), (+16.5, −17.4) | holes of 5.4 mm by the caliper (5.6 to 6.1 on the photos) |
+| Passages of the four case screws | (−17.4, +16.3), (+16.7, +16.3), (−16.8, −17.3), (+16.5, −17.4) | holes of 5.4 to 6 mm (see below) |
 | Holes of the board's four screws | (−13.6, +20.9), (+13.7, +21.6), (−18.9, −10.7), (+19.2, −9.6) | 2.9 mm by the caliper (3.1 on the photos) |
-| Two more holes, either side of the debug header | (−6.0, +21.8), (+5.4, +21.8) | about 3.2 mm |
+| Two more holes, either side of the debug header | (−6.0, +21.8), (+5.4, +21.8) | 3.25 mm by the caliper, one of them (3.1 to 3.5 on the photos) |
 | Twelve LEDs, on the other face | a circle of radius 33.0, every 30°, one on each axis | each in a window of the ring |
 | Power socket `J3` | centre about (−2, +32.5) | body about 17 × 10 |
 | Microphone connector `J4` | centre about (−28.5, +12.7), its length along y | about 9 long |
@@ -84,9 +84,31 @@ outlines), the holes on both faces, which agree to about 1 mm. The connectors, t
 contacts are read by eye on the scaled photo. The outline that sets the scale is the ring's, 1 to
 2 mm nearer or farther than the face the holes are seen on, from a camera some 15 cm away: a
 percent or so. All of it is good to **about 1 mm**: enough for a
-paper outline printed at full size and tried on the chassis, not for ordering a board. The holes do
-not come out symmetrical (each right one 0.5 to 1 mm higher than its left one, on both faces):
-real or not, a caliper will say.
+paper outline printed at full size and tried on the chassis, not for ordering a board.
+
+#### Checked with the caliper
+
+The six distances between the board's four screw holes, one inside jaw in each hole, spread apart,
+read on photos (see [the caliper](#the-caliper)). A centre distance is that reading less the reading
+with both jaws in one such hole (3.1): the scale's offset and the jaws' own width cancel.
+
+| Between (coordinates of the table above) | Reading | Centres, caliper | Centres, photos |
+|---|---|---|---|
+| (+13.7, +21.6) and (−13.6, +20.9) | 30.0 | 26.9 | 27.3 |
+| (−13.6, +20.9) and (−18.9, −10.7) | 34.5 | 31.4 | 32.0 |
+| (−18.9, −10.7) and (+19.2, −9.6) | 41.2 | 38.1 | 38.1 |
+| (+19.2, −9.6) and (+13.7, +21.6) | 35.1 | 32.0 | 31.7 |
+| (+13.7, +21.6) and (−18.9, −10.7), a diagonal | 49.4 | 46.3 | 45.9 |
+| (−13.6, +20.9) and (+19.2, −9.6), the other | 48.1 | 45.0 | 44.8 |
+
+The two agree within 0.6 mm, 0.4 on average, with no scale error between them (+0.3 %). The caliper
+read this way is no finer than the photos: its first five distances put the sixth 1.2 mm from where
+it was read. So the plan is confirmed to about 0.5 mm, not refined. Both give one diagonal about
+1 mm longer than the other: the pattern is most likely not symmetrical, as the photos had shown
+(each right hole 0.5 to 1 mm higher than its left one, on both faces).
+
+Across the four passages of the case screws, the two diagonals read 54.0 and 53.4: with the photos'
+centres, holes of 5.7 to 6 mm, where both jaws in one hole had read 5.4 on a blurred photo.
 
 Face towards the base ([photo](photos/main-board-bottom.jpg)):
 
@@ -94,9 +116,11 @@ Face towards the base ([photo](photos/main-board-bottom.jpg)):
 - A white ring lies on this face along the edge, with a window for each LED. It is soft and looks
   glued to the board (felt by hand, not peeled). Seen edge on, it is 0.3 to 0.5 mm wider than the
   board all round. Most likely a gasket pressed against the diffuser, which also keeps each LED's
-  light to its own window (**inferred**). Its thickness is not known. Ring and board together are
-  **1.25 mm** between the caliper's jaws at the rim, which squeeze the ring: the board is thinner
-  than the usual 1.6 mm, most likely 1.0 or 0.8 mm.
+  light to its own window (**inferred**). Ring and board together are **1.25 mm** between the
+  caliper's jaws at the rim, which squeeze the ring. On a photo of the board's edge held beside the
+  caliper's scale, the green layer is about 1.15 mm and the ring about 0.7 mm, unsqueezed. So the
+  board is thinner than the usual 1.6 mm: **1.0 or 1.2 mm**, the two standard thicknesses either
+  side of what was read.
 - `U15`: TI **LP5036**, a 36-channel I2C LED driver; twelve RGB LEDs are 36 channels. **Read.**
 - `U7`: MediaTek **MT6398BN**, the processor's power management. **Read.**
 - `AR1`: marking unreadable. **Inferred** to be the amplifier, from its designator and from Dorey's
@@ -196,7 +220,9 @@ A digital caliper is at hand, without its battery. Its beam is graduated in mill
 opening reads where the slider's edge crosses that scale. On a photo of the jaws closed on the power
 plug, the edge reads 4.3 where the jaws, measured on the same photo against the scale, are 4.05 mm
 apart: the edge reads **0.25 mm too much**, taken off the readings above. The holes are taken with
-its inside jaws, one of each kind. With a battery it reads to 0.01 mm.
+its inside jaws. A reading is good to 0.3 mm at best, and less on the hole distances: the slider's
+end is a wall some millimetre high, bright as a mirror, and where it meets the scale is judged on
+photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none of this matters.
 
 1. **The 25-contact cable's pinout**: which contact is power, ground, I2C, the audio clocks and data,
    each button, each LED. With a multimeter, by continuity from the cable to the test pads and to the
@@ -206,10 +232,9 @@ its inside jaws, one of each kind. With a battery it reads to 0.01 mm.
 3. **The power socket's polarity**, read on the label: measure it once before powering a board of
    ours.
 4. **The speaker's impedance**: across its two pads.
-5. **Dimensions to a tenth of a millimetre**, with the caliper: the distances between the holes and
-   their diameters, the board's own diameter under the ring, the socket and both connectors. The
-   board's thickness without the ring cannot be had between the jaws, which reach the board only
-   over its rim: on a sharp photo of the edge held against the caliper's scale instead. The photos give them to about 1 mm.
+5. **Dimensions to a tenth of a millimetre**, with the caliper and its battery: the six distances
+   between the screw holes again, the board's own diameter under the ring, the socket and both
+   connectors. Photos and caliper read on its beam give them to about 0.5 mm.
 6. **The white ring**: its thickness and what it is made of. Soft and glued, it may not come off
    whole: a new board needs it moved over, or another cut to its shape.
 7. The unread chips of the microphone board, and the amplifier `AR1`.
