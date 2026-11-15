@@ -72,9 +72,9 @@ Face towards the chassis ([photo](photos/main-board-top.jpg), [in place](photos/
   the display. **Counted.**
 - `P1`, `P2`: two spring contacts that press on the two pads of the speaker box. No wire to unplug.
   **Read.**
-- `J3`: the barrel power socket. The adapter (model `LA23EU`) gives **12.0 V, 1.25 A, 15 W**. **Read**
-  on its label, whose polarity mark is too blurred on the photo to tell. `D22` next to the socket is
-  marked `15A`, and `L66` is a 3.3 µH inductor.
+- `J3`: the barrel power socket. The adapter (model `LA23EU`) gives **12.0 V, 1.25 A, 15 W**, the
+  plug's **centre positive**. **Read** on its label. `D22` next to the socket is marked `15A`, and
+  `L66` is a 3.3 µH inductor.
 - The chassis carries a thermal pad that presses on the large shield.
 
 ### Microphone and button board (kept)
@@ -146,7 +146,8 @@ Tools were missing on 2026-11-15: no multimeter, no logic analyzer.
    AK5704's pins, whose roles its datasheet gives. With a logic analyzer on the running device, the
    I2C traffic would also give the settings Amazon writes to the converter.
 2. **The display's driver**: look at the hidden face, or probe the 10-contact cable while it runs.
-3. **The power socket**: its polarity, to measure, and the plug's dimensions.
+3. **The power plug's dimensions.** Its polarity is read on the label: measure it once before
+   powering a board of ours.
 4. **The speaker's impedance**: across its two pads.
 5. **Dimensions**: the board's diameter, its holes, the width and pitch of both cable tips.
 6. The unread chips of the microphone board, and the amplifier `AR1`.
