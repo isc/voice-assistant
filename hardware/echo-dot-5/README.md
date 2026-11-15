@@ -25,8 +25,9 @@ No such board exists for this model. [LocalDot](https://github.com/ale1800/Local
 Nothing was broken or unglued, and the steps reverse.
 
 1. Peel the rubber foot off the base (adhesive and locating pins).
-2. Four Torx screws at the bottom of the deep holes (T5, from Dorey's teardown). The 3×3 grid of pads
-   next to them is the debug header `J9`: a forum poster measured about 12 V on one of them, leave it alone.
+2. Four Torx screws at the bottom of the deep holes (T5, from Dorey's teardown;
+   [photo](photos/base-screws.jpg), the serial number covered). The 3×3 grid of pads next to them is
+   the debug header `J9`: a forum poster measured about 12 V on one of them, leave it alone.
 3. The two halves separate. The lower one holds the light ring's diffuser.
 4. The main board is held by four small silver Torx screws. Lift it from the edge opposite the
    `FLEX SIDE` marking, like a lid: two ribbon cables hold it on that side.
@@ -71,9 +72,9 @@ Face towards the chassis ([photo](photos/main-board-top.jpg), [in place](photos/
   the display. **Counted.**
 - `P1`, `P2`: two spring contacts that press on the two pads of the speaker box. No wire to unplug.
   **Read.**
-- `J3`: the barrel power socket. `D22` next to it is marked `15A`, and `L66` is a 3.3 µH inductor.
-  The supply voltage is not confirmed: the capacitor's 16 V rating, this diode and the forum's
-  measurement all point to 12 V.
+- `J3`: the barrel power socket. The adapter (model `LA23EU`) gives **12.0 V, 1.25 A, 15 W**. **Read**
+  on its label, whose polarity mark is too blurred on the photo to tell. `D22` next to the socket is
+  marked `15A`, and `L66` is a 3.3 µH inductor.
 - The chassis carries a thermal pad that presses on the large shield.
 
 ### Microphone and button board (kept)
@@ -145,7 +146,7 @@ Tools were missing on 2026-11-15: no multimeter, no logic analyzer.
    AK5704's pins, whose roles its datasheet gives. With a logic analyzer on the running device, the
    I2C traffic would also give the settings Amazon writes to the converter.
 2. **The display's driver**: look at the hidden face, or probe the 10-contact cable while it runs.
-3. **The supply voltage**: read the power adapter's label, then measure.
+3. **The power socket**: its polarity, to measure, and the plug's dimensions.
 4. **The speaker's impedance**: across its two pads.
 5. **Dimensions**: the board's diameter, its holes, the width and pitch of both cable tips.
 6. The unread chips of the microphone board, and the amplifier `AR1`.
