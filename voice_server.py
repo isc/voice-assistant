@@ -488,6 +488,9 @@ class VoiceAssistantServer:
         self.device_media_states: Dict[str, MediaPlayerState] = {}
         # Site name -> « Un petit instant. » on its satellite, until its reply (AD-079)
         self._wait_phrases: Dict[str, _WaitPhrase] = {}
+        # Site name -> when its satellite last began an announcement, and the sites announcing now
+        self._announced_at: Dict[str, float] = {}
+        self._announcing: set[str] = set()
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
@@ -727,6 +730,9 @@ class VoiceAssistantServer:
         app = web.Application()
         setup_routes(app, self)
         # No listing: the LAN may fetch a reply by its URL, not browse every one
+        from tts import STREAM_PATH
+
+        app.router.add_get(f"/tts/{STREAM_PATH}{{name}}", self.tts.handle_stream)
         app.router.add_static("/tts/", self.tts_dir)
         if self.spotify:
             app.router.add_get("/spotify/stream.mp3", self.spotify.stream.handle)
@@ -807,6 +813,9 @@ class VoiceAssistantServer:
     def _on_satellite_state(self, site: Site, state) -> None:
         if isinstance(state, MediaPlayerEntityState) and state.key == self.device_media_keys.get(site.name):
             announcing = state.state == MediaPlayerState.ANNOUNCING
+            if announcing and site.name not in self._announcing:
+                self._announced_at[site.name] = time.time()
+            (self._announcing.add if announcing else self._announcing.discard)(site.name)
             # An announcement plays over the media, which resumes after it
             if not announcing:
                 self.device_media_states[site.name] = state.state
@@ -2177,6 +2186,23 @@ class VoiceAssistantServer:
             cancelled = VoiceAssistantTimerEventType.VOICE_ASSISTANT_TIMER_CANCELLED
             await self._handle_timer_event(self.site, cancelled, timer)
         return timer
+
+    def _heard_after(self, since: float) -> Optional[float]:
+        """Seconds from `since` to the moment the active site's satellite began its announcement."""
+        at = self._announced_at.get(self.site.name, 0)
+        return round(at - since, 3) if at > since else None
+
+    async def say(self, text: str, stream: bool) -> dict:
+        """The active site's satellite says `text` as a reply, from a whole file or from a stream, and how long it
+        took to begin: AD-104's trial, from this machine only."""
+        if not (api := self.device):
+            raise RuntimeError(f"no satellite at {self.site.label}")
+        t0 = time.time()
+        url = self.tts.stream(text, self.site.http_base_url) if stream else await self.text_to_speech_file(text)
+        ready = time.time() - t0
+        self._clear_announcements(api)
+        await self._announce(api, url, follow_up=False)
+        return {"stream": stream, "ready": round(ready, 3), "heard": self._heard_after(t0), "end": round(time.time() - t0, 2)}
 
     async def _announce_timer_finished(self, api, text: str, site: Site):
         """Generate TTS and play announcement when a timer finishes."""

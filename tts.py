@@ -5,10 +5,12 @@ import hashlib
 import logging
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
+from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,8 @@ VOICE_CATALOG = "hf://gradium/phonon-voices@da6c9ec0d47be8df5c87c730a3aa97187f32
 THREADS = 4
 # Replies are fetched once by the speaker, right after being written
 _REPLY_MAX_AGE = 600  # seconds
+# Under /tts/: a reply played while it is made (AD-104)
+STREAM_PATH = "stream/"
 
 # Clock times as the LLM writes them: "17h34", "7h", "17:34". Phonon's normalizer leaves them as written.
 _CLOCK_TIME = re.compile(r"\b([01]?\d|2[0-3])(?:h([0-5]\d)?|:([0-5]\d))(?![\w:])")
@@ -41,12 +45,58 @@ def spell_times(text: str) -> str:
     return _CLOCK_TIME.sub(spell, text)
 
 
+def speakable(text: str) -> str:
+    """The reply as Phonon is to read it: no markdown, clock times spelled out."""
+    text = re.sub(r"\*+", "", text)
+    text = re.sub(r"#+\s*", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return spell_times(re.sub(r"\s+", " ", text).strip())
+
+
+def _pcm16(audio: np.ndarray) -> bytes:
+    return (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+
+
+def _ffmpeg_flac(sample_rate: int, output: str) -> list[str]:
+    """ffmpeg from Phonon's 16-bit PCM to `output`.
+
+    FLAC: the Voice PE's firmware decodes FLAC and MP3 since 26.x (ESPHome 2026.6), no longer WAV.
+    48 kHz mono, its announcement format: ffmpeg resamples here, so the satellite runs no resampler
+    beside its wake word models (a 16 kHz reply stuttered). Without probing its input: ffmpeg held the first
+    0.2 s of a stream to read its format, which it is told."""
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-probesize", "32", "-analyzeduration", "0", "-fflags", "nobuffer",
+        "-f", "s16le", "-ar", str(sample_rate), "-ac", "1", "-i", "pipe:0",
+        "-ar", "48000", "-c:a", "flac", *(["-f", "flac", "-flush_packets", "1"] if output == "pipe:1" else []), output,
+    ]  # fmt: skip
+
+
+class _Stream:
+    """A reply's FLAC as ffmpeg makes it: what is made so far, and whether that is all."""
+
+    def __init__(self):
+        self.data = bytearray()
+        self.done = False
+        self.made = asyncio.Condition()
+        self.created = time.time()
+
+    async def add(self, data: bytes = b"", done: bool = False) -> None:
+        async with self.made:
+            self.data += data
+            self.done |= done
+            self.made.notify_all()
+
+
 class PhononTTS:
     """Phonon on the CPU: no ONNX Runtime, no room taken on the card the LLM needs."""
 
     def __init__(self):
         self.engine = None
         self._executor = ThreadPoolExecutor(1, thread_name_prefix="tts")  # one synthesis at a time, off the loop
+        self._streams: dict[str, _Stream] = {}
+        self._tasks: set[asyncio.Task] = set()
 
     async def init(self):
         logger.info("Initializing Phonon TTS...")
@@ -72,27 +122,16 @@ class PhononTTS:
             if time.time() - old.stat().st_mtime > _REPLY_MAX_AGE:
                 old.unlink(missing_ok=True)
 
-        # Strip markdown artifacts before TTS
-        clean_text = re.sub(r"\*+", "", text)
-        clean_text = re.sub(r"#+\s*", "", clean_text)
-        clean_text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", clean_text)
-        clean_text = re.sub(r"`([^`]+)`", r"\1", clean_text)
-        clean_text = re.sub(r"\s+", " ", clean_text).strip()
-        clean_text = spell_times(clean_text)
+        clean_text = speakable(text)
 
         logger.info(f"Synthesizing: '{clean_text[:80]}...'")
 
-        # FLAC: the Voice PE's firmware decodes FLAC and MP3 since 26.x (ESPHome 2026.6), no longer WAV.
-        # 48 kHz mono, its announcement format: ffmpeg resamples here, so the satellite runs no resampler
-        # beside its wake word models (a 16 kHz reply stuttered). ffmpeg writes to a file so that
-        # STREAMINFO holds the length (flac_seconds). Started during the synthesis: ~35 ms less.
+        # ffmpeg writes to a file so that STREAMINFO holds the length (flac_seconds). Started during the
+        # synthesis: ~35 ms less.
         sr = self.engine.sample_rate
         ffmpeg = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "s16le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
-            "-ar", "48000", "-c:a", "flac", str(output_path),
-            stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )  # fmt: skip
+            *_ffmpeg_flac(sr, str(output_path)), stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
         t0 = time.time()
         try:
             audio = await asyncio.get_running_loop().run_in_executor(self._executor, self.engine.synth, clean_text)
@@ -102,14 +141,90 @@ class PhononTTS:
             raise
         logger.info(f"Phonon output: {len(audio) / sr:.1f} s of speech in {time.time() - t0:.2f} s")
 
-        # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
-        audio_int16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-        _, error = await ffmpeg.communicate(audio_int16.tobytes())
+        _, error = await ffmpeg.communicate(_pcm16(audio))
         if ffmpeg.returncode:
             raise RuntimeError(f"ffmpeg: {error.decode().strip()}")
 
         logger.info(f"TTS generated: {output_path} ({output_path.stat().st_size} bytes)")
         return f"{base_url}{filename}"
+
+    def stream(self, text: str, base_url: str) -> str:
+        """The reply's URL at once: its FLAC is made meanwhile, and served as it comes (AD-104)."""
+        for name, old in list(self._streams.items()):
+            if time.time() - old.created > _REPLY_MAX_AGE:
+                del self._streams[name]
+        name = f"tts_{int(time.time())}_{uuid.uuid4().hex[:8]}.flac"
+        self._streams[name] = stream = _Stream()
+        task = asyncio.create_task(self._make(name, stream, speakable(text)))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return f"{base_url}{STREAM_PATH}{name}"
+
+    async def _make(self, name: str, stream: _Stream, text: str) -> None:
+        """Phonon's chunks, from its thread, into ffmpeg; ffmpeg's FLAC into the stream."""
+        logger.info(f"Streaming: '{text[:80]}...'")
+        loop = asyncio.get_running_loop()
+        chunks: asyncio.Queue = asyncio.Queue()
+        ffmpeg = await asyncio.create_subprocess_exec(
+            *_ffmpeg_flac(self.engine.sample_rate, "pipe:1"),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+
+        def synthesize():  # on the TTS thread
+            try:
+                with self.engine.stream(text) as audio:
+                    for pcm in audio:
+                        loop.call_soon_threadsafe(chunks.put_nowait, pcm)
+            finally:
+                loop.call_soon_threadsafe(chunks.put_nowait, None)
+
+        async def feed():
+            while (pcm := await chunks.get()) is not None:
+                ffmpeg.stdin.write(_pcm16(pcm))
+                await ffmpeg.stdin.drain()
+            ffmpeg.stdin.close()
+
+        async def collect():
+            first = None
+            while data := await ffmpeg.stdout.read(65536):
+                if first is None:
+                    first = time.time() - stream.created
+                    logger.info(f"TTS stream {name}: first bytes after {first:.3f} s")
+                await stream.add(data)
+
+        try:
+            await asyncio.gather(loop.run_in_executor(self._executor, synthesize), feed(), collect())
+            await ffmpeg.wait()
+            logger.info(f"TTS stream {name}: {len(stream.data)} bytes in {time.time() - stream.created:.2f} s")
+        except Exception:
+            logger.exception(f"TTS stream {name} failed")
+            if ffmpeg.returncode is None:
+                ffmpeg.kill()
+        finally:
+            await stream.add(done=True)
+
+    async def handle_stream(self, request: web.Request) -> web.StreamResponse:
+        """GET /tts/stream/<name>: a reply's FLAC from its start, then as it is made. Unbuffered by the
+        Paris relay's nginx (X-Accel-Buffering)."""
+        if not (stream := self._streams.get(request.match_info["name"])):
+            raise web.HTTPNotFound()
+        logger.info(f"TTS stream {request.match_info['name']}: fetched after {time.time() - stream.created:.3f} s")
+        response = web.StreamResponse(
+            headers={"Content-Type": "audio/flac", "Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+        )
+        await response.prepare(request)
+        sent = 0
+        while True:
+            async with stream.made:
+                await stream.made.wait_for(lambda: len(stream.data) > sent or stream.done)
+                data, done = bytes(stream.data[sent:]), stream.done
+            if data:
+                await response.write(data)
+                sent += len(data)
+            elif done:
+                break
+        await response.write_eof()
+        return response
 
 
 def flac_seconds(path: Path) -> float:

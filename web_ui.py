@@ -435,6 +435,18 @@ def setup_routes(app, server):
         logger.info(f"[TEST] Result: {json.dumps(result, ensure_ascii=False)}")
         return web.json_response(result)
 
+    async def handle_say(request):
+        """The satellite says a text as a reply: {"text": …, "stream": bool, "site": …}. From this machine only:
+        the reply streaming's trial (AD-104)."""
+        if not from_this_machine(request):
+            raise web.HTTPForbidden(text="From this machine only")
+        body = await _read_body(request)
+        await use_site(request, body)
+        try:
+            return web.json_response(await server.say(str(body.get("text", "")), bool(body.get("stream"))))
+        except RuntimeError as e:
+            raise _json_error(web.HTTPConflict, str(e))
+
     async def handle_listen(request):
         """The app as a satellite (AD-059): its microphone, 16 kHz 16-bit mono in binary messages,
         heard by the satellite's VAD; the reply is the phone's to play. To the page, in order:
@@ -647,4 +659,5 @@ def setup_routes(app, server):
     app.router.add_post("/api/push", handle_push_subscribe)
     app.router.add_post("/api/reset-conversation", handle_reset_conversation)
     app.router.add_post("/test", handle_test_prompt)
+    app.router.add_post("/api/say", handle_say)
     app.router.add_static("/static", STATIC_DIR)
