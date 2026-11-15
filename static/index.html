@@ -901,18 +901,19 @@ async function startVoice(followUp = false) {
     setTimeout(() => orb.classList.remove('nudge'), 3000);
     return;
   }
-  const session = voice.session = {followUp, closeMic: null, pending: null, player: null, analyser: null, held: false, early: [], waiting: null};
+  const session = voice.session = {followUp, closeMic: null, pending: null, player: null, analyser: null, held: false, early: [], waiting: null, stream: null};
   setVoice('starting');
   if (press) press.session = session;
   if (press?.held) hold(session);  // held before the socket was there
 
   const url = new URL('api/listen', location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.search = new URLSearchParams(tagged(followUp ? {follow_up: '1'} : {}));
+  url.search = new URLSearchParams(tagged({stream: '1', ...(followUp ? {follow_up: '1'} : {})}));
   const ws = session.ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { session.early.forEach((message) => ws.send(message)); session.early = []; };
-  ws.onmessage = (m) => onVoiceMessage(session, JSON.parse(m.data));
+  // The reply's speech comes in binary messages, after it (AD-105)
+  ws.onmessage = (m) => typeof m.data === 'string' ? onVoiceMessage(session, JSON.parse(m.data)) : session.stream?.addPcm(m.data);
   ws.onclose = () => { toast('Connexion perdue'); endVoice(session); };
 
   try {
@@ -953,7 +954,7 @@ function endVoice(session) {
   session.ws.onclose = null;
   session.ws.close();
   closeMic(session);
-  try { session.player?.stop(); } catch {}
+  session.player?.stop();
   if (session.pending) { settle(session.pending); session.pending = null; }
   if (voice.session === session) { voice.session = null; setVoice('idle'); }
 }
@@ -979,18 +980,16 @@ async function onVoiceMessage(session, msg) {
       session.waiting = speak(session, fetch(msg.audio).then((r) => r.arrayBuffer()));
     }
   } else if (msg.type === 'reply') {
-    session.ws.onclose = null;  // the server closes it now, the session goes on
+    // Its speech follows as it is made, until the server closes the socket; the session goes on (AD-105)
+    const stream = session.stream = player(session, msg.rate);
+    session.ws.onclose = () => stream.end();
     learn(msg.tool_calls);
-    // The reply's audio loads while the log does
-    const audio = msg.audio && !document.hidden && fetch(msg.audio).then((r) => r.arrayBuffer());
     settle(session.pending);
     session.pending = null;
-    if (audio) {
-      await session.waiting;  // « Un petit instant. » to its end
-      if (voice.session !== session) return;
-      setVoice('speaking');
-      await speak(session, audio);
-    }
+    await session.waiting;  // « Un petit instant. » to its end
+    if (voice.session !== session) return;
+    setVoice('speaking');
+    await stream.play();
     if (voice.session !== session) return;  // stopped meanwhile
     voice.session = null;
     if (msg.follow_up && !document.hidden) startVoice(true);
@@ -1001,22 +1000,66 @@ async function onVoiceMessage(session, msg) {
   }
 }
 
-async function speak(session, audio) {
-  try {
-    const buffer = await ctx.decodeAudioData(await audio);
-    if (voice.session !== session) return;
-    const source = session.player = ctx.createBufferSource();
-    const analyser = session.analyser = ctx.createAnalyser();
+// What a session says, AudioBuffers played back to back, the first 80 ms ahead to ride out the network's jitter,
+// a late one 20 ms ahead: kept until play(), which ends with the last one once end() is called, or at stop().
+// The reply's speech comes as 16-bit PCM at `rate` (addPcm, AD-105)
+function player(session, rate) {
+  let held = [], analyser = null, next = 0, ended = false, finish;
+  const sources = new Set(), done = new Promise((resolve) => { finish = resolve; });
+  const check = () => { if (!held && ended && !sources.size) finish(); };
+  function schedule(buffer) {
+    const source = ctx.createBufferSource();
     source.buffer = buffer;
-    analyser.fftSize = 512;
-    source.connect(analyser).connect(ctx.destination);
-    await new Promise((resolve) => { source.onended = resolve; source.start(); });
+    source.connect(analyser);
+    source.onended = () => { sources.delete(source); check(); };
+    next = Math.max(next, ctx.currentTime + (next ? 0.02 : 0.08));
+    source.start(next);
+    next += buffer.duration;
+    sources.add(source);
+  }
+  return {
+    add(buffer) { if (held) held.push(buffer); else schedule(buffer); },
+    addPcm(data) {
+      const pcm = new Int16Array(data), buffer = ctx.createBuffer(1, pcm.length, rate), samples = buffer.getChannelData(0);
+      for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768;
+      this.add(buffer);
+    },
+    end() { ended = true; check(); },
+    stop() {
+      for (const source of sources) source.stop();
+      sources.clear();
+      finish();
+    },
+    async play() {
+      session.player = this;
+      analyser = session.analyser = ctx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.connect(ctx.destination);
+      const buffers = held;
+      held = null;
+      buffers.forEach(schedule);
+      check();
+      await done;
+      analyser.disconnect();
+      session.player = session.analyser = null;
+      voice.target = 0;
+    },
+  };
+}
+
+async function speak(session, audio) {
+  let buffer;
+  try {
+    buffer = await ctx.decodeAudioData(await audio);
   } catch {
     toast('Réponse illisible');
-  } finally {
-    session.player = session.analyser = null;
-    voice.target = 0;
+    return;
   }
+  if (voice.session !== session) return;
+  const said = player(session);
+  said.add(buffer);
+  said.end();
+  await said.play();
 }
 
 // The orb is the microphone. Touched, it listens until the server hears the end of speech, and a touch while

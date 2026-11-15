@@ -4603,6 +4603,29 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         with wave.open(str(self.server.recordings.path(entry["audio"]))) as recording:
             self.assertEqual(recording.getnframes(), 3 * 1024)
 
+    async def test_a_page_that_streams_gets_the_speech_after_the_reply(self):
+        """The reply's PCM in binary messages of 160 ms at most as Phonon makes it, then the socket's close; no file
+        (AD-105)."""
+
+        async def chunks(text):
+            for pcm in (b"\x01\x00" * 4, b"\x02\x00" * 10000):  # 80 µs, then 0.42 s: 160 ms is 7680 bytes
+                yield pcm
+
+        self.server.tts = MagicMock(sample_rate=24000, chunks=chunks)
+        client = await self.client()
+        with patch("web_ui.SpeechEnd", FakeSpeech):
+            ws = await client.ws_connect("/api/listen?stream=1")
+            for _ in range(3):
+                await ws.send_bytes(bytes(2048))
+            messages = [await ws.receive_json() for _ in range(4)]
+            speech = [await ws.receive_bytes() for _ in range(4)]
+            self.assertEqual((await ws.receive()).type, aiohttp.WSMsgType.CLOSE)
+        reply = messages[3]
+        self.assertEqual((reply["response"], reply["rate"], "audio" in reply), ("C'est fait.", 24000, False))
+        self.assertEqual([len(pcm) for pcm in speech], [8, 7680, 7680, 4640])
+        self.assertEqual(b"".join(speech), b"\x01\x00" * 4 + b"\x02\x00" * 10000)
+        self.server.text_to_speech_file.assert_not_awaited()
+
     async def test_a_slow_reply_says_wait_first(self):
         """« Un petit instant. » for the page to play while the LLM works on (AD-079)."""
         reply = self.server.process_with_llm

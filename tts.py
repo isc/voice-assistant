@@ -1,6 +1,7 @@
 """Text-to-Speech: Phonon 40M French (Gradium), voice Noémie, on the CPU (AD-103)."""
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import re
@@ -114,16 +115,21 @@ class PhononTTS:
 
     async def _ffmpeg(self, output: str):
         return await asyncio.create_subprocess_exec(
-            *_ffmpeg_flac(self.engine.sample_rate, output),
+            *_ffmpeg_flac(self.sample_rate, output),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )  # fmt: skip
 
-    async def _speak(self, text: str, ffmpeg) -> float:
-        """Phonon's chunks, as its thread makes them, into ffmpeg, whose input is then closed; the seconds of speech.
-        On a failure, Phonon stops at its next chunk and ffmpeg is killed."""
+    @property
+    def sample_rate(self) -> int:
+        return self.engine.sample_rate
+
+    async def chunks(self, text: str):
+        """`text`'s speech as Phonon's thread makes it: 16-bit PCM at `sample_rate`, chunk by chunk. Closed early,
+        Phonon stops at its next chunk."""
+        text = speakable(text)
         logger.info(f"Synthesizing: '{text[:80]}...'")
         loop = asyncio.get_running_loop()
-        chunks: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue()
         stop = threading.Event()
 
         def synthesize():  # on the TTS thread
@@ -132,25 +138,34 @@ class PhononTTS:
                     for pcm in audio:
                         if stop.is_set():
                             break
-                        loop.call_soon_threadsafe(chunks.put_nowait, pcm)
+                        loop.call_soon_threadsafe(queue.put_nowait, pcm)
             finally:
-                loop.call_soon_threadsafe(chunks.put_nowait, None)
+                loop.call_soon_threadsafe(queue.put_nowait, None)
 
         made = loop.run_in_executor(self._executor, synthesize)
+        try:
+            while (pcm := await queue.get()) is not None:
+                yield _pcm16(pcm)
+            await made
+        finally:
+            stop.set()
+
+    async def _speak(self, text: str, ffmpeg) -> float:
+        """`text`'s speech into ffmpeg, whose input is then closed; the seconds of speech. On a failure, ffmpeg
+        is killed."""
         samples = 0
         try:
-            while (pcm := await chunks.get()) is not None:
-                samples += len(pcm)
-                ffmpeg.stdin.write(_pcm16(pcm))
-                await ffmpeg.stdin.drain()
+            async with contextlib.aclosing(self.chunks(text)) as chunks:
+                async for pcm in chunks:
+                    samples += len(pcm) // 2
+                    ffmpeg.stdin.write(pcm)
+                    await ffmpeg.stdin.drain()
             ffmpeg.stdin.close()
-            await made
         except BaseException:
-            stop.set()
             if ffmpeg.returncode is None:
                 ffmpeg.kill()
             raise
-        return samples / self.engine.sample_rate
+        return samples / self.sample_rate
 
     async def synthesize_to_file(self, text: str, output_dir: Path, base_url: str) -> str:
         """Generate a 48 kHz FLAC file and return its URL: the web app's replies."""
@@ -163,7 +178,7 @@ class PhononTTS:
 
         t0 = time.time()
         ffmpeg = await self._ffmpeg(str(output_path))
-        seconds = await self._speak(speakable(text), ffmpeg)
+        seconds = await self._speak(text, ffmpeg)
         _, error = await ffmpeg.communicate()
         if ffmpeg.returncode:
             raise RuntimeError(f"ffmpeg: {error.decode().strip()}")
@@ -177,7 +192,7 @@ class PhononTTS:
                 del self._streams[name]
         name = f"tts_{int(time.time())}_{uuid.uuid4().hex[:8]}.flac"
         self._streams[name] = stream = _Stream()
-        task = asyncio.create_task(self._make(name, stream, speakable(text)))
+        task = asyncio.create_task(self._make(name, stream, text))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return f"{base_url}stream/{name}"

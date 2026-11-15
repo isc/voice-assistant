@@ -1,6 +1,7 @@
 """Web UI and HTTP routes for the voice assistant."""
 
 import asyncio
+import contextlib
 import hmac
 import html
 import ipaddress
@@ -164,13 +165,30 @@ def _same_origin(request) -> bool:
         return False
 
 
-async def _send(ws: web.WebSocketResponse, message: dict) -> None:
-    """To the page, if it is still there: a request it left (the phone locked) still runs."""
-    if not ws.closed:
-        try:
-            await ws.send_json(message)
-        except ConnectionError:
-            pass
+async def _send(ws: web.WebSocketResponse, message: dict | bytes) -> bool:
+    """To the page, if it is still there: a request it left (the phone locked) still runs. Whether it was sent."""
+    if ws.closed:
+        return False
+    try:
+        await (ws.send_bytes(message) if isinstance(message, bytes) else ws.send_json(message))
+    except ConnectionError:
+        return False
+    return True
+
+
+async def _speak_to(ws: web.WebSocketResponse, tts, text: str) -> None:
+    """The reply's speech to the page as Phonon makes it, 16-bit PCM in binary messages of 160 ms: a message plays
+    once whole, and Phonon's later chunks hold 1.3 s, which a slow mobile link took long enough to leave a gap.
+    Closing the socket ends it (AD-105)."""
+    t0, frame = time.time(), tts.sample_rate * 2 * 4 // 25
+    async with contextlib.aclosing(tts.chunks(text)) as chunks:
+        async for pcm in chunks:
+            for start in range(0, len(pcm), frame):
+                if not await _send(ws, pcm[start : start + frame]):
+                    return
+            if t0:
+                logger.info(f"TTS stream to the app: first audio sent after {time.time() - t0:.3f} s")
+                t0 = 0
 
 
 def _page_path(audio_url: str) -> str:
@@ -454,9 +472,12 @@ def setup_routes(app, server):
         « end » when the user is done speaking, « hold » while the button is held; closing drops the request.
 
         ?site=… as for a typed request; ?client=… the browser's id (AD-060); ?follow_up=1 for the listening
-        that follows a reply."""
+        that follows a reply; ?stream=1 from a page that plays the reply as it is made: then the reply has the
+        audio's `rate`, its PCM follows in binary messages, and the socket's close ends it (AD-105). A page
+        loaded before gets the URL of a file, `audio`."""
         await serve(request, dict(request.query))
         follow_up = request.query.get("follow_up") == "1"
+        streamed = request.query.get("stream") == "1"
         if not follow_up:
             server.warm_llm()  # while the request is spoken
         ws = web.WebSocketResponse()
@@ -470,12 +491,17 @@ def setup_routes(app, server):
                 follow_up,
                 lambda transcript: _send(ws, {"type": "transcript", "text": transcript}),
                 lambda audio_url: _send(ws, {"type": "wait", "audio": _page_path(audio_url)}),
+                speak=not streamed,
             )
         except Exception:
             logger.exception("App request failed")
             reply = {"response": None}
         if reply and reply["response"]:
-            await _send(ws, {"type": "reply", **reply, "audio": _page_path(reply["tts_url"])})
+            if streamed:
+                await _send(ws, {"type": "reply", **reply, "rate": server.tts.sample_rate})
+                await _speak_to(ws, server.tts, reply["response"])
+            else:
+                await _send(ws, {"type": "reply", **reply, "audio": _page_path(reply["tts_url"])})
         elif reply:
             await _send(ws, {"type": "error"})
         await ws.close()
