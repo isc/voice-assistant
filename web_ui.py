@@ -440,10 +440,9 @@ def setup_routes(app, server):
         the reply streaming's trial (AD-104)."""
         if not from_this_machine(request):
             raise web.HTTPForbidden(text="From this machine only")
-        body = await _read_body(request)
-        await use_site(request, body)
+        text = await read_text(request)  # a test's request (AD-100), at its site
         try:
-            return web.json_response(await server.say(str(body.get("text", "")), bool(body.get("stream"))))
+            return web.json_response(await server.say(text, bool((await _read_body(request)).get("stream"))))
         except RuntimeError as e:
             raise _json_error(web.HTTPConflict, str(e))
 

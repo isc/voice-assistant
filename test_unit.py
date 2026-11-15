@@ -11,6 +11,7 @@ Usage:
 """
 
 import asyncio
+import contextlib
 import contextvars
 import json
 import logging
@@ -18,6 +19,7 @@ import os
 import socket
 import sys
 import tempfile
+import time
 import unittest
 import wave
 from datetime import date, datetime, timedelta
@@ -26,6 +28,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import aiohttp
+import numpy as np
 from aioesphomeapi import (
     MediaPlayerCommand,
     VoiceAssistantConfigurationResponse,
@@ -159,8 +162,8 @@ def make_server(env=None):
     server.device_media_keys = {}
     server.device_media_states = {}
     server._wait_phrases = {}
-    server._announced_at = {}
-    server._announcing = set()
+    server._played_at = {}
+    server._playing = set()
     server._followup_by = {}
     server.is_recording = False
     server._pipeline_running = False
@@ -2786,7 +2789,7 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         server = self.server
         server.device_media_states = {"paris": 2}  # MediaPlayerState.PLAYING
         server._end_conversation = server._no_followup = False
-        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        server.text_to_speech_stream = MagicMock(return_value="http://x/tts/a.flac")
         server._announce = AsyncMock()
         await server.text_to_speech(MagicMock(), "Première phrase. Deuxième phrase.")
         server._announce.assert_awaited_once()  # one announcement, not split
@@ -2796,7 +2799,7 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         """ESPHome 2026.6 stopped its mixer under a second sentence that began right after a short first."""
         server = self.server
         server._end_conversation = server._no_followup = False
-        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        server.text_to_speech_stream = MagicMock(return_value="http://x/tts/a.flac")
         server._announce = AsyncMock()
         await server.text_to_speech(MagicMock(), "C'était bien la tour Eiffel ! C'est un monument de Paris.")
         server._announce.assert_awaited_once()
@@ -2808,7 +2811,7 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         server.device_media_keys["paris"] = 7
         server.tts_dir = Path("/nonexistent")
         server._end_conversation = server._no_followup = False
-        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        server.text_to_speech_stream = MagicMock(return_value="http://x/tts/a.flac")
         api = MagicMock()
         api.send_voice_assistant_announcement_await_response = AsyncMock(
             side_effect=lambda **kwargs: api.media_player_command.assert_called_once_with(
@@ -2845,7 +2848,7 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         server.device_media_keys["paris"] = 7
         server._audio_seconds = MagicMock(return_value=1)
         server._end_conversation = server._no_followup = False
-        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        server.text_to_speech_stream = MagicMock(return_value="http://x/tts/a.flac")
         api = MagicMock()
         await server._say_wait_phrase(api, "http://x/tts/wait.flac")
         api.media_player_command.assert_called_once_with(7, media_url="http://x/tts/wait.flac", announcement=True)
@@ -2869,7 +2872,7 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         server.device_media_keys["paris"] = 7
         server._audio_seconds = MagicMock(return_value=-2.9)  # at the latest 0.1 s from now
         server._end_conversation = server._no_followup = False
-        server.text_to_speech_file = AsyncMock(return_value="http://x/tts/a.flac")
+        server.text_to_speech_stream = MagicMock(return_value="http://x/tts/a.flac")
         server._announce = AsyncMock()
         await server._say_wait_phrase(MagicMock(), "http://x/tts/wait.flac")
         await asyncio.wait_for(server.text_to_speech(MagicMock(), "C'est fait."), 1)
@@ -2881,7 +2884,7 @@ class TestServerSites(unittest.IsolatedAsyncioTestCase):
         api = MagicMock()
         api.send_voice_assistant_announcement_await_response = AsyncMock(side_effect=TimeoutAPIError("late"))
         self.server.tts_dir = Path("/nonexistent")
-        await self.server._announce(api, "http://x/tts/a.flac", follow_up=True)  # logged, not raised
+        await self.server._announce(api, "http://x/tts/a.flac", "C'est fait.", follow_up=True)  # logged, not raised
 
     async def test_timer_event_goes_to_its_sites_satellite(self):
         from aioesphomeapi import VoiceAssistantTimerEventType
@@ -3836,7 +3839,7 @@ class TestFollowUp(unittest.IsolatedAsyncioTestCase):
         api = server.devices[server.site.name] = MagicMock()
         api.send_voice_assistant_announcement_await_response = AsyncMock()
         server.tts_dir = Path("/nonexistent")
-        await server._announce(api, "http://x/tts/a.flac", follow_up=True)
+        await server._announce(api, "http://x/tts/a.flac", "C'est fait.", follow_up=True)
         await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
         self.assertTrue(server.is_followup)
         server._end_recording()
@@ -3844,22 +3847,81 @@ class TestFollowUp(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(server.is_followup)  # the next wake word, not a follow-up
 
 
-class TestFlacSeconds(unittest.TestCase):
-    def test_length_from_streaminfo(self):
-        from tts import flac_seconds
+class TestReplyStream(unittest.IsolatedAsyncioTestCase):
+    """A reply served to the satellite while Phonon makes it (AD-104)."""
 
-        # 16 kHz, mono, 16 bits, 41984 samples: the fields after the frame sizes, as ffmpeg writes them
-        info = (16000 << 44) | (0 << 41) | (15 << 36) | 41984
-        head = b"fLaC" + bytes(4) + bytes(10) + info.to_bytes(8, "big")
-        with tempfile.NamedTemporaryFile(suffix=".flac") as f:
-            f.write(head)
-            f.flush()
-            self.assertAlmostEqual(flac_seconds(Path(f.name)), 2.624)
-            f.seek(0)
-            f.write(b"RIFF")
-            f.flush()
-            with self.assertRaises(ValueError):
-                flac_seconds(Path(f.name))
+    class Phonon:
+        sample_rate = 24000
+
+        @contextlib.contextmanager
+        def stream(self, text):
+            yield iter(np.sin(np.arange(n) / 10).astype(np.float32) * 0.3 for n in (1920, 1920, 24000))
+
+    async def asyncSetUp(self):
+        from tts import PhononTTS
+
+        self.tts = PhononTTS()
+        self.tts.engine = self.Phonon()
+        app = web.Application()
+        app.router.add_get("/tts/stream/{name}", self.tts.handle_stream)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def fetch(self, url: str) -> bytes:
+        response = await self.client.get(url.removeprefix("http://x"))
+        self.assertEqual((response.status, response.headers["X-Accel-Buffering"]), (200, "no"))  # the Paris relay
+        return await response.read()
+
+    async def test_served_as_made_then_whole_to_a_late_fetch(self):
+        with self.assertLogs("tts") as logs:
+            url = self.tts.stream("**Il est** 15h21.", "http://x/tts/")
+            data = await self.fetch(url)
+        self.assertIn("Synthesizing: 'Il est 15 heures vingt et une.", "\n".join(logs.output))
+        self.assertEqual(data[:4], b"fLaC")
+        self.assertEqual(await self.fetch(url), data)  # fetched again, or late: from its start
+        self.assertEqual((await self.client.head(url.removeprefix("http://x"))).status, 200)
+
+    async def test_a_file_for_the_web_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            url = await self.tts.synthesize_to_file("Bonjour.", Path(tmp), "http://x/tts/")
+            self.assertEqual((Path(tmp) / url.removeprefix("http://x/tts/")).read_bytes()[:4], b"fLaC")
+
+    async def test_unknown_stream(self):
+        self.assertEqual((await self.client.get("/tts/stream/tts_1_x.flac")).status, 404)
+
+    async def test_a_failed_synthesis_ends_the_stream(self):
+        self.tts.engine.stream = MagicMock(side_effect=RuntimeError("Phonon"))
+        with self.assertLogs("tts", "ERROR"):
+            data = await self.fetch(self.tts.stream("Bonjour.", "http://x/tts/"))
+        self.assertLess(len(data), 100)  # ffmpeg's header at most
+        with self.assertRaises(RuntimeError):
+            await self.tts.synthesize_to_file("Bonjour.", Path("/nonexistent"), "")
+
+    def test_heard_when_the_satellite_begins_to_play(self):
+        """The Voice PE says PLAYING, not ANNOUNCING, for a voice assistant's announcement."""
+        from aioesphomeapi import MediaPlayerEntityState, MediaPlayerState
+
+        server = make_server()
+        server.device_media_keys = {"": 7}
+        since = time.time()
+        self.assertIsNone(server._heard_after(since))
+        for state in (MediaPlayerState.PLAYING, MediaPlayerState.ANNOUNCING):
+            server._on_satellite_state(server.site, MediaPlayerEntityState(key=7, state=state))
+        heard = server._heard_after(since)
+        self.assertGreaterEqual(heard, 0)
+        server._on_satellite_state(server.site, MediaPlayerEntityState(key=7, state=MediaPlayerState.IDLE))
+        self.assertEqual(server._heard_after(since), heard)  # its start, not its end
+
+    async def test_say_from_this_machine_only(self):
+        server = make_server()
+        server.say = AsyncMock(return_value={"stream": True, "ready": 0.0, "heard": 0.3, "end": 2.7})
+        client = await app_client(self, server, phone=False)
+        response = await client.post("/api/say", json={"text": "Essai.", "stream": True})
+        self.assertEqual((await response.json())["heard"], 0.3)
+        server.say.assert_awaited_once_with("Essai.", True)
+        with patch("web_ui.from_this_machine", return_value=False):  # a phone
+            self.assertEqual((await client.post("/api/say", json={"text": "Essai."})).status, 403)
 
 
 class TestVADFrames(unittest.IsolatedAsyncioTestCase):
@@ -4187,7 +4249,7 @@ class TestTimersOnThePhone(unittest.IsolatedAsyncioTestCase):
         self.esp = MagicMock()
         server.devices = {"paris": self.esp}
         server.push = MagicMock(send=AsyncMock(return_value=True))
-        server.text_to_speech_file = AsyncMock(return_value="http://192.168.1.10:8888/tts/timer.flac")
+        server.text_to_speech_stream = MagicMock(return_value="http://192.168.1.10:8888/tts/timer.flac")
         server._announce = AsyncMock()
         self.addCleanup(self.paris.timer_manager.cancel_all)
 

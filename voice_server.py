@@ -488,9 +488,10 @@ class VoiceAssistantServer:
         self.device_media_states: Dict[str, MediaPlayerState] = {}
         # Site name -> « Un petit instant. » on its satellite, until its reply (AD-079)
         self._wait_phrases: Dict[str, _WaitPhrase] = {}
-        # Site name -> when its satellite last began an announcement, and the sites announcing now
-        self._announced_at: Dict[str, float] = {}
-        self._announcing: set[str] = set()
+        # Site name -> when its satellite last began to play, and the sites whose satellite plays now: the
+        # moment a reply is heard (the Voice PE says PLAYING for a voice assistant's announcement, AD-104)
+        self._played_at: Dict[str, float] = {}
+        self._playing: set[str] = set()
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
@@ -729,10 +730,8 @@ class VoiceAssistantServer:
 
         app = web.Application()
         setup_routes(app, self)
+        app.router.add_get("/tts/stream/{name}", self.tts.handle_stream)
         # No listing: the LAN may fetch a reply by its URL, not browse every one
-        from tts import STREAM_PATH
-
-        app.router.add_get(f"/tts/{STREAM_PATH}{{name}}", self.tts.handle_stream)
         app.router.add_static("/tts/", self.tts_dir)
         if self.spotify:
             app.router.add_get("/spotify/stream.mp3", self.spotify.stream.handle)
@@ -813,9 +812,10 @@ class VoiceAssistantServer:
     def _on_satellite_state(self, site: Site, state) -> None:
         if isinstance(state, MediaPlayerEntityState) and state.key == self.device_media_keys.get(site.name):
             announcing = state.state == MediaPlayerState.ANNOUNCING
-            if announcing and site.name not in self._announcing:
-                self._announced_at[site.name] = time.time()
-            (self._announcing.add if announcing else self._announcing.discard)(site.name)
+            playing = announcing or state.state == MediaPlayerState.PLAYING
+            if playing and site.name not in self._playing:
+                self._played_at[site.name] = time.time()
+            (self._playing.add if playing else self._playing.discard)(site.name)
             # An announcement plays over the media, which resumes after it
             if not announcing:
                 self.device_media_states[site.name] = state.state
@@ -1027,13 +1027,13 @@ class VoiceAssistantServer:
         else:
             logger.info("No audio to process")
 
-    async def _announce(self, api: APIClient, audio_url: str, follow_up: bool) -> None:
-        """Play a reply on the satellite; with follow_up, it then listens again without wake word.
+    async def _announce(self, api: APIClient, audio_url: str, text: str, follow_up: bool) -> None:
+        """Play a reply, `text`, on the satellite; with follow_up, it then listens again without wake word.
 
         AnnounceFinished comes at the end of playback, the follow-up START 30-50 ms later
         (journal, 2026-10-10), so the wait is the audio's length plus a margin.
         """
-        timeout = self._audio_seconds(audio_url) + 5
+        timeout = self._audio_seconds(text) + 5
         try:
             logger.info(f"Playing TTS (follow-up: {follow_up}): {audio_url}")
             await api.send_voice_assistant_announcement_await_response(
@@ -1050,16 +1050,14 @@ class VoiceAssistantServer:
         """« Un petit instant. » on the satellite, through its player: an announcement would end the request's run
         there (ESPHome's `on_announce`), the satellite then idle, a wake word heard, until the reply."""
         if (key := self.device_media_keys.get(self.site.name)) is not None:
-            self._wait_phrases[self.site.name] = _WaitPhrase(time.time() + self._audio_seconds(audio_url) + 3)
+            self._wait_phrases[self.site.name] = _WaitPhrase(time.time() + self._audio_seconds(_WAIT_PHRASE) + 3)
             api.media_player_command(key, media_url=audio_url, announcement=True)
 
-    def _audio_seconds(self, audio_url: str) -> float:
-        from tts import flac_seconds
-
-        try:
-            return flac_seconds(self.tts_dir / audio_url.rsplit("/", 1)[-1])
-        except (OSError, ValueError, ZeroDivisionError):
-            return 30.0
+    @staticmethod
+    def _audio_seconds(text: str) -> float:
+        """How long the satellite takes to say `text`, on the long side (Noémie reads ~18 characters a second):
+        it bounds waits the satellite ends itself, a stream's length unknown when it starts (AD-104)."""
+        return len(text) / 10
 
     def _clear_announcements(self, api: APIClient) -> None:
         """Empty the satellite's announcement queue. Since ESPHome 2026.6 an announcement that fails
@@ -1161,7 +1159,8 @@ class VoiceAssistantServer:
             t0 = time.time()
             try:
                 tts_timings = await self.text_to_speech(api, response_text)
-                timings["tts_gen"] = tts_timings["gen"]
+                if tts_timings["heard"] is not None:
+                    timings["tts_gen"] = tts_timings["heard"]  # the app's « TTS »: until the satellite is heard
                 timings["tts_play"] = tts_timings["play"]
                 timings["tts"] = round(time.time() - t0, 2)
             except Exception as e:
@@ -2188,8 +2187,8 @@ class VoiceAssistantServer:
         return timer
 
     def _heard_after(self, since: float) -> Optional[float]:
-        """Seconds from `since` to the moment the active site's satellite began its announcement."""
-        at = self._announced_at.get(self.site.name, 0)
+        """Seconds from `since` to the moment the active site's satellite began to play."""
+        at = self._played_at.get(self.site.name, 0)
         return round(at - since, 3) if at > since else None
 
     async def say(self, text: str, stream: bool) -> dict:
@@ -2198,18 +2197,18 @@ class VoiceAssistantServer:
         if not (api := self.device):
             raise RuntimeError(f"no satellite at {self.site.label}")
         t0 = time.time()
-        url = self.tts.stream(text, self.site.http_base_url) if stream else await self.text_to_speech_file(text)
+        url = self.text_to_speech_stream(text) if stream else await self.text_to_speech_file(text)
         ready = time.time() - t0
         self._clear_announcements(api)
-        await self._announce(api, url, follow_up=False)
+        await self._announce(api, url, text, follow_up=False)
         return {"stream": stream, "ready": round(ready, 3), "heard": self._heard_after(t0), "end": round(time.time() - t0, 2)}
 
     async def _announce_timer_finished(self, api, text: str, site: Site):
         """Generate TTS and play announcement when a timer finishes."""
         try:
-            audio_url = await self.text_to_speech_file(text, site)
+            audio_url = self.text_to_speech_stream(text, site)
             logger.info(f"Timer finished announcement: {text}")
-            await self._announce(api, audio_url, follow_up=not self._satellite_plays(site))
+            await self._announce(api, audio_url, text, follow_up=not self._satellite_plays(site))
         except Exception:
             logger.exception("Timer announcement error")
 
@@ -2817,13 +2816,19 @@ class VoiceAssistantServer:
         """Generate a TTS WAV file and return its URL, as the active site's (or `site`'s) speakers reach it."""
         return await self.tts.synthesize_to_file(text, self.tts_dir, (site or self.site).http_base_url)
 
-    async def text_to_speech(self, api: APIClient, text: str) -> dict:
-        """Speak a reply on the satellite, in one announcement.
-        Returns timing dict with 'gen' (generation) and 'play' (playback) durations.
+    def text_to_speech_stream(self, text: str, site: Optional[Site] = None) -> str:
+        """A reply's URL at once, its audio served as Phonon makes it (AD-104), as the active site's (or
+        `site`'s) satellite reaches it."""
+        return self.tts.stream(text, (site or self.site).http_base_url)
 
-        One file for the whole reply: Phonon takes ~0.06 s a second of speech, and the Voice PE
-        (ESPHome 2026.6) stops its mixer 0.4-0.8 s after an announcement ends, under the next one
-        if it starts by then: a second sentence after a short first hung, unheard (AD-054).
+    async def text_to_speech(self, api: APIClient, text: str) -> dict:
+        """Speak a reply on the satellite, in one announcement, streamed (AD-104).
+        Returns timings: 'heard', from the text to the satellite's first sound (None if its player did not say),
+        and 'play', the announcement's.
+
+        One announcement for the whole reply: the Voice PE (ESPHome 2026.6) stops its mixer 0.4-0.8 s after
+        an announcement ends, under the next one if it starts by then: a second sentence after a short
+        first hung, unheard (AD-054).
         """
         logger.info(f'TTS: generating audio for "{text}"')
 
@@ -2836,8 +2841,7 @@ class VoiceAssistantServer:
             follow_up = not (self._end_conversation or self._no_followup or self._satellite_plays())
 
             t0 = time.time()
-            url = await self.text_to_speech_file(text)
-            gen_time = time.time() - t0
+            url = self.text_to_speech_stream(text)
 
             # « Un petit instant. » heard to its end: the queue's STOP below would cut it
             if phrase := self._wait_phrases.get(self.site.name):
@@ -2849,12 +2853,10 @@ class VoiceAssistantServer:
             api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
             self._clear_announcements(api)
 
-            t0 = time.time()
-            await self._announce(api, url, follow_up=follow_up)
-            play_time = time.time() - t0
-
-            timings = {"gen": round(gen_time, 2), "play": round(play_time, 2)}
-            logger.info(f"TTS done: gen={timings['gen']}s play={timings['play']}s")
+            t1 = time.time()
+            await self._announce(api, url, text, follow_up=follow_up)
+            timings = {"heard": self._heard_after(t0), "play": round(time.time() - t1, 2)}
+            logger.info(f"TTS done: heard after {timings['heard']}s, play={timings['play']}s")
             return timings
 
         except Exception:

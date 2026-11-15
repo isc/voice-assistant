@@ -31,7 +31,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `llm.py` | LLM integration: chat completion, tool definitions, text-to-tool-call fallback parser |
 | `timer.py` | Timer manager: in-memory timers with asyncio scheduling, ESP native timer events; each remembers the browser that set it and whether its satellite shows it (AD-070) |
 | `push.py` | Web Push to the web app's browsers (RFC 8291 encryption, RFC 8292 VAPID, over `cryptography`): the server's key and each browser's subscription in `push.json` (600, gitignored, made at first start) |
-| `tts.py` | Phonon 40M French (Gradium), voice Noémie, on the CPU (AD-103): 48 kHz mono FLAC through ffmpeg (the Voice PE decodes no WAV). The model, gated on Hugging Face, downloads once into its cache |
+| `tts.py` | Phonon 40M French (Gradium), voice Noémie, on the CPU (AD-103): 48 kHz mono FLAC through ffmpeg (the Voice PE decodes no WAV), streamed to the satellite while it is made (`/tts/stream/`, AD-104), a file for the web app. The model, gated on Hugging Face, downloads once into its cache |
 | `stt.py` | Parakeet TDT 0.6B v3: onnx-asr on Linux/CUDA (server) or parakeet-mlx on Apple Silicon (Mac dev), picked by `STT_BACKEND` |
 | `onnx_gpu.py` | ONNX Runtime on the GPU shared with Ollama: one thread for the STT's runs, CUDA arenas that give their memory back after each run (AD-053), the CPU when CUDA fails (AD-055) |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
@@ -41,7 +41,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
 | `images.py` | Pictures for the web app or a screen: Wikipedia article's lead image, else an Openverse photo; the phone or the screen loads the URL itself |
 | `recordings.py` | Each voice request kept as WAV + JSON (transcript, reply, tool calls, timings) for 90 days, root-only |
-| `web_ui.py` | Web app routes: the phone as a satellite (`/api/listen`, a WebSocket), typed requests, shortcuts run again without the LLM (`/api/redo`, AD-065) and offered unless already in effect by HA's state (`/api/in-effect`, AD-066), a door unlocked or an alarm disarmed by a tap on the button its request shows (`/api/confirm`, AD-068, AD-083), timers (which are the asking browser's) and music, push subscriptions (`/api/push`, AD-070), exchange log with persistence (`exchanges.json`) |
+| `web_ui.py` | Web app routes: the phone as a satellite (`/api/listen`, a WebSocket), typed requests, shortcuts run again without the LLM (`/api/redo`, AD-065) and offered unless already in effect by HA's state (`/api/in-effect`, AD-066), a door unlocked or an alarm disarmed by a tap on the button its request shows (`/api/confirm`, AD-068, AD-083), timers (which are the asking browser's) and music, push subscriptions (`/api/push`, AD-070), the satellite made to say a text, from this machine only (`/api/say`, AD-104), exchange log with persistence (`exchanges.json`) |
 | `static/index.html` | The web app, a PWA: voice and typed requests, this phone's conversation (AD-060) with the pictures it asked for (AD-069) and the buttons that unlock or disarm (AD-068, AD-083), timers (a chime when its own reach 0, AD-070) and music now, shortcuts, the history and technical details on demand |
 | `static/sw.js` | The PWA's service worker: the shell offline, and a timer's push shown as a notification (AD-070) |
 | `vad.py` | End of speech by Silero VAD, for the satellite's recordings and the phone's; a burst under 4 frames is no speech (AD-092) |
@@ -64,7 +64,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 6. If text response → check the fallback parser for a tool call written as text (`fn({...})`)
 7. Final LLM round formulates natural spoken response from tool results
    - Steps 4-7 past 5 s: « Un petit instant. » meanwhile, by the satellite's media player, which keeps the run open, or the app's `wait` message (AD-079)
-8. TTS: Phonon generates FLAC (ffmpeg) on the CPU, played via announcement API with `start_conversation=True`
+8. TTS: Phonon makes FLAC (ffmpeg) on the CPU, which the satellite plays while it is made (`/tts/stream/`, heard ~0.3 s after the text, AD-104), via announcement API with `start_conversation=True`
 9. ESP automatically starts listening for follow-up (no wake word needed)
 10. If no speech within 5s, or a follow-up in another language than the conversation's (AD-093) → conversation ends. If `end_conversation` tool was called → no follow-up.
 
