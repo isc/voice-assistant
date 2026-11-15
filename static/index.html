@@ -388,7 +388,8 @@ function callText(tc) {
   const target = [
     a.entity, a.room, a.home && cap(a.home), a.query, a.event, a.station, a.title, a.location, a.label,
     a.duration_minutes && a.duration_minutes + ' min', a.time, shortDate(a.start_date), shortDate(a.start_datetime),
-    ACTIONS[a.action] || ACTIONS[a.direction], a.mode, pct(a.level), pct(a.position), pct(a.brightness),
+    // By the raw value: asName would make « return_to_base » a name first
+    ACTIONS[tc.args?.action] || ACTIONS[tc.args?.direction], a.mode, pct(a.level), pct(a.position), pct(a.brightness),
     a.temperature != null && a.temperature + ' °C',
   ].filter((t) => t && String(t).toLowerCase() !== verb.toLowerCase());
   return [verb, ...target].join(' · ');
