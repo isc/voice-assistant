@@ -18,7 +18,7 @@ from pathlib import Path
 LIVE = Path("/opt/voice-assistant")
 # Lines that say nothing of the family's requests: each speaker's fetch, the stream's listeners, the dry runs of
 # the tests and of development sessions (AD-085), the requests a development session sends for real (AD-100)
-NOISE = ("GET /", "POST /", "Spotify: listener", "Spotify: stream", "Phonon output:", "[dry run] ",
+NOISE = ("GET /", "POST /", "Spotify: listener", "Spotify: stream", "TTS stream ", "[dry run] ",
          "[test] ")
 
 
