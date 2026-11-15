@@ -146,7 +146,8 @@ Face towards the chassis ([photo](photos/main-board-top.jpg), [in place](photos/
 
 [Photo](photos/mic-board.jpg), lit from the side so that the laser markings show,
 [another](photos/mic-board-tracks.jpg) in even light, where the labels and the tracks read better,
-and a [close-up](photos/mic-board-closeup.jpg) of the half with `U23` and `U6`.
+and two close-ups: the half with [`U23` and `U6`](photos/mic-board-closeup.jpg), and the half with
+[`U1`, `U3` and `VR1`](photos/mic-board-closeup-u1.jpg).
 
 - `U23`: marked `5704` / `217G`, 28 pins (7 a side). **Inferred** to be an AKM **AK5704**, a
   four-channel 32-bit converter with microphone preamplifiers in a 4 × 4 mm 28-pin package, which is
@@ -160,8 +161,23 @@ and a [close-up](photos/mic-board-closeup.jpg) of the half with `U23` and `U6`.
   one, and nothing else on this face would be.
 - `RT1`, `RT2`: thermistors by their designators, for the temperature this generation reports.
   **Inferred.**
-- `U1`, `U3`, `VR1`: markings not read. `U1`, the largest after `U23`, has pads on its sides and a
-  marking on two lines. `U5` (six bare pads) and `U25` are empty footprints.
+- `U1`: marked `45575` / `M2113` / `BAA`, a package with pads on its sides, the largest after `U23`.
+  **Read**, on two photos. Not identified. The Echo Spot's microphone board has a chip marked the
+  same way, `46256` / `Z3111` / `UAB`, which Dorey's oscilloscope shows driving the LEDs and the
+  microphone-off function: **inferred** to be the same kind of part here, a small programmed
+  controller for the microphone-off button and its LEDs.
+- `U3`: marked `CM5` after a bar, five or six pins. `CM5` is the marking of TI's SN74LVC1G125 in an
+  SC70 package, a single buffer whose output can be switched off (**from** TI's and distributors'
+  marking tables). What it gates is not known: a line of the converter, cut when the microphones are
+  switched off, would be its obvious use.
+- `VR1`: a five-pin regulator marked like `3T=225`, its first character and the `=` uncertain. The
+  Echo Spot's boards carry regulators marked `3T=653` (**from** Dorey). Not identified.
+- `U5` (six bare pads) and `U25` are empty footprints.
+
+That Echo Spot board, of 2024, is a close relative of this one: an AK5704, three microphones, a
+25-contact connector, a controller marked in the same way. Dorey found the converter's I2C on two
+of its test points and a button interrupt on a third. Its test points are not named as ours, so
+none of it maps over as is, but it says what to look for on the 25 contacts.
 - About thirty gold test pads labelled `TM1`…`TM39` and `TP1`…`TP4`.
 - The tracks seen on this face leave the connector `J1` for a millimetre or two, then go through
   vias to inner layers: the cable's pinout does not read on a photo.
@@ -245,8 +261,8 @@ photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none 
    connectors. Photos and caliper read on its beam give them to about 0.5 mm.
 6. **The white ring**: its thickness and what it is made of. Soft and glued, it may not come off
    whole: a new board needs it moved over, or another cut to its shape.
-7. The unread chips of the microphone board (`U1` first, then `U3` and `VR1`), `U6`'s three
-   characters, and the amplifier `AR1`.
+7. What `U1` is and what it needs from the main board, `U6`'s three characters, and the amplifier
+   `AR1`.
 
 ## Sources
 
@@ -255,3 +271,6 @@ photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none 
 - [LocalDot](https://github.com/ale1800/LocalDot), a replacement board for the 3rd generation, and its
   [forum thread](https://community.home-assistant.io/t/re-using-an-echo-dot-3rd-gen-with-voice-assistant/1020256)
 - AKM, [AK5704EN datasheet](https://www.mouser.com/datasheet/3/5939/1/ak5704en-en-datasheet.pdf)
+- Brian Dorey, [Amazon Echo Spot teardown](https://www.briandorey.com/post/echo-spot-smart-speaker-teardown),
+  for its microphone board
+- Texas Instruments, [SN74LVC1G125](https://www.ti.com/lit/gpn/sn74lvc1g125b)
