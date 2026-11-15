@@ -564,7 +564,7 @@ def setup_routes(app, server):
         Returns 200 when all required components are ready, 503 otherwise.
         ESP and calendar are reported but optional (don't affect the verdict).
         LLM is checked by configuration only — not pinged, to avoid token cost.
-        STT or TTS on the CPU though the server has CUDA is `degraded` but still 200: slower,
+        The STT on the CPU though the server has CUDA is `degraded` but still 200: slower,
         working (AD-055).
         """
         # From the server, not `from voice_server import`: the service runs voice_server as __main__,
@@ -594,7 +594,7 @@ def setup_routes(app, server):
                 "model": "parakeet-tdt-0.6b-v3",
                 "device": server.stt.device if stt_ready else None,
             },
-            "tts": {"ready": tts_ready, "engine": "kokoro-82m", "device": server.tts.device if tts_ready else None},
+            "tts": {"ready": tts_ready, "engine": "phonon-40m-fr", "device": "cpu" if tts_ready else None},
             "llm": {
                 "ready": llm_ready,
                 "mode": "cloud" if is_cloud else "local",
@@ -614,7 +614,7 @@ def setup_routes(app, server):
         }
 
         required_ok = stt_ready and tts_ready and llm_ready and ha_ready
-        lost_cuda = (stt_ready and onnx_gpu.lost_cuda(server.stt)) or (tts_ready and onnx_gpu.lost_cuda(server.tts))
+        lost_cuda = stt_ready and onnx_gpu.lost_cuda(server.stt)
         status = "ok" if required_ok and not lost_cuda else "degraded"
         body = {
             "status": status,

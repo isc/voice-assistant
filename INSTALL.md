@@ -7,7 +7,7 @@ Ollama, the server run by systemd). A Mac with Apple Silicon works for developme
 
 - Python 3.11+
 - Linux with an NVIDIA GPU (STT through onnx-asr on CUDA), or macOS on Apple Silicon (STT through MLX)
-- espeak-ng (`apt install espeak-ng` / `brew install espeak-ng`)
+- A Hugging Face account that accepted the conditions of [gradium/phonon-40m-fr](https://huggingface.co/gradium/phonon-40m-fr), the TTS model (gated, CC BY-NC 4.0)
 - Home Assistant instance (optional, for device control; also gives the home's location and time zone)
 - ESPHome device with wake word support (ESP32-S3, e.g. Home Assistant Voice PE)
 - An OpenAI-compatible LLM endpoint: Ollama or llama.cpp locally, or a cloud API
@@ -20,7 +20,7 @@ All configuration goes through environment variables, listed in
 ### Install
 
 ```bash
-sudo apt install python3-venv espeak-ng
+sudo apt install python3-venv ffmpeg
 sudo locale-gen fr_FR.UTF-8                           # dates are spoken in French
 sudo git clone https://github.com/isc/voice-assistant /opt/voice-assistant
 cd /opt/voice-assistant
@@ -30,9 +30,9 @@ sudo venv/bin/pip install -r requirements-linux.txt -c constraints-linux.txt   #
 
 `constraints-linux.txt` pins the versions charras runs (`pip freeze`, 2026-10-11): requirements are
 unpinned, and a fresh install would otherwise pull versions this code never ran with
-(aioesphomeapi 46, kokoro-onnx 0.6 on that date). Refresh it with `venv/bin/pip freeze` after an upgrade.
+(aioesphomeapi 46 on that date). Refresh it with `venv/bin/pip freeze` after an upgrade.
 
-The STT then runs on the CPU, with the `onnxruntime` that kokoro-onnx pulls in. For the GPU, swap
+The STT then runs on the CPU, with the `onnxruntime` of `requirements.txt`. For the GPU, swap
 it for the CUDA build and its CUDA 13 libraries:
 
 ```bash
@@ -62,6 +62,14 @@ docker exec ollama ollama pull gemma4:12b   # with its MTP draft, which Ollama r
 # Ollama gives it a 4096-token context on a 16 GB card; the prompt of a house with ~70 devices
 # outgrows it. A derived model with 8192 shares the weights (+0.3 GB of VRAM):
 docker exec ollama sh -c 'printf "FROM gemma4:12b\nPARAMETER num_ctx 8192\n" > /tmp/Modelfile-8k && ollama create gemma4:12b-8k -f /tmp/Modelfile-8k'
+```
+
+The TTS model, Phonon 40M French, downloads at the first start (~75 MB, into Hugging Face's cache)
+with the token of an account that accepted its conditions; log it in once, as the service's user.
+Later starts read the cache, network or not.
+
+```bash
+sudo venv/bin/hf auth login
 ```
 
 ### Configure
@@ -110,6 +118,7 @@ Deploying, reloading and logs: see [CLAUDE.md](CLAUDE.md#deployment-and-service-
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements-mac.txt   # adds parakeet-mlx for the STT
+hf auth login                         # once: the TTS model is gated (see Prerequisites)
 cp .env.example .env                  # ESP and Home Assistant addresses
 ```
 

@@ -1,28 +1,29 @@
-"""Text-to-Speech using Kokoro-82M with French G2P via misaki/espeak."""
+"""Text-to-Speech: Phonon 40M French (Gradium), voice Noémie, on the CPU (AD-103)."""
 
 import asyncio
 import hashlib
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
 
-import onnx_gpu
-
 logger = logging.getLogger(__name__)
 
-# Next to the code, not in /tmp: /tmp is emptied at boot, and the server could not start without GitHub
-MODELS_DIR = Path(__file__).parent / "models"
-MODEL_PATH = MODELS_DIR / "kokoro-v1.0.onnx"
-VOICES_PATH = MODELS_DIR / "voices-v1.0.bin"
+# Gated on Hugging Face (CC BY-NC 4.0): downloaded at the first start into its cache, by an account that
+# accepted its conditions (`hf auth login`); later starts read the cache, network or not. Pinned, with
+# the voice: a new revision is a new voice, to hear before it speaks to the family
+MODEL = "hf://gradium/phonon-40m-fr@d91086970206b88efd2c88ca971d0628b5968f0f"
+VOICE = "Noémie"
+VOICE_CATALOG = "hf://gradium/phonon-voices@da6c9ec0d47be8df5c87c730a3aa97187f3229c3"
+# A 4 s reply in 0.23 s on charras's i5-14400F, its first audio after 28 ms; 0.54 s on one thread
+THREADS = 4
 # Replies are fetched once by the speaker, right after being written
 _REPLY_MAX_AGE = 600  # seconds
-MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
-VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
-# Clock times as the LLM writes them: "17h34", "7h", "17:34". espeak reads the "h" as the letter.
+# Clock times as the LLM writes them: "17h34", "7h", "17:34". Phonon's normalizer leaves them as written.
 _CLOCK_TIME = re.compile(r"\b([01]?\d|2[0-3])(?:h([0-5]\d)?|:([0-5]\d))(?![\w:])")
 # Hours and minutes are feminine: "une heure", "vingt et une heures", "dix heures trente et une"
 _FEMININE = {1: "une", 21: "vingt et une", 31: "trente et une", 41: "quarante et une", 51: "cinquante et une"}
@@ -40,63 +41,27 @@ def spell_times(text: str) -> str:
     return _CLOCK_TIME.sub(spell, text)
 
 
-class KokoroTTS:
-    """Kokoro-82M TTS engine with French phonemization."""
+class PhononTTS:
+    """Phonon on the CPU: no ONNX Runtime, no room taken on the card the LLM needs."""
 
     def __init__(self):
         self.engine = None
-        self.g2p = None
+        self._executor = ThreadPoolExecutor(1, thread_name_prefix="tts")  # one synthesis at a time, off the loop
 
     async def init(self):
-        """Initialize Kokoro TTS and French G2P."""
-        logger.info("Initializing Kokoro TTS...")
-        from misaki.espeak import EspeakG2P
-
-        MODELS_DIR.mkdir(exist_ok=True)
-
-        if not MODEL_PATH.exists() or not VOICES_PATH.exists():
-            logger.info("Downloading Kokoro models...")
-            import urllib.request
-
-            if not MODEL_PATH.exists():
-                logger.info("  Downloading kokoro-v1.0.onnx (~310MB)...")
-                urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-            if not VOICES_PATH.exists():
-                logger.info("  Downloading voices-v1.0.bin (~27MB)...")
-                urllib.request.urlretrieve(VOICES_URL, VOICES_PATH)
-        else:
-            logger.info("Kokoro models already cached")
-
-        # load's test run makes CUDA handles for its thread: the models' one
-        self.engine = await onnx_gpu.run(onnx_gpu.load, self._engine, self._run_once, "TTS")
-        self.g2p = EspeakG2P(language="fr-fr")
-        logger.info(f"Kokoro TTS ready ({self.device}, voice: ff_siwis, French G2P via espeak)")
+        logger.info("Initializing Phonon TTS...")
+        self.engine = await asyncio.get_running_loop().run_in_executor(self._executor, self._load)
+        logger.info(f"Phonon TTS ready (cpu, {THREADS} threads, voice: {VOICE})")
 
     @staticmethod
-    def _engine(gpu: bool):
-        """Kokoro on our own session: kokoro-onnx 0.5 looks for the GPU package under a name
-        find_spec never finds, and ran on the CPU (0.18 x real time)."""
-        import kokoro_onnx
-        import onnxruntime
+    def _load():
+        import ptts
 
-        session = onnxruntime.InferenceSession(str(MODEL_PATH), **onnx_gpu.session_kwargs(gpu))
-        return kokoro_onnx.Kokoro.from_session(onnx_gpu.shrinking(session), str(VOICES_PATH))
-
-    @staticmethod
-    def _speak(engine, phonemes: str):
-        return engine.create(phonemes, voice="ff_siwis", speed=1.0, lang="fr-fr", is_phonemes=True)
-
-    @classmethod
-    def _run_once(cls, engine):
-        cls._speak(engine, "a")
-
-    @property
-    def device(self) -> str:
-        return onnx_gpu.device(self.engine.sess)
-
-    async def retry_gpu(self):
-        """Back on CUDA if it works now."""
-        self.engine = await onnx_gpu.run(onnx_gpu.retry, self._engine, self._run_once, "TTS") or self.engine
+        ptts.set_num_threads(THREADS)
+        # The CPU said: "auto" would take a CUDA build's card, the LLM's
+        engine = ptts.TTS(MODEL, device="cpu", lang="fr", quant="q8_0", voice=VOICE, voice_catalog=VOICE_CATALOG)
+        engine.synth("Bonjour.")  # the voice found, the first run's allocations made
+        return engine
 
     async def synthesize_to_file(self, text: str, output_dir: Path, base_url: str) -> str:
         """Generate a 48 kHz FLAC file and return its URL."""
@@ -117,30 +82,28 @@ class KokoroTTS:
 
         logger.info(f"Synthesizing: '{clean_text[:80]}...'")
 
-        # French phonemization via espeak (misaki EspeakG2P returns (phonemes, tokens))
-        phonemes = self.g2p(clean_text)
-        if isinstance(phonemes, tuple):
-            phonemes = phonemes[0]
-        logger.info(f"Phonemes: {phonemes}")
-
-        # Generate audio with Kokoro (runs sync, on the models' thread)
-        audio_24k, sr = await onnx_gpu.run(self._speak, self.engine, phonemes)
-
-        logger.info(f"Kokoro output: {len(audio_24k)} samples at {sr}Hz")
-
-        # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
-        audio_int16 = (np.clip(audio_24k, -1.0, 1.0) * 32767).astype(np.int16)
-
         # FLAC: the Voice PE's firmware decodes FLAC and MP3 since 26.x (ESPHome 2026.6), no longer WAV.
         # 48 kHz mono, its announcement format: ffmpeg resamples here, so the satellite runs no resampler
         # beside its wake word models (a 16 kHz reply stuttered). ffmpeg writes to a file so that
-        # STREAMINFO holds the length (flac_seconds); ~35 ms.
+        # STREAMINFO holds the length (flac_seconds). Started during the synthesis: ~35 ms less.
+        sr = self.engine.sample_rate
         ffmpeg = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "s16le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
             "-ar", "48000", "-c:a", "flac", str(output_path),
             stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )  # fmt: skip
+        t0 = time.time()
+        try:
+            audio = await asyncio.get_running_loop().run_in_executor(self._executor, self.engine.synth, clean_text)
+        except BaseException:
+            ffmpeg.kill()
+            await ffmpeg.wait()
+            raise
+        logger.info(f"Phonon output: {len(audio) / sr:.1f} s of speech in {time.time() - t0:.2f} s")
+
+        # Convert float32 [-1, 1] -> int16 (PCM 16-bit)
+        audio_int16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
         _, error = await ffmpeg.communicate(audio_int16.tobytes())
         if ffmpeg.returncode:
             raise RuntimeError(f"ffmpeg: {error.decode().strip()}")

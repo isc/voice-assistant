@@ -7,7 +7,7 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 ### Voice pipeline
 - Wake word detection via ESPHome, automatic end-of-speech detection (Silero VAD); no transcription when nobody spoke
 - Local STT: Parakeet TDT 0.6B v3, via onnx-asr on Linux/CUDA or MLX on Apple Silicon
-- Local TTS: Kokoro-82M with French phonemization (misaki/espeak), one announcement per reply
+- Local TTS: Phonon 40M French (Gradium), voice Noémie, on the CPU, one announcement per reply
 - Continuous conversation: follow-ups without the wake word, closed cleanly on "merci", "bonne nuit"; context kept 10 minutes
 
 ### Home automation
@@ -56,7 +56,7 @@ ESP (wake word) → audio stream → voice_server.py
                                    │    ├─ calendar_client.py → Google Calendar API
                                    │    ├─ spotify.py → go-librespot + Spotify Web API
                                    │    └─ images.py → Wikipedia / Openverse, cast to a Nest Hub
-                                   ├─ tts.py (Kokoro-82M) → FLAC audio
+                                   ├─ tts.py (Phonon 40M, CPU) → FLAC audio
                                    └─ web_ui.py → debug UI on :8888
 Speakers fetch /tts/*.flac, radio streams and /spotify/stream.mp3 over HTTP.
 ```

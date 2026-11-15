@@ -17,7 +17,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
                                    │    ├─ calendar_client.py → Google Calendar API (OAuth2)
                                    │    ├─ spotify.py → go-librespot (playback) + Spotify Web API (search)
                                    │    └─ images.py → Wikipedia / Openverse (free, no key) → the web app, or cast to a Nest Hub
-                                   ├─ tts.py (Kokoro-82M) → FLAC file
+                                   ├─ tts.py (Phonon 40M, CPU) → FLAC file
                                    ├─ web_ui.py → the web app on :8888 (static/index.html)
                                    └─ push.py → Web Push: a timer set from a phone rings there
 ```
@@ -31,9 +31,9 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `llm.py` | LLM integration: chat completion, tool definitions, text-to-tool-call fallback parser |
 | `timer.py` | Timer manager: in-memory timers with asyncio scheduling, ESP native timer events; each remembers the browser that set it and whether its satellite shows it (AD-070) |
 | `push.py` | Web Push to the web app's browsers (RFC 8291 encryption, RFC 8292 VAPID, over `cryptography`): the server's key and each browser's subscription in `push.json` (600, gitignored, made at first start) |
-| `tts.py` | Kokoro-82M TTS with French G2P (misaki/espeak), 48 kHz mono FLAC through ffmpeg (the Voice PE decodes no WAV) |
+| `tts.py` | Phonon 40M French (Gradium), voice Noémie, on the CPU (AD-103): 48 kHz mono FLAC through ffmpeg (the Voice PE decodes no WAV). The model, gated on Hugging Face, downloads once into its cache |
 | `stt.py` | Parakeet TDT 0.6B v3: onnx-asr on Linux/CUDA (server) or parakeet-mlx on Apple Silicon (Mac dev), picked by `STT_BACKEND` |
-| `onnx_gpu.py` | ONNX Runtime on the GPU shared with Ollama: one thread for STT and TTS runs, CUDA arenas that give their memory back after each run (AD-053), the CPU when CUDA fails (AD-055) |
+| `onnx_gpu.py` | ONNX Runtime on the GPU shared with Ollama: one thread for the STT's runs, CUDA arenas that give their memory back after each run (AD-053), the CPU when CUDA fails (AD-055) |
 | `weather.py` | Open-Meteo weather API: geocoding, current conditions, 5-day forecast (French) |
 | `places.py` | Shops and places from OpenStreetMap, nearest to the home first: address, phone, the week's opening hours read by opening-hours-py; an event's place as its address (`address_of`, AD-072) |
 | `calendar_client.py` | Google Calendar client: OAuth2, event queries, event creation, and changes to an event in place (`update_event`: the conversation's own first, AD-072), prompt summary |
@@ -64,7 +64,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 6. If text response → check the fallback parser for a tool call written as text (`fn({...})`)
 7. Final LLM round formulates natural spoken response from tool results
    - Steps 4-7 past 5 s: « Un petit instant. » meanwhile, by the satellite's media player, which keeps the run open, or the app's `wait` message (AD-079)
-8. TTS: Kokoro generates FLAC (ffmpeg), played via announcement API with `start_conversation=True`
+8. TTS: Phonon generates FLAC (ffmpeg) on the CPU, played via announcement API with `start_conversation=True`
 9. ESP automatically starts listening for follow-up (no wake word needed)
 10. If no speech within 5s, or a follow-up in another language than the conversation's (AD-093) → conversation ends. If `end_conversation` tool was called → no follow-up.
 
@@ -135,7 +135,7 @@ journalctl -u voice-assistant -f          # logs
 ```
 
 `systemctl restart` returns before the models are loaded: the server is up once the journal says
-`Server running` (`Fatal error` otherwise), or `curl -s localhost:8888/health` answers 200. There, `status: degraded` with `device: cpu` under `stt` or `tts`: that model runs on the CPU, the card was full (AD-055).
+`Server running` (`Fatal error` otherwise), or `curl -s localhost:8888/health` answers 200. There, `status: degraded` with `device: cpu` under `stt`: Parakeet runs on the CPU, the card was full (AD-055). The TTS is always on the CPU (AD-103).
 
 On a Mac (dev), `./run.sh` runs the server in the foreground, and `ctl.sh` wraps launchd:
 

@@ -4789,7 +4789,7 @@ class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
             self.assertIn(self.ERROR, logs.output[0])
             self.assertEqual(onnx_gpu.load(lambda gpu: gpu or "on the CPU", self.stale_error, "STT"), "on the CPU")
         with patch.object(onnx_gpu, "has_cuda", return_value=False):  # a Mac
-            self.assertEqual(onnx_gpu.load(self.build, self.runs, "TTS"), "on the CPU")
+            self.assertEqual(onnx_gpu.load(self.build, self.runs, "STT"), "on the CPU")
 
     def test_retry(self):
         import onnx_gpu
@@ -4800,7 +4800,7 @@ class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
 
     async def test_tried_again_between_requests_until_back(self):
         server = make_server()
-        server.stt, server.tts = MagicMock(device="cpu"), MagicMock(device="cuda")
+        server.stt = MagicMock(device="cpu")
         server._pipeline_running = True
         attempts = 0
 
@@ -4818,7 +4818,6 @@ class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
             server._pipeline_running = False
             await asyncio.wait_for(task, 1)
         self.assertEqual(attempts, 2)
-        server.tts.retry_gpu.assert_not_called()
 
     async def test_health(self):
         server = make_server()
@@ -4826,7 +4825,7 @@ class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
         server.calendar_client = None
         server.sites[0].ha_client = make_client()
         server.stt = MagicMock(model=object(), device="cpu")
-        server.tts = MagicMock(engine=object(), device="cuda")
+        server.tts = MagicMock(engine=object())
         app = web.Application()
         setup_routes(app, server)
         async with TestClient(TestServer(app)) as client:
@@ -4835,6 +4834,9 @@ class TestModelsOnTheCPU(unittest.IsolatedAsyncioTestCase):
                 body = await response.json()
                 self.assertEqual((response.status, body["status"]), (200, "degraded"))
                 self.assertEqual(body["components"]["stt"]["device"], "cpu")
+                server.stt.device = "cuda"  # the TTS on the CPU, as always (AD-103)
+                self.assertEqual((await (await client.get("/health")).json())["status"], "ok")
+                server.stt.device = "cpu"
             with patch("onnx_gpu.has_cuda", return_value=False):  # a Mac
                 self.assertEqual((await (await client.get("/health")).json())["status"], "ok")
 
@@ -5028,7 +5030,7 @@ class TestCalendarAtStartup(unittest.IsolatedAsyncioTestCase):
 
         engines = {"stt": MagicMock(), "tts": MagicMock()}
         engines["stt"].ParakeetSTT.return_value.init = AsyncMock()
-        engines["tts"].KokoroTTS.return_value.init = AsyncMock()
+        engines["tts"].PhononTTS.return_value.init = AsyncMock()
         with (
             patch.dict(sys.modules, engines),
             patch("onnx_gpu.lost_cuda", return_value=False),

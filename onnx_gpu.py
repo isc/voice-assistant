@@ -1,4 +1,4 @@
-"""ONNX Runtime on a GPU shared with Ollama: the STT and TTS models' runs and memory (AD-053).
+"""ONNX Runtime on a GPU shared with Ollama: the STT models' runs and memory (AD-053).
 
 Per session, ONNX Runtime keeps an arena that grows to fit each new input length and never hands
 memory back. With requests and replies of a new length every time, the voice server went from 4.6
@@ -72,7 +72,7 @@ def _on_cuda(build, check):
 
 def load(build, check, name: str):
     """build(gpu): on CUDA when onnxruntime has it and it works, else on the CPU, logged: there, STT
-    takes 5 times as long, TTS 10 times."""
+    takes 5 times as long."""
     if has_cuda():
         model, error = _on_cuda(build, check)
         if model is not None:

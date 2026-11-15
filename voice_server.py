@@ -469,7 +469,7 @@ class VoiceAssistantServer:
         self.last_audio_time = 0
 
         # Sub-engines (initialized in start())
-        self.tts = None  # tts.KokoroTTS
+        self.tts = None  # tts.PhononTTS
         self.stt = None  # stt.ParakeetSTT
 
         # Google Calendar client
@@ -569,13 +569,11 @@ class VoiceAssistantServer:
         logger.info(f"LLM: {LLM_MODEL or '(server default)'} at {LLM_URL} | HTTP: {HTTP_PORT}")
 
         from stt import ParakeetSTT
-        from tts import KokoroTTS
+        from tts import PhononTTS
 
-        self.stt = ParakeetSTT()
-        await self.stt.init()
-
-        self.tts = KokoroTTS()
-        await self.tts.init()
+        # Parakeet on the card, Phonon on the CPU, each on its own thread: loaded side by side
+        self.stt, self.tts = ParakeetSTT(), PhononTTS()
+        await asyncio.gather(self.stt.init(), self.tts.init())
         self._gpu_retry_task = asyncio.create_task(self._back_to_gpu())
 
         await self.init_ha_clients()
@@ -639,13 +637,12 @@ class VoiceAssistantServer:
                     logger.exception(f"Site {site.label}: Home Assistant refresh failed")
 
     async def _back_to_gpu(self):
-        """STT or TTS loaded on the CPU, CUDA failing (the card full): try CUDA again every minute,
-        between requests, until both are back on it (AD-055)."""
-        while engines := [engine for engine in (self.stt, self.tts) if onnx_gpu.lost_cuda(engine)]:
+        """The STT loaded on the CPU, CUDA failing (the card full): try CUDA again every minute,
+        between requests, until it is back on it (AD-055)."""
+        while onnx_gpu.lost_cuda(self.stt):
             await asyncio.sleep(_GPU_RETRY_SECONDS)
-            for engine in engines:
-                if not (self.is_recording or self._pipeline_running):
-                    await engine.retry_gpu()
+            if not (self.is_recording or self._pipeline_running):
+                await self.stt.retry_gpu()
 
     async def init_calendar_client(self) -> bool:
         """Connect to Google Calendar API. False when it has a token and Google did not answer."""
@@ -2798,7 +2795,7 @@ class VoiceAssistantServer:
         """Speak a reply on the satellite, in one announcement.
         Returns timing dict with 'gen' (generation) and 'play' (playback) durations.
 
-        One file for the whole reply: Kokoro takes ~0.1 s a sentence on the GPU, and the Voice PE
+        One file for the whole reply: Phonon takes ~0.06 s a second of speech, and the Voice PE
         (ESPHome 2026.6) stops its mixer 0.4-0.8 s after an announcement ends, under the next one
         if it starts by then: a second sentence after a short first hung, unheard (AD-054).
         """
