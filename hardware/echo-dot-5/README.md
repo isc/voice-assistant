@@ -51,9 +51,39 @@ its visible face is the one with the microphones and the converter.
 
 ### Main board (replaced)
 
-A disc with four mounting holes and four larger holes the case screws pass through. Its diameter is
-about **77 mm**, within 1 mm: 76.3 mm read against a ruler lying on the components, some 5 mm above
-the board and so nearer the camera, on a photo taken at an angle. To confirm by a direct reading.
+A disc with a flat cut where the power socket sits, four mounting holes and four larger holes the
+case screws pass through. Its diameter is about **77 mm**, within 1 mm: 76.3 mm read against a ruler
+lying on the components, some 5 mm above the board and so nearer the camera, on a photo taken at an
+angle. To confirm by a direct reading.
+
+#### Where things sit
+
+Both faces were photographed square on (the outline fits a circle to 0.1 %, and 0.4 %). The two
+photos in `photos/` are cut and scaled from them: **20 pixels a millimetre**, the disc's centre at the
+image's centre, taking the diameter as 77 mm. A point at pixel (x, y) is at ((x − 800) / 20,
+(800 − y) / 20) mm.
+
+Seen from the face with the connectors, the power socket up, origin at the disc's centre, x to the
+right and y up, in millimetres:
+
+| What | Where | Size |
+|---|---|---|
+| Flat cut of the outline | y ≈ +36.7 | |
+| Passages of the four case screws | (−17.4, +16.3), (+16.7, +16.3), (−16.8, −17.3), (+16.5, −17.4) | holes of about 6 mm |
+| Holes of the board's four screws | (−13.6, +20.9), (+13.7, +21.6), (−18.9, −10.7), (+19.2, −9.6) | about 3.1 mm |
+| Two more holes, either side of the debug header | (−6.0, +21.8), (+5.4, +21.8) | about 3.2 mm |
+| Twelve LEDs, on the other face | a circle of radius 33.0, every 30°, one on each axis | |
+| Power socket `J3` | centre about (−2, +32.5) | body about 17 × 10 |
+| Microphone connector `J4` | centre about (−28.5, +12.7), its length along y | about 9 long |
+| Display connector `J1` | centre about (−24, −24.5), turned some 35° | |
+| Speaker contacts `P1`, `P2` | about (+32, +13) and (+32, +10) | |
+
+The holes and the LEDs are fitted on the photos (a circle on each hole's edge; the LEDs' dark
+outlines), the holes on both faces, which agree to about 1 mm. The connectors, the socket and the
+contacts are read by eye on the scaled photo. All of it is good to **about 1 mm**: enough for a
+paper outline printed at full size and tried on the chassis, not for ordering a board. The holes do
+not come out symmetrical (each right one 0.5 to 1 mm higher than its left one, on both faces):
+real or not, a caliper will say.
 
 Face towards the base ([photo](photos/main-board-bottom.jpg)):
 
@@ -80,7 +110,8 @@ Face towards the chassis ([photo](photos/main-board-top.jpg), [in place](photos/
 
 ### Microphone and button board (kept)
 
-[Photo](photos/mic-board.jpg), lit from the side so that the laser markings show.
+[Photo](photos/mic-board.jpg), lit from the side so that the laser markings show, and
+[another](photos/mic-board-tracks.jpg) in even light, where the labels and the tracks read better.
 
 - `U23`: marked `5704` / `2176`, 28 pins (7 a side). **Inferred** to be an AKM **AK5704**, a
   four-channel 32-bit converter with microphone preamplifiers in a 4 × 4 mm 28-pin package, which is
@@ -90,6 +121,8 @@ Face towards the chassis ([photo](photos/main-board-top.jpg), [in place](photos/
   through the converter. **Inferred.**
 - `U1`, `U3`, `U6`, `VR1`: markings not read. `U25` is an empty footprint.
 - About thirty gold test pads labelled `TM1`…`TM39` and `TP1`…`TP4`.
+- The tracks seen on this face leave the connector `J1` for a millimetre or two, then go through
+  vias to inner layers: the cable's pinout does not read on a photo.
 - The other face, not seen, carries the four buttons, two LEDs and a light sensor (**from** Dorey).
 
 ### Clock display (kept if it can be driven)
@@ -151,8 +184,8 @@ Tools were missing on 2026-11-15: no multimeter, no logic analyzer.
 3. **The power plug's dimensions.** Its polarity is read on the label: measure it once before
    powering a board of ours.
 4. **The speaker's impedance**: across its two pads.
-5. **Dimensions**: where the board's holes, connectors, socket and LEDs sit, from photos taken square
-   on with nothing lying on the board.
+5. **Dimensions to a tenth of a millimetre**, with a caliper: the diameter, the holes, the socket and
+   both connectors. The photos give them to about 1 mm.
 6. The unread chips of the microphone board, and the amplifier `AR1`.
 
 ## Sources
