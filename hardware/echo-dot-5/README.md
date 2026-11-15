@@ -70,8 +70,8 @@ right and y up, in millimetres:
 | What | Where | Size |
 |---|---|---|
 | Flat cut of the outline | y ≈ +36.6 | |
-| Passages of the four case screws | (−17.4, +16.3), (+16.7, +16.3), (−16.8, −17.3), (+16.5, −17.4) | holes of about 6 mm |
-| Holes of the board's four screws | (−13.6, +20.9), (+13.7, +21.6), (−18.9, −10.7), (+19.2, −9.6) | about 3.1 mm |
+| Passages of the four case screws | (−17.4, +16.3), (+16.7, +16.3), (−16.8, −17.3), (+16.5, −17.4) | holes of 5.4 mm by the caliper (5.6 to 6.1 on the photos) |
+| Holes of the board's four screws | (−13.6, +20.9), (+13.7, +21.6), (−18.9, −10.7), (+19.2, −9.6) | 2.9 mm by the caliper (3.1 on the photos) |
 | Two more holes, either side of the debug header | (−6.0, +21.8), (+5.4, +21.8) | about 3.2 mm |
 | Twelve LEDs, on the other face | a circle of radius 33.0, every 30°, one on each axis | each in a window of the ring |
 | Power socket `J3` | centre about (−2, +32.5) | body about 17 × 10 |
@@ -93,7 +93,7 @@ Face towards the base ([photo](photos/main-board-bottom.jpg)):
 - Twelve RGB LEDs around the edge (`DS1`…`DS12`), the light ring. **Counted.**
 - A white ring lies on this face along the edge, with a window for each LED. Seen edge on, it is a
   layer of its own, 0.3 to 0.5 mm wider than the board all round. **Inferred** from photos: its
-  thickness and how it is held on the board are not known. Ring and board together are 1.6 to 1.9 mm
+  thickness and how it is held on the board are not known. Ring and board together are 1.3 to 1.9 mm
   thick, from a blurred photo of the caliper's jaws on them.
 - `U15`: TI **LP5036**, a 36-channel I2C LED driver; twelve RGB LEDs are 36 channels. **Read.**
 - `U7`: MediaTek **MT6398BN**, the processor's power management. **Read.**
@@ -189,8 +189,8 @@ Tools were missing on 2026-11-15: no multimeter, no logic analyzer.
 A digital caliper is at hand, without its battery. Its beam is graduated in millimetres, and the
 opening reads where the slider's edge crosses that scale. On a photo of the jaws closed on the power
 plug, the edge reads 4.3 where the jaws, measured on the same photo against the scale, are 4.05 mm
-apart: the edge reads **0.25 mm too much**, taken off the readings above. With a battery it reads to
-0.01 mm.
+apart: the edge reads **0.25 mm too much**, taken off the readings above. The holes are taken with
+its inside jaws, one of each kind. With a battery it reads to 0.01 mm.
 
 1. **The 25-contact cable's pinout**: which contact is power, ground, I2C, the audio clocks and data,
    each button, each LED. With a multimeter, by continuity from the cable to the test pads and to the
