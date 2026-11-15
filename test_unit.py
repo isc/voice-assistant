@@ -16,6 +16,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -1508,6 +1509,18 @@ class TestVacuumFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tools["vacuum"]["home"]["enum"], ["paris", "charras"])
         del self.paris.ha_client.entities[VACUUM]
         self.assertNotIn("vacuum", {t["name"] for t in self.server._tools()})
+
+
+class TestAppWords(unittest.TestCase):
+    def test_every_tool_has_its_words_in_the_app(self):
+        """A call the web app has no verb and icon for shows the tool's name: « vacuum », under a reply (2026-11-15)."""
+        html = (Path(__file__).parent / "static" / "index.html").read_text()
+        said = set(re.findall(r"(\w+): \[", re.search(r"\nconst TOOLS = \{(.*?)\n\};", html, re.S)[1]))
+        every = get_tool_definitions(
+            make_client(), MagicMock(), music=True, homes=("paris", "charras"), locks=True, heating=["Auto"],
+            alarm=["absence"], vacuum=True,
+        )  # fmt: skip
+        self.assertEqual({t["name"] for t in every} - said, {"end_conversation"})  # never shown
 
 
 HEATING_MODES = ["Off", "Auto", "Confort", "Réduit"]
