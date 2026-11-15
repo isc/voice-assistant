@@ -77,7 +77,7 @@ class TimerManager:
         satellite: bool = True,
     ) -> Timer:
         """Create a timer that fires at a specific time (HH:MM). Wraps to next day if past."""
-        hour, minute = _parse_time(time_str)
+        hour, minute = parse_time(time_str)
         now = datetime.now()
         target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if target <= now:
@@ -153,23 +153,16 @@ class TimerManager:
             logger.error(f"Timer error: {e}")
 
 
-def _parse_time(time_str: str) -> tuple[int, int]:
-    """Parse a time string like '7:00', '07:00', '7h', '7h30' into (hour, minute)."""
+def parse_time(time_str: str) -> tuple[int, int]:
+    """Parse a time string like '7:00', '07:00', '7h', '7h30', '9 h 30' into (hour, minute); ValueError else."""
     time_str = time_str.strip().lower()
-
-    # "7h30", "07h00", "7h"
-    if "h" in time_str:
-        parts = time_str.split("h")
-        hour = int(parts[0])
-        minute = int(parts[1]) if parts[1] else 0
-        return hour, minute
-
-    # "7:00", "07:00"
-    if ":" in time_str:
-        parts = time_str.split(":")
-        return int(parts[0]), int(parts[1])
-
-    # "700", "0700" — unlikely but handle
+    # "7h30", "07h00", "7h", then "7:00", "07:00"
+    separator = "h" if "h" in time_str else ":" if ":" in time_str else None
+    if separator:
+        hour, minute = time_str.split(separator, 1)
+        hour, minute = int(hour), int(minute) if minute.strip() else 0
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            return hour, minute
     raise ValueError(f"Cannot parse time: {time_str}")
 
 

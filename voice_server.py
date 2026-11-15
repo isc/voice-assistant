@@ -40,6 +40,7 @@ from aioesphomeapi.reconnect_logic import ReconnectLogic
 from aiohttp import web
 
 import onnx_gpu
+import vacuum_schedules
 from ha_client import (
     ALARM_MODES,
     HOME_DEVICES,
@@ -1223,14 +1224,17 @@ class VoiceAssistantServer:
         "arm_alarm": ["alarm_control_panel"],
         "disarm_alarm": ["alarm_control_panel"],
         "vacuum": ["vacuum"],
+        "vacuum_schedule": ["vacuum"],
         "get_state": None,
     }
-    # The alarm tools name no device: the home's alarm (AD-083); nor does the vacuum's, the home's vacuum (AD-106)
+    # The alarm tools name no device: the home's alarm (AD-083); nor do the vacuum's, the home's vacuum (AD-106,
+    # AD-108)
     _ALARM_TOOLS = {"arm_alarm", "disarm_alarm"}
-    _HOME_DEVICE_TOOLS = _ALARM_TOOLS | {"vacuum"}
+    _HOME_DEVICE_TOOLS = _ALARM_TOOLS | {"vacuum", "vacuum_schedule"}
     # The calls that may name another home: its door from this one, its heating, its alarm, its vacuum, its states
-    # (AD-068, AD-071, AD-083, AD-106)
-    _ANY_HOME = {"lock", "unlock", "arm_alarm", "disarm_alarm", "set_heating", "vacuum", "get_state", "get_sensor"}
+    # (AD-068, AD-071, AD-083, AD-106, AD-108)
+    _ANY_HOME = {"lock", "unlock", "arm_alarm", "disarm_alarm", "set_heating", "vacuum", "vacuum_schedule", "get_state",
+                 "get_sensor"}  # fmt: skip
 
     def _home_named(self, arguments: dict) -> Optional[tuple[Site, dict]]:
         """The home a call names, and its arguments as read there: its `home`, else a home's name said in
@@ -1506,6 +1510,8 @@ class VoiceAssistantServer:
             return await self._alarm(function_name, arguments, entity_ids, call)
         if function_name == "vacuum":
             return await self._vacuum(arguments, entity_ids)
+        if function_name == "vacuum_schedule":
+            return await self._vacuum_schedule(arguments, entity_ids)
 
         extra = {}
         if function_name == "set_temperature" and "temperature" in arguments:
@@ -1602,6 +1608,12 @@ class VoiceAssistantServer:
         if (action := str(arguments.get("action") or "")) not in VACUUM_ACTIONS:
             return f"Rien n'a été fait : précise l'action ({', '.join(VACUUM_ACTIONS)})"
         return await self.ha_client.vacuum(entity_ids[0], action, str(arguments.get("room") or ""))
+
+    async def _vacuum_schedule(self, arguments: dict, entity_ids: list[str]) -> str:
+        """The home's robot vacuum's weekly schedules, its own, read or changed (AD-108)."""
+        if len(entity_ids) > 1 or not self.ha_client.robot_schedules:
+            return "Rien n'a été fait : les programmations de cet aspirateur ne se changent que dans son application"
+        return await vacuum_schedules.run(self.ha_client, entity_ids[0], arguments)
 
     async def _alarm(self, function_name: str, arguments: dict, entity_ids: list[str], call: dict) -> str:
         """The home's alarm armed in the mode asked, or proposed for disarming from the web app (AD-083)."""
@@ -2515,6 +2527,7 @@ class VoiceAssistantServer:
         heating = list(dict.fromkeys(mode for client in clients for mode in client.heating_modes))
         alarm = list(dict.fromkeys(mode for client in clients for mode in client.alarm_modes()))
         robots = [robot for client in clients for robot in client.vacuums]
+        schedules = any(client.robot_schedules and client.vacuums for client in clients)
         vacuum_rooms = list(dict.fromkeys(room for robot in robots for room in vacuum_map(robot).get("rooms", ())))
         return get_tool_definitions(
             self.ha_client,
@@ -2526,6 +2539,7 @@ class VoiceAssistantServer:
             alarm=alarm,
             vacuum=bool(robots),
             vacuum_rooms=vacuum_rooms,
+            vacuum_schedules=schedules,
         )
 
     def _continue(self, conversation) -> None:

@@ -186,6 +186,32 @@ def vacuum_map(entity_id: str) -> dict:
     return LOCAL_CONFIG.get("vacuum_rooms", {}).get(entity_id, {})
 
 
+class Refusal(Exception):
+    """Why nothing was done, said after « Rien n'a été fait : »."""
+
+
+def wants_whole_home(room: Optional[str]) -> bool:
+    """No room, or the home itself said (« partout », « tout le logement », « l'appartement »)."""
+    return not room or is_whole_house(room) or asks_every_room(room)
+
+
+def map_rooms(entity_id: str, room: str, name: str) -> list[str]:
+    """The rooms of a robot vacuum's map a room argument names (AD-107); raises Refusal, said with its `name`."""
+    if not (regions := vacuum_map(entity_id).get("rooms")):
+        raise Refusal(f"{name} ne connaît pas les pièces, il ne fait que tout le logement")
+    rooms, unknown = rooms_named(room, list(regions))
+    if unknown or not rooms:
+        raise Refusal(f"{name} ne connaît pas « {', '.join(unknown) or room} ». Ses pièces : {', '.join(regions)}")
+    return rooms
+
+
+def rooms_params(plan: dict, regions: list[str]) -> dict:
+    """A start's params that keep it to these regions of a robot's map, as iRobot's app sends them and its
+    schedules hold them."""
+    rooms = [{"region_id": region, "type": "rid"} for region in regions]
+    return {"ordered": 1, "pmap_id": plan["pmap_id"], "regions": rooms, "user_pmapv_id": plan["user_pmapv_id"]}
+
+
 # difflib ratio for a misheard name: at 0.4, « télé » found the light « Entrée » (0.5) and « lumière »
 # Charlie's « Plafonnier » (0.47); a typo or a plural stays above 0.8
 _FUZZY_CUTOFF = 0.75
@@ -288,6 +314,8 @@ _VACUUM_STATES = {
 VACUUM_ACTIONS = {"start": {"cleaning"}, "pause": {"paused", "docked", "idle"}, "return_to_base": {"returning", "docked"}}
 # How long a robot vacuum takes to say it does what it was told: Paris's Roomba, over its local MQTT
 VACUUM_CONFIRM_SECONDS = 10
+# The services that read and write a Roomba's schedules: Paris's custom integration (AD-108, home-infra paris/)
+SCHEDULE_SERVICE = "roomba_schedule"
 
 
 def alarm_mode(said) -> Optional[str]:
@@ -334,6 +362,8 @@ class HAClient:
         self.setpoints: dict[str, str] = {}
         # Entities the model never reaches (_fetch_hidden): the last list read, kept when a read fails
         self.hidden: set[str] = set()
+        # Whether this HA reads and writes its Roomba's schedules: Paris's custom integration (AD-108)
+        self.robot_schedules = False
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -423,6 +453,16 @@ class HAClient:
             "{{ s.entity_id }}\n{% endfor %}"
         )
         return None if text is None else set(text.split())
+
+    async def _loaded(self, component: str) -> Optional[bool]:
+        """Whether HA has loaded an integration (`/api/config`'s components), None if it did not say."""
+        try:
+            async with self._session.get(f"{self.base_url}/api/config") as resp:
+                if resp.status == 200 and isinstance(config := await resp.json(), dict):
+                    return component in config.get("components", [])
+        except Exception as e:
+            logger.warning(f"HA config not read: {e}")
+        return None
 
     async def _fetch_screens(self) -> list[str]:
         """media_player entities with a screen — Google's Nest Hubs, told apart by device model.
@@ -533,6 +573,8 @@ class HAClient:
         if screens != self.screens:
             self.screens = screens
             logger.info(f"Screens: {', '.join(screens) or 'none'}")
+        if (schedules := await self._loaded(SCHEDULE_SERVICE)) is not None:
+            self.robot_schedules = schedules
 
     def get_entity_list_for_prompt(self) -> str:
         """Return entity names grouped by room for the system prompt."""
@@ -895,19 +937,18 @@ class HAClient:
         is so, for VACUUM_CONFIRM_SECONDS, as the robot may refuse what HA handed on (a flat battery, a full bin)."""
         wanted = VACUUM_ACTIONS[action]
         rooms = []
-        if action == "start" and room and not (is_whole_house(room) or asks_every_room(room)):
-            rooms, refusal = self._vacuum_rooms(entity_id, room)
-            if refusal:
-                return refusal
+        if action == "start" and not wants_whole_home(room):
+            try:
+                rooms = map_rooms(entity_id, room, self.display_name(entity_id))
+            except Refusal as refusal:
+                return f"Rien n'a été fait : {refusal}"
         if (state := await self.get_entity_state(entity_id)) and state.get("state") in ("unavailable", "unknown"):
             return self.vacuum_words(entity_id, state)  # off the Wi-Fi: HA would take the order and drop it
         if state and state.get("state") in wanted:
             return self.vacuum_words(entity_id, state, adverb="déjà")
         if rooms:  # HA's iRobot integration has no room: the command iRobot's app sends, as is (roombapy)
             plan = vacuum_map(entity_id)
-            regions = [{"region_id": plan["rooms"][each], "type": "rid"} for each in rooms]
-            params = {"ordered": 1, "pmap_id": plan["pmap_id"], "regions": regions}
-            params["user_pmapv_id"] = plan["user_pmapv_id"]
+            params = rooms_params(plan, [plan["rooms"][each] for each in rooms])
             error = await self._send("vacuum", "send_command", entity_id, command="start", params=params)
         else:
             error = await self._send("vacuum", action, entity_id)
@@ -916,17 +957,6 @@ class HAClient:
         done = self._build_response("vacuum", action, self.display_name(entity_id), {"rooms": rooms})
         words = partial(self.vacuum_words, entity_id)
         return await self._reached(entity_id, wanted, VACUUM_CONFIRM_SECONDS, words, done)
-
-    def _vacuum_rooms(self, entity_id: str, room: str) -> tuple[list[str], str]:
-        """The rooms of its map a start keeps to, else why it does not start."""
-        name, regions = self.display_name(entity_id), vacuum_map(entity_id).get("rooms")
-        if not regions:
-            return [], f"Rien n'a été fait : {name} ne connaît pas les pièces, il ne fait que tout le logement"
-        rooms, unknown = rooms_named(room, list(regions))
-        if unknown or not rooms:
-            said = ", ".join(unknown) or room
-            return [], f"Rien n'a été fait : {name} ne connaît pas « {said} ». Ses pièces : {', '.join(regions)}"
-        return rooms, ""
 
     async def _alarm_reached(self, entity_id: str, wanted: set[str]) -> str:
         def words(state: dict, adverb: str = "") -> str:
@@ -949,21 +979,30 @@ class HAClient:
                 logger.warning(f"{entity_id} still {state['state']} after {seconds} s, not {wanted}")
                 return f"Pas de confirmation : {words(state, adverb='toujours')} {seconds} secondes après l'ordre"
 
-    async def _send(self, domain: str, service: str, entity_id: str, **kwargs) -> Optional[str]:
-        """Post a service call: None once HA took it, else what went wrong, in French."""
-        payload = {"entity_id": entity_id, **kwargs}
+    async def _post_service(self, domain: str, service: str, payload: dict, answer: bool = False) -> tuple:
+        """Post a service call: HA's status, None when unreached, and with `answer` the service's response."""
         try:
-            url = f"{self.base_url}/api/services/{domain}/{service}"
-            logger.info(f"HA service call: {domain}.{service} -> {entity_id} {kwargs}")
+            url = f"{self.base_url}/api/services/{domain}/{service}{'?return_response' if answer else ''}"
+            logger.info(f"HA service call: {domain}.{service} -> {payload}")
             async with self._session.post(url, json=payload) as resp:
                 if resp.status == 200:
-                    return None
-                error = await resp.text()
-                logger.error(f"HA service error {resp.status}: {error}")
-                return f"Erreur lors du contrôle de {self.display_name(entity_id)}"
+                    return 200, (await resp.json()).get("service_response") if answer else None
+                logger.error(f"HA service error {resp.status}: {await resp.text()}")
+                return resp.status, None
         except Exception as e:
             logger.error(f"HA service call failed: {e}")
+            return None, None
+
+    async def _send(self, domain: str, service: str, entity_id: str, **kwargs) -> Optional[str]:
+        """Post a service call: None once HA took it, else what went wrong, in French."""
+        status, _ = await self._post_service(domain, service, {"entity_id": entity_id, **kwargs})
+        if status is None:
             return "Impossible de contacter Home Assistant"
+        return None if status == 200 else f"Erreur lors du contrôle de {self.display_name(entity_id)}"
+
+    async def service_response(self, domain: str, service: str, **data) -> Optional[dict]:
+        """A service's answer (`return_response`), None if it gave none."""
+        return (await self._post_service(domain, service, data, answer=True))[1]
 
     async def _call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
         if error := await self._send(domain, service, entity_id, **kwargs):

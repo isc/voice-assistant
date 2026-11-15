@@ -43,8 +43,8 @@ _NOT_PLACE_TYPES = set("bicycle_rental ferry_terminal parking parking_entrance t
 _NEARBY_KM = 50
 _STREETS = set("rue avenue av boulevard bd place allee chemin impasse quai route cours square passage".split())
 
-_DAYS = "lundi mardi mercredi jeudi vendredi samedi dimanche".split()
-_MONTHS = "janvier février mars avril mai juin juillet août septembre octobre novembre décembre".split()
+DAYS = "lundi mardi mercredi jeudi vendredi samedi dimanche".split()
+MONTHS = "janvier février mars avril mai juin juillet août septembre octobre novembre décembre".split()
 
 
 def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -54,7 +54,7 @@ def _distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def _date(day: date) -> str:
-    return f"{_DAYS[day.weekday()]} {day.day} {_MONTHS[day.month - 1]}"
+    return f"{DAYS[day.weekday()]} {day.day} {MONTHS[day.month - 1]}"
 
 
 def _relative(day: date, today: date) -> Optional[str]:

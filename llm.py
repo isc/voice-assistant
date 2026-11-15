@@ -10,6 +10,7 @@ from typing import Optional
 import aiohttp
 
 from ha_client import VACUUM_ACTIONS, fold
+from vacuum_schedules import SCHEDULE_ACTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ _TOOL_NAMES = {
     "arm_alarm",
     "disarm_alarm",
     "vacuum",
+    "vacuum_schedule",
 }
 
 
@@ -114,12 +116,14 @@ def get_tool_definitions(
     alarm=(),
     vacuum=False,
     vacuum_rooms=(),
+    vacuum_schedules=False,
 ) -> list:
     """Return LLM tool definitions. `homes`: the homes' names, which the door, heating, alarm and vacuum tools,
     get_state and get_sensor may name when there are several (AD-068, AD-071, AD-083, AD-106); `locks`: whether
     some home has a lock; `heating`: the modes of the homes' heating, if some home's can be set (AD-071); `alarm`:
     the modes the homes' alarms can be armed in, if some home has one (AD-083); `vacuum`: whether some home has a
-    robot vacuum (AD-106); `vacuum_rooms`: the rooms it knows, if it can clean some only (AD-107)."""
+    robot vacuum (AD-106); `vacuum_rooms`: the rooms it knows, if it can clean some only (AD-107);
+    `vacuum_schedules`: whether its weekly schedules can be changed from here (AD-108)."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -689,6 +693,53 @@ def get_tool_definitions(
                 },
             }
         ]
+        if vacuum_schedules:
+            schedule_rooms = {}
+            if vacuum_rooms:
+                schedule_rooms = {
+                    "room": {
+                        "type": "string",
+                        "description": (
+                            f"add, change : les pièces à faire, séparées par des virgules, parmi : "
+                            f"{', '.join(vacuum_rooms)} ; « tout » pour tout le logement"
+                        ),
+                    },
+                    "except_room": {"type": "string", "description": "change : les pièces à ne plus faire ce jour-là"},
+                }
+            vacuum_tools.append(
+                {
+                    "name": "vacuum_schedule",
+                    "description": (
+                        "Les programmations du robot aspirateur, les passages qu'il fait seul chaque semaine : les "
+                        "dire, en ajouter, changer l'heure ou les pièces de celle d'un jour, en supprimer, les "
+                        "désactiver ou les réactiver (« on part en vacances jusqu'au 28 » : disable avec until). "
+                        "Pas pour lancer le ménage maintenant."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": list(SCHEDULE_ACTIONS),
+                                "description": (
+                                    "show : les dire ; add : en ajouter une ; change : changer celle d'un jour ; "
+                                    "remove : supprimer celle d'un jour ; disable, enable : désactiver ou réactiver "
+                                    "celle d'un jour, ou toutes sans jour"
+                                ),
+                            },
+                            "day": {"type": "string", "description": "Le jour : lundi, mardi… Sans jour : toutes"},
+                            "time": {"type": "string", "description": "HH:MM : l'heure d'une nouvelle, ou la nouvelle"},
+                            **schedule_rooms,
+                            "until": {
+                                "type": "string",
+                                "description": "disable sans jour : la date du retour (AAAA-MM-JJ), où les réactiver",
+                            },
+                            **elsewhere,
+                        },
+                        "required": ["action"],
+                    },
+                }
+            )
 
     return [
         {

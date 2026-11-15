@@ -23,10 +23,12 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from yarl import URL
@@ -84,6 +86,9 @@ class FakeHA:
         self.states = {eid: info["state"] for eid, info in entities.items()}
         self.sensors: dict[str, dict] = {}  # a scenario's sensors, HA's whole state: the snapshot has no sensor
         self.calls: list[tuple[str, str, dict]] = []
+        from test_unit import FakeRoombaSchedule
+
+        self.robot = FakeRoombaSchedule()  # the Roomba's own schedules, through roomba_schedule (AD-108)
 
     def _state(self, entity_id: str) -> dict:
         attributes = self.entities[entity_id]["attributes"]
@@ -114,6 +119,9 @@ class FakeHA:
         if found := re.fullmatch(r"/api/services/(\w+)/(\w+)", path):
             domain, service = found.groups()
             self.calls.append((domain, service, payload))
+            if domain == "roomba_schedule":
+                data = {key: value for key, value in payload.items() if key != "entity_id"}
+                return _Response(200, {"changed_states": [], "service_response": self.robot.answer(service, data)})
             eid = payload.get("entity_id")
             if self.states.get(eid) not in (None, "unavailable"):
                 if service.startswith("alarm_arm_"):
@@ -212,6 +220,7 @@ def build_server(snapshot: dict, site: str):
     import ha_client
     from ha_client import HAClient
     from test_unit import make_server
+
     config = snapshot["config"]
     ha_client.LOCAL_CONFIG.clear()
     ha_client.LOCAL_CONFIG.update(config)
@@ -248,6 +257,7 @@ class Turn:
     sent: list[tuple[str, str, dict]]
     music: Optional[tuple[str, str]]
     wall: float
+    robot_schedule: list  # the Roomba's schedules after it (AD-108)
 
     @property
     def said(self) -> str:
@@ -372,6 +382,26 @@ def cleans(*rooms: str, home: str = ""):
         return ok, f"vacuum start in {', '.join(rooms)}" + (f" at {home}" if home else "")
 
     return check
+
+
+def schedules(test, wanted: str):
+    """The robot's schedules changed by one call, `test` true of them after (AD-108)."""
+
+    def check(t):
+        changes = [s for domain, s, _ in t.sent if domain == "roomba_schedule" and s != "get"]
+        return len(changes) == 1 and bool(test(t.robot_schedule)), wanted
+
+    return check
+
+
+def _on(schedule: list, day: int) -> list:
+    return [entry for entry in schedule if day in entry["start"]["day"]]
+
+
+def _regions(entry: dict) -> list:
+    from vacuum_schedules import regions
+
+    return regions(entry)
 
 
 def pauses_music(t):
@@ -618,6 +648,43 @@ SCENARIOS = [
     ("AD-107 a room from Charras", "charras", {}, [
         ("Passe l'aspirateur dans la cuisine à Paris.", cleans("Cuisine", home="paris"), {}),
     ]),
+    # The Roomba's own schedules, read and changed by voice (AD-108). Paris's on 2026-11-15: Monday and Thursday
+    # 8:30 the whole flat, Wednesday 9:00 off (Charlie, Zoé, the corridor), Friday 9:00 the dining room and kitchen
+    ("AD-108 the schedules said", "paris", {"vacuum.parispi": "docked"}, [
+        ("Quand est-ce que l'aspirateur passe dans la semaine ?", says(r"lundi.*vendredi|vendredi.*lundi"), {}),
+    ]),
+    ("AD-108 a bedroom left out on Mondays", "paris", {"vacuum.parispi": "docked"}, [
+        ("Le lundi, l'aspirateur ne doit plus faire la chambre de Zoé.", schedules(
+            lambda s: [_regions(e) for e in _on(s, 1)] == [["1", "2", "5", "8", "17", "18", "19", "20", "3", "7"]]
+            and [_regions(e) for e in _on(s, 4)] == [[]],
+            "Monday without Zoé's room, Thursday still the whole flat"), {}),
+    ]),
+    ("AD-108 a cleaning added", "paris", {"vacuum.parispi": "docked"}, [
+        ("Programme l'aspirateur le samedi à 10 h dans la cuisine.", schedules(
+            lambda s: [(e["start"]["hour"], e["start"]["min"], _regions(e), e["enabled"]) for e in _on(s, 6)]
+            == [(10, 0, ["7"], True)] and len(s) == 4,
+            "Saturday 10:00, the kitchen, added"), {}),
+    ]),
+    ("AD-108 Friday moved", "paris", {"vacuum.parispi": "docked"}, [
+        ("Décale la programmation de l'aspirateur du vendredi à 14 h.", schedules(
+            lambda s: [(e["start"]["hour"], e["start"]["min"], _regions(e)) for e in _on(s, 5)]
+            == [(14, 0, ["2", "7"])],
+            "Friday at 14:00, its rooms kept"), {}),
+    ]),
+    ("AD-108 Wednesday removed", "paris", {"vacuum.parispi": "docked"}, [
+        ("Supprime la programmation du mercredi de l'aspirateur.", schedules(
+            lambda s: not _on(s, 3) and len(s) == 2, "Wednesday's gone, the others kept"), {}),
+    ]),
+    ("AD-108 holidays", "paris", {"vacuum.parispi": "docked"}, [
+        ("On part en vacances jusqu'au 28 novembre, coupe les programmations de l'aspirateur.", schedules(
+            lambda s: not any(e["enabled"] for e in s), "all off"), {}),
+        ("On est rentrés, tu peux remettre les programmations de l'aspirateur ?", schedules(
+            lambda s: [e["enabled"] for e in s] == [True, False, True], "back on, Wednesday's still off"), {}),
+    ]),
+    # Now is the vacuum tool's, not a schedule
+    ("AD-108 now is not a schedule", "paris", {"vacuum.parispi": "docked"}, [
+        ("Passe l'aspirateur dans l'entrée.", cleans("Entrée"), {}),
+    ]),
     # « Mets en pause » with music playing is the music's, though the robot cleans
     ("AD-106 pause is the music's", "paris", {**PARIS_SPEAKERS, "vacuum.parispi": "cleaning"}, [
         ("Mets le prélude numéro deux de Bach sur la Sonos.", plays_on("media_player.sonos_paris"), {}),
@@ -650,7 +717,8 @@ async def replay(snapshot: dict, site: str, states: dict, turns: list):
         reply = await server.process_with_llm(None, text) or ""
         await asyncio.gather(*server._pending_service_calls, *server._background_tasks, return_exceptions=True)
         wall = round(time.monotonic() - t0, 2)
-        yield i, Turn(reply, list(server._last_tool_calls), fake.calls[sent:], server._spotify_here, wall)
+        robot = copy.deepcopy(fake.robot.schedule)
+        yield i, Turn(reply, list(server._last_tool_calls), fake.calls[sent:], server._spotify_here, wall, robot)
 
 
 async def main():

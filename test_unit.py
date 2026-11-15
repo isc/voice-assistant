@@ -13,6 +13,7 @@ Usage:
 import asyncio
 import contextlib
 import contextvars
+import copy
 import json
 import logging
 import os
@@ -211,6 +212,7 @@ def make_client() -> HAClient:
     client.screens = []
     client.setpoints = {}
     client.hidden = set()
+    client.robot_schedules = False
     client._session = None
     return client
 
@@ -1594,6 +1596,184 @@ class TestVacuumFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("vacuum", {t["name"] for t in self.server._tools()})
 
 
+# Paris's Roomba's schedules on 2026-11-15 (AD-108)
+def paris_schedule() -> list[dict]:
+    from ha_client import rooms_params
+
+    def entry(on: bool, days: list, hour: int, minute: int, *regions: str) -> dict:
+        cmd = {"command": "start", **(rooms_params(ROOMBA_MAP, list(regions)) if regions else {})}
+        return {"enabled": on, "type": 0, "start": {"day": days, "hour": hour, "min": minute}, "cmd": cmd}
+
+    return [entry(True, [1, 4], 8, 30), entry(False, [3], 9, 0, "3", "4", "20"), entry(True, [5], 9, 0, "2", "7")]
+
+
+class FakeRoombaSchedule:
+    """Paris HA's roomba_schedule services, as its custom integration answers them (home-infra paris/
+    custom_components/roomba_schedule), over a robot that takes every list sent."""
+
+    def __init__(self):
+        self.schedule, self.held, self.until, self.sent = paris_schedule(), None, None, []
+
+    def answer(self, service: str, data: dict) -> dict:
+        same = lambda a, b: {**a, "enabled": None} == {**b, "enabled": None}  # noqa: E731
+        changed = []
+        if service == "set":
+            self.schedule = copy.deepcopy(data["schedule"])
+        elif service == "suspend":
+            if changed := [{**e, "enabled": False} for e in self.schedule if e["enabled"]]:
+                self.held = [{**e, "enabled": True} for e in changed]
+                self.schedule = [{**e, "enabled": False} for e in self.schedule]
+            if self.held is not None:
+                self.until = data.get("until")
+        elif service == "resume":
+            new = [{**e, "enabled": True} if any(same(e, k) for k in self.held or []) else e for e in self.schedule]
+            changed = [e for e, was in zip(new, self.schedule) if e != was]
+            self.schedule, self.held, self.until = new, None, None
+        if service != "get":
+            self.sent.append((service, data))
+            return {"schedule": copy.deepcopy(self.schedule), "confirmed": True, "changed": changed}
+        return {"schedule": copy.deepcopy(self.schedule), "suspended": self.held is not None, "until": self.until}
+
+
+class TestVacuumSchedules(unittest.IsolatedAsyncioTestCase):
+    """The Roomba's own weekly schedules, by voice, through Paris's roomba_schedule services (AD-108)."""
+
+    def setUp(self):
+        import vacuum_schedules
+
+        self.vs = vacuum_schedules
+        roomba_map(self)
+        self.client = make_client()
+        self.client.entities[VACUUM] = robot_vacuum()
+        self.robot = FakeRoombaSchedule()
+
+        async def service(domain, service, entity_id, **data):
+            self.assertEqual((domain, entity_id), ("roomba_schedule", VACUUM))
+            return self.robot.answer(service, data)
+
+        self.client.service_response = AsyncMock(side_effect=service)
+
+    async def run_tool(self, action: str, **args) -> str:
+        return await self.vs.run(self.client, VACUUM, {"action": action, **args})
+
+    def words(self) -> str:
+        return self.vs.schedule_words(self.robot.schedule, ROOMBA_MAP)
+
+    def test_said(self):
+        self.assertEqual(
+            self.words(),
+            "Lundi et jeudi à 8 h 30 : tout le logement. Mercredi à 9 h, désactivée : Chambre Charlie, Chambre Zoé, "
+            "Couloir. Vendredi à 9 h : Salle à manger, Cuisine",
+        )
+        self.assertEqual(self.vs.days_words([0, 6, 1]), "lundi, samedi et dimanche")  # Monday first
+
+    def test_days_and_times_read(self):
+        for text, day in (("mardi", 2), ("le dimanche", 0), ("Les lundis", 1), ("Vendredi", 5)):
+            self.assertEqual(self.vs.day_of(text), day, text)
+        for text, at in (("9:30", (9, 30)), ("9h30", (9, 30)), ("10 h", (10, 0)), ("08:05", (8, 5))):
+            self.assertEqual(self.vs.time_of(text), at, text)
+        for wrong in ("demain", None):
+            self.assertRaises(self.vs.Refusal, self.vs.day_of, wrong)
+        for wrong in ("25:00", "midi", "9:75"):
+            self.assertRaises(self.vs.Refusal, self.vs.time_of, wrong)
+
+    async def test_shown(self):
+        self.assertEqual(await self.run_tool("show"), f"Programmations de l'aspirateur : {self.words()}.")
+        self.assertEqual(self.robot.sent, [])
+
+    async def test_a_room_left_out_of_one_day(self):
+        """« Le lundi, pas la chambre de Zoé »: Monday split off Monday and Thursday, the whole flat but hers."""
+        said = await self.run_tool("change", day="lundi", except_room="chambre de Zoé")
+        self.assertTrue(said.startswith("Programmation changée : lundi à 8 h 30 : Salon, Salle à manger, "), said)
+        self.assertNotIn("Zoé", said)
+        thursday, monday = self.robot.schedule[:2]
+        self.assertEqual((thursday["start"]["day"], thursday["cmd"]), ([4], {"command": "start"}))
+        self.assertEqual(monday["start"], {"day": [1], "hour": 8, "min": 30})
+        self.assertEqual(self.vs.regions(monday), ["1", "2", "5", "8", "17", "18", "19", "20", "3", "7"])
+        self.assertEqual(monday["cmd"]["pmap_id"], ROOMBA_MAP["pmap_id"])
+
+    async def test_added_moved_removed(self):
+        said = await self.run_tool("add", day="samedi", time="10:00", room="la cuisine")
+        self.assertEqual(said, "Programmation ajoutée : samedi à 10 h : Cuisine")
+        said = await self.run_tool("change", day="vendredi", time="14:15")
+        self.assertEqual(said, "Programmation changée : vendredi à 14 h 15 : Salle à manger, Cuisine")
+        said = await self.run_tool("change", day="vendredi", room="tout")
+        self.assertEqual(said, "Programmation changée : vendredi à 14 h 15 : tout le logement")
+        said = await self.run_tool("remove", day="mercredi")
+        wednesday = "mercredi à 9 h, désactivée : Chambre Charlie, Chambre Zoé, Couloir"
+        self.assertEqual(said, f"Programmation supprimée : {wednesday}")
+        self.assertEqual([e["start"]["day"] for e in self.robot.schedule], [[1, 4], [5], [6]])
+
+    async def test_refused(self):
+        for action, args, said in (
+            ("change", {"day": "mardi", "time": "9:00"}, "Rien n'a été fait : pas de programmation le mardi. Lundi et jeudi"),
+            ("change", {"day": "mercredi"}, "Rien n'a été fait : précise ce qui change"),
+            ("change", {"day": "vendredi", "except_room": "salle à manger, cuisine"}, "Rien n'a été fait : il ne resterait aucune pièce"),
+            ("change", {"day": "vendredi", "except_room": "garage"}, "Rien n'a été fait : « garage » n'est pas dans cette programmation"),
+            ("add", {"day": "samedi", "time": "10:00", "room": "garage"}, "Rien n'a été fait : l'aspirateur ne connaît pas « garage »"),
+            ("add", {"day": "samedi"}, "Rien n'a été fait : précise l'heure"),
+            ("enable", {"day": "mardi"}, "Rien n'a été fait : pas de programmation le mardi"),
+            ("disable", {"day": "mercredi"}, "Rien n'a été fait : déjà ainsi"),
+            ("disable", {"until": "le 28"}, "Rien n'a été fait : précise la date de retour"),
+            ("start", {}, "Rien n'a été fait : précise l'action"),
+        ):  # fmt: skip
+            result = await self.run_tool(action, **args)
+            self.assertTrue(result.startswith(said), result)
+        self.assertEqual(self.robot.sent, [])
+
+    async def test_holidays(self):
+        """Off until the day back, Home Assistant turning them on then; back, those that were on (AD-108)."""
+        said = await self.run_tool("disable", until="2026-11-28")
+        self.assertEqual(
+            said,
+            "Programmations désactivées jusqu'au 28 novembre, remises ce jour-là : lundi et jeudi à 8 h 30 : tout le "
+            "logement; vendredi à 9 h : Salle à manger, Cuisine",
+        )
+        self.assertEqual(self.robot.sent, [("suspend", {"until": "2026-11-28"})])
+        said = await self.run_tool("disable", until="2026-11-30")  # « finalement jusqu'au 30 »
+        self.assertEqual(said, "Programmations déjà désactivées, remises le 30 novembre")
+        self.assertTrue((await self.run_tool("show")).endswith(" Suspendues jusqu'au 30 novembre."))
+        said = await self.run_tool("enable")  # back early: not Wednesday's, off before
+        self.assertTrue(said.startswith("Programmations activées : lundi et jeudi à 8 h 30 : tout le logement; "), said)
+        self.assertEqual([e["enabled"] for e in self.robot.schedule], [True, False, True])
+        await self.run_tool("enable")  # none held: every one, Wednesday's too
+        self.assertEqual([e["enabled"] for e in self.robot.schedule], [True, True, True])
+
+    async def test_unconfirmed(self):
+        self.client.service_response = AsyncMock(side_effect=[self.robot.answer("get", {}), {"confirmed": False}])
+        said = await self.run_tool("disable", day="vendredi")
+        self.assertEqual(said, "Pas de confirmation : le robot n'a pas repris la programmation")
+
+    def server(self):
+        server = make_server({})
+        server.spotify, server.calendar_client = None, None
+        server.site.ha_client = self.client
+        return server
+
+    def test_tool_offered_with_its_service(self):
+        self.assertNotIn("vacuum_schedule", {t["name"] for t in self.server()._tools()})
+        self.client.robot_schedules = True
+        tools = {t["name"]: t["parameters"]["properties"] for t in self.server()._tools()}
+        actions = ["show", "add", "change", "remove", "disable", "enable"]
+        self.assertEqual(tools["vacuum_schedule"]["action"]["enum"], actions)
+        self.assertIn("parmi : Salon, Salle à manger,", tools["vacuum_schedule"]["room"]["description"])
+
+    async def test_run_by_the_server(self):
+        server = self.server()
+        self.client.reachable = AsyncMock(side_effect=lambda ids: ids)
+        server.new_request(None)
+
+        async def call(args):
+            return await server.execute_function("vacuum_schedule", args, {"function": "vacuum_schedule", "args": args})
+
+        self.assertTrue((await call({"action": "show"})).startswith("Rien n'a été fait : les programmations"))
+        self.client.robot_schedules = True
+        self.assertEqual(await call({"action": "show"}), f"Programmations de l'aspirateur : {self.words()}.")
+        # Its rooms are where it cleans, not where it is
+        said = await call({"action": "add", "day": "samedi", "time": "10:00", "room": "Cuisine"})
+        self.assertEqual(said, "Programmation ajoutée : samedi à 10 h : Cuisine")
+
+
 class TestAppWords(unittest.TestCase):
     def test_every_tool_has_its_words_in_the_app(self):
         """A call the web app has no verb and icon for shows the tool's name: « vacuum », under a reply (2026-11-15)."""
@@ -1601,7 +1781,7 @@ class TestAppWords(unittest.TestCase):
         said = set(re.findall(r"(\w+): \[", re.search(r"\nconst TOOLS = \{(.*?)\n\};", html, re.S)[1]))
         every = get_tool_definitions(
             make_client(), MagicMock(), music=True, homes=("paris", "charras"), locks=True, heating=["Auto"],
-            alarm=["absence"], vacuum=True,
+            alarm=["absence"], vacuum=True, vacuum_schedules=True,
         )  # fmt: skip
         self.assertEqual({t["name"] for t in every} - said, {"end_conversation"})  # never shown
 
@@ -2562,29 +2742,29 @@ class TestTimerManager(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
-# Tests: timer._parse_time
+# Tests: timer.parse_time
 # ---------------------------------------------------------------------------
 
 
 class TestParseTime(unittest.TestCase):
     def test_hhmm_colon(self):
-        from timer import _parse_time
+        from timer import parse_time
 
-        self.assertEqual(_parse_time("07:00"), (7, 0))
-        self.assertEqual(_parse_time("14:30"), (14, 30))
+        self.assertEqual(parse_time("07:00"), (7, 0))
+        self.assertEqual(parse_time("14:30"), (14, 30))
 
     def test_french_h_format(self):
-        from timer import _parse_time
+        from timer import parse_time
 
-        self.assertEqual(_parse_time("7h"), (7, 0))
-        self.assertEqual(_parse_time("7h30"), (7, 30))
-        self.assertEqual(_parse_time("14h00"), (14, 0))
+        self.assertEqual(parse_time("7h"), (7, 0))
+        self.assertEqual(parse_time("7h30"), (7, 30))
+        self.assertEqual(parse_time("14h00"), (14, 0))
 
     def test_invalid(self):
-        from timer import _parse_time
+        from timer import parse_time
 
         with self.assertRaises(ValueError):
-            _parse_time("abc")
+            parse_time("abc")
 
 
 # ---------------------------------------------------------------------------
