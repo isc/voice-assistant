@@ -54,7 +54,7 @@ its visible face is the one with the microphones and the converter.
 A disc with a flat cut where the power socket sits, four mounting holes and four larger holes the
 case screws pass through. A caliper across it reads **76.7 mm**, and **74.9 mm** from the flat to the
 opposite edge, each within 0.3 mm (see [the caliper](#the-caliper)). Both are taken over the white
-ring described below, a little wider than the board itself, which is then about 76 mm.
+ring described below, soft and a little wider than the board itself, which is then about 76 mm.
 
 #### Where things sit
 
@@ -91,10 +91,11 @@ real or not, a caliper will say.
 Face towards the base ([photo](photos/main-board-bottom.jpg)):
 
 - Twelve RGB LEDs around the edge (`DS1`…`DS12`), the light ring. **Counted.**
-- A white ring lies on this face along the edge, with a window for each LED. Seen edge on, it is a
-  layer of its own, 0.3 to 0.5 mm wider than the board all round. **Inferred** from photos: its
-  thickness and how it is held on the board are not known. Ring and board together are 1.3 to 1.9 mm
-  thick, from a blurred photo of the caliper's jaws on them.
+- A white ring lies on this face along the edge, with a window for each LED. It is soft and looks
+  glued to the board (felt by hand, not peeled). Seen edge on, it is 0.3 to 0.5 mm wider than the
+  board all round. Most likely a gasket pressed against the diffuser, which also keeps each LED's
+  light to its own window (**inferred**). Its thickness is not known: ring and board together are
+  1.3 to 1.9 mm, from a blurred photo of the caliper's jaws, which squeeze it.
 - `U15`: TI **LP5036**, a 36-channel I2C LED driver; twelve RGB LEDs are 36 channels. **Read.**
 - `U7`: MediaTek **MT6398BN**, the processor's power management. **Read.**
 - `AR1`: marking unreadable. **Inferred** to be the amplifier, from its designator and from Dorey's
@@ -203,7 +204,8 @@ its inside jaws, one of each kind. With a battery it reads to 0.01 mm.
 5. **Dimensions to a tenth of a millimetre**, with the caliper: the distances between the holes and
    their diameters, the board's own diameter under the ring, its thickness, the socket and both
    connectors. The photos give them to about 1 mm.
-6. **The white ring**: its thickness, and how it is held, since a new board must carry it.
+6. **The white ring**: its thickness and what it is made of. Soft and glued, it may not come off
+   whole: a new board needs it moved over, or another cut to its shape.
 7. The unread chips of the microphone board, and the amplifier `AR1`.
 
 ## Sources
