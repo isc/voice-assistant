@@ -52,15 +52,16 @@ its visible face is the one with the microphones and the converter.
 ### Main board (replaced)
 
 A disc with a flat cut where the power socket sits, four mounting holes and four larger holes the
-case screws pass through. Its diameter is about **77 mm**, within 1 mm: 76.3 mm read against a ruler
-lying on the components, some 5 mm above the board and so nearer the camera, on a photo taken at an
-angle. To confirm by a direct reading.
+case screws pass through. A caliper across it reads **76.7 mm**, and **74.9 mm** from the flat to the
+opposite edge, each within 0.3 mm (see [the caliper](#the-caliper)). Both are taken over the white
+ring described below, a little wider than the board itself, which is then about 76 mm.
 
 #### Where things sit
 
 Both faces were photographed square on (the outline fits a circle to 0.1 %, and 0.4 %). The two
 photos in `photos/` are cut and scaled from them: **20 pixels a millimetre**, the disc's centre at the
-image's centre, taking the diameter as 77 mm. A point at pixel (x, y) is at ((x − 800) / 20,
+image's centre, taking the outline as 77 mm across (the ring's, 76.7 mm by the caliper since: 0.4 %
+too much). A point at pixel (x, y) is at ((x − 800) / 20,
 (800 − y) / 20) mm.
 
 Seen from the face with the connectors, the power socket up, origin at the disc's centre, x to the
@@ -68,11 +69,11 @@ right and y up, in millimetres:
 
 | What | Where | Size |
 |---|---|---|
-| Flat cut of the outline | y ≈ +36.7 | |
+| Flat cut of the outline | y ≈ +36.6 | |
 | Passages of the four case screws | (−17.4, +16.3), (+16.7, +16.3), (−16.8, −17.3), (+16.5, −17.4) | holes of about 6 mm |
 | Holes of the board's four screws | (−13.6, +20.9), (+13.7, +21.6), (−18.9, −10.7), (+19.2, −9.6) | about 3.1 mm |
 | Two more holes, either side of the debug header | (−6.0, +21.8), (+5.4, +21.8) | about 3.2 mm |
-| Twelve LEDs, on the other face | a circle of radius 33.0, every 30°, one on each axis | |
+| Twelve LEDs, on the other face | a circle of radius 33.0, every 30°, one on each axis | each in a window of the ring |
 | Power socket `J3` | centre about (−2, +32.5) | body about 17 × 10 |
 | Microphone connector `J4` | centre about (−28.5, +12.7), its length along y | about 9 long |
 | Display connector `J1` | centre about (−24, −24.5), turned some 35° | |
@@ -80,7 +81,9 @@ right and y up, in millimetres:
 
 The holes and the LEDs are fitted on the photos (a circle on each hole's edge; the LEDs' dark
 outlines), the holes on both faces, which agree to about 1 mm. The connectors, the socket and the
-contacts are read by eye on the scaled photo. All of it is good to **about 1 mm**: enough for a
+contacts are read by eye on the scaled photo. The outline that sets the scale is the ring's, 1 to
+2 mm nearer or farther than the face the holes are seen on, from a camera some 15 cm away: a
+percent or so. All of it is good to **about 1 mm**: enough for a
 paper outline printed at full size and tried on the chassis, not for ordering a board. The holes do
 not come out symmetrical (each right one 0.5 to 1 mm higher than its left one, on both faces):
 real or not, a caliper will say.
@@ -88,6 +91,10 @@ real or not, a caliper will say.
 Face towards the base ([photo](photos/main-board-bottom.jpg)):
 
 - Twelve RGB LEDs around the edge (`DS1`…`DS12`), the light ring. **Counted.**
+- A white ring lies on this face along the edge, with a window for each LED. Seen edge on, it is a
+  layer of its own, 0.3 to 0.5 mm wider than the board all round. **Inferred** from photos: its
+  thickness and how it is held on the board are not known. Ring and board together are 1.6 to 1.9 mm
+  thick, from a blurred photo of the caliper's jaws on them.
 - `U15`: TI **LP5036**, a 36-channel I2C LED driver; twelve RGB LEDs are 36 channels. **Read.**
 - `U7`: MediaTek **MT6398BN**, the processor's power management. **Read.**
 - `AR1`: marking unreadable. **Inferred** to be the amplifier, from its designator and from Dorey's
@@ -104,8 +111,9 @@ Face towards the chassis ([photo](photos/main-board-top.jpg), [in place](photos/
 - `P1`, `P2`: two spring contacts that press on the two pads of the speaker box. No wire to unplug.
   **Read.**
 - `J3`: the barrel power socket. The adapter (model `LA23EU`) gives **12.0 V, 1.25 A, 15 W**, the
-  plug's **centre positive**. **Read** on its label. `D22` next to the socket is marked `15A`, and
-  `L66` is a 3.3 µH inductor.
+  plug's **centre positive**. **Read** on its label. The plug is **4.0 mm** across by the caliper, its
+  hole about 1.7 mm by the photo's proportions: the common 4.0 × 1.7 mm barrel. `D22` next to the
+  socket is marked `15A`, and `L66` is a 3.3 µH inductor.
 - The chassis carries a thermal pad that presses on the large shield.
 
 ### Microphone and button board (kept)
@@ -176,17 +184,27 @@ Brian Dorey opened a 5th generation without clock. This unit, with clock and mad
 
 Tools were missing on 2026-11-15: no multimeter, no logic analyzer.
 
+### The caliper
+
+A digital caliper is at hand, without its battery. Its beam is graduated in millimetres, and the
+opening reads where the slider's edge crosses that scale. On a photo of the jaws closed on the power
+plug, the edge reads 4.3 where the jaws, measured on the same photo against the scale, are 4.05 mm
+apart: the edge reads **0.25 mm too much**, taken off the readings above. With a battery it reads to
+0.01 mm.
+
 1. **The 25-contact cable's pinout**: which contact is power, ground, I2C, the audio clocks and data,
    each button, each LED. With a multimeter, by continuity from the cable to the test pads and to the
    AK5704's pins, whose roles its datasheet gives. With a logic analyzer on the running device, the
    I2C traffic would also give the settings Amazon writes to the converter.
 2. **The display's driver**: look at the hidden face, or probe the 10-contact cable while it runs.
-3. **The power plug's dimensions.** Its polarity is read on the label: measure it once before
-   powering a board of ours.
+3. **The power socket's polarity**, read on the label: measure it once before powering a board of
+   ours.
 4. **The speaker's impedance**: across its two pads.
-5. **Dimensions to a tenth of a millimetre**, with a caliper: the diameter, the holes, the socket and
-   both connectors. The photos give them to about 1 mm.
-6. The unread chips of the microphone board, and the amplifier `AR1`.
+5. **Dimensions to a tenth of a millimetre**, with the caliper: the distances between the holes and
+   their diameters, the board's own diameter under the ring, its thickness, the socket and both
+   connectors. The photos give them to about 1 mm.
+6. **The white ring**: its thickness, and how it is held, since a new board must carry it.
+7. The unread chips of the microphone board, and the amplifier `AR1`.
 
 ## Sources
 
