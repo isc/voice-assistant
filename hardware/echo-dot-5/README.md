@@ -207,8 +207,9 @@ its inside jaws, one of each kind. With a battery it reads to 0.01 mm.
    ours.
 4. **The speaker's impedance**: across its two pads.
 5. **Dimensions to a tenth of a millimetre**, with the caliper: the distances between the holes and
-   their diameters, the board's own diameter under the ring, its thickness away from the ring (a jaw
-   through one of the large holes), the socket and both connectors. The photos give them to about 1 mm.
+   their diameters, the board's own diameter under the ring, the socket and both connectors. The
+   board's thickness without the ring cannot be had between the jaws, which reach the board only
+   over its rim: on a sharp photo of the edge held against the caliper's scale instead. The photos give them to about 1 mm.
 6. **The white ring**: its thickness and what it is made of. Soft and glued, it may not come off
    whole: a new board needs it moved over, or another cut to its shape.
 7. The unread chips of the microphone board, and the amplifier `AR1`.
