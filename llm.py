@@ -105,13 +105,21 @@ _ALARM_MODE_WORDS = {
 
 
 def get_tool_definitions(
-    ha_client, calendar_client=None, music=False, homes=(), locks=False, heating=(), alarm=(), vacuum=False
+    ha_client,
+    calendar_client=None,
+    music=False,
+    homes=(),
+    locks=False,
+    heating=(),
+    alarm=(),
+    vacuum=False,
+    vacuum_rooms=(),
 ) -> list:
     """Return LLM tool definitions. `homes`: the homes' names, which the door, heating, alarm and vacuum tools,
     get_state and get_sensor may name when there are several (AD-068, AD-071, AD-083, AD-106); `locks`: whether
     some home has a lock; `heating`: the modes of the homes' heating, if some home's can be set (AD-071); `alarm`:
     the modes the homes' alarms can be armed in, if some home has one (AD-083); `vacuum`: whether some home has a
-    robot vacuum (AD-106)."""
+    robot vacuum (AD-106); `vacuum_rooms`: the rooms it knows, if it can clean some only (AD-107)."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -641,17 +649,27 @@ def get_tool_definitions(
             }
         ]
 
-    # A home's robot vacuum, which cleans the whole home: no room, no device named (AD-106). « arrête » sends it home,
-    # where it charges, rather than leave it where it stopped
+    # A home's robot vacuum, no device named (AD-106): the whole home, or the rooms its map has (AD-107). « arrête »
+    # sends it home, where it charges, rather than leave it where it stopped
     vacuum_tools = []
     if vacuum:
+        where, rooms = "de tout le logement", {}
+        if vacuum_rooms:
+            where = "de tout le logement ou de certaines pièces"
+            rooms["room"] = {
+                "type": "string",
+                "description": (
+                    "Seulement si la demande nomme des pièces : celles à nettoyer, séparées par des virgules, "
+                    f"parmi : {', '.join(vacuum_rooms)}. Sans pièce, il fait tout le logement"
+                ),
+            }
         vacuum_tools = [
             {
                 "name": "vacuum",
                 "description": (
-                    "Le robot aspirateur : lancer le ménage (« lance l'aspirateur », « passe l'aspirateur »), le "
-                    "mettre en pause là où il est, ou le renvoyer à sa base (« arrête l'aspirateur »). Il fait "
-                    "toujours tout le logement. Pas pour la musique."
+                    f"Le robot aspirateur : lancer le ménage {where} (« lance l'aspirateur », « passe "
+                    "l'aspirateur »), le mettre en pause là où il est, ou le renvoyer à sa base (« arrête "
+                    "l'aspirateur »). Pas pour la musique."
                 ),
                 "parameters": {
                     "type": "object",
@@ -664,6 +682,7 @@ def get_tool_definitions(
                                 "return_to_base : l'arrêter et le renvoyer à sa base"
                             ),
                         },
+                        **rooms,
                         **elsewhere,
                     },
                     "required": ["action"],

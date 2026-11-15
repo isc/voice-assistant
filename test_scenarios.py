@@ -122,6 +122,8 @@ class FakeHA:
                     self.states[eid] = payload["option"]
                 elif service in _EFFECTS:
                     self.states[eid] = _EFFECTS[service]
+                elif service == "send_command" and payload.get("command") in _EFFECTS:  # a vacuum's rooms (AD-107)
+                    self.states[eid] = _EFFECTS[payload["command"]]
             return _Response(200, [])
         return _Response(404, {})
 
@@ -356,6 +358,22 @@ def vacuums(*actions: str, home: str = ""):
     return check
 
 
+def cleans(*rooms: str, home: str = ""):
+    """The robot vacuum started in these rooms, in any order, by one call, at `home` if given (AD-107); a room
+    refused before does not count, nothing having moved. The fake HA has run it: its regions are test_unit's."""
+    from ha_client import rooms_named, vacuum_map
+
+    def check(t):
+        done = [c for c in t.calls if c["function"] == "vacuum" and str(c["args"].get("home", home)).lower() == home
+                and not str(c.get("result")).startswith(("Rien", "Pas de"))]  # fmt: skip
+        ok = len(done) == 1 and done[0]["args"].get("action") == "start"
+        known = list(vacuum_map("vacuum.parispi").get("rooms", ()))
+        ok = ok and sorted(rooms_named(str(done[0]["args"].get("room", "")), known)[0]) == sorted(rooms)
+        return ok, f"vacuum start in {', '.join(rooms)}" + (f" at {home}" if home else "")
+
+    return check
+
+
 def pauses_music(t):
     paused = any(c["function"] == "stop_media" or c["args"].get("action") == "pause" for c in t.calls if c["function"] != "vacuum")
     robot = [service for domain, service, _ in t.sent if domain == "vacuum"]
@@ -577,9 +595,28 @@ SCENARIOS = [
     ("AD-106 where is the vacuum", "paris", {"vacuum.parispi": "returning"}, [
         ("Il est où l'aspirateur ?", says(r"rentr|base"), {}),
     ]),
-    # It cleans the whole flat: a room said is not one it keeps to, and the reply says so, or asks
-    ("AD-106 the vacuum in the kitchen", "paris", {"vacuum.parispi": "docked"}, [
-        ("Passe l'aspirateur dans la cuisine.", says(r"\btout\b|\btoute\b|entier|ensemble|seule piece|\?"), {}),
+    # The rooms of its map, from Ivan's schedule in iRobot's app, said as HA's areas (AD-107)
+    ("AD-107 the vacuum in the kitchen", "paris", {"vacuum.parispi": "docked"}, [
+        ("Passe l'aspirateur dans la cuisine.", cleans("Cuisine"), {}),
+    ]),
+    ("AD-107 two rooms", "paris", {"vacuum.parispi": "docked"}, [
+        ("Lance l'aspirateur dans la cuisine et la salle à manger.", cleans("Cuisine", "Salle à manger"), {}),
+    ]),
+    ("AD-107 the living room", "paris", {"vacuum.parispi": "docked"}, [
+        ("Tu peux passer l'aspirateur dans le salon ?", cleans("Salon"), {}),
+    ]),
+    ("AD-107 the parents' bedroom", "paris", {"vacuum.parispi": "docked"}, [
+        ("Passe l'aspirateur dans la chambre des parents.", cleans("Chambre parents"), {}),
+    ]),
+    ("AD-107 the children's bedrooms", "paris", {"vacuum.parispi": "docked"}, [
+        ("Passe l'aspirateur dans les chambres des enfants.", cleans("Chambre Charlie", "Chambre Zoé"), {}),
+    ]),
+    # Not on its map: nothing started, the whole flat least of all
+    ("AD-107 a room it has not", "paris", {"vacuum.parispi": "docked"}, [
+        ("Passe l'aspirateur dans le garage.", vacuums(), {}),
+    ]),
+    ("AD-107 a room from Charras", "charras", {}, [
+        ("Passe l'aspirateur dans la cuisine à Paris.", cleans("Cuisine", home="paris"), {}),
     ]),
     # « Mets en pause » with music playing is the music's, though the robot cleans
     ("AD-106 pause is the music's", "paris", {**PARIS_SPEAKERS, "vacuum.parispi": "cleaning"}, [

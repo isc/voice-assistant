@@ -55,6 +55,7 @@ from ha_client import (
     is_whole_house,
     normalize,
     quieted,
+    vacuum_map,
 )
 from images import find_image
 from places import address_of, find_place
@@ -1272,7 +1273,8 @@ class VoiceAssistantServer:
 
     def _unasked_sweep(self, function_name: str, arguments: dict) -> Optional[str]:
         """The result of an action on every room that the request did not ask for, else None (AD-058)."""
-        if function_name == "get_state" or function_name not in self._DEVICE_DOMAINS:
+        # The home's alarm or vacuum: the whole home is theirs anyway (AD-107)
+        if function_name in ("get_state", *self._HOME_DEVICE_TOOLS) or function_name not in self._DEVICE_DOMAINS:
             return None
         if not is_whole_house(arguments.get("room")) or self._whole_house:
             return None
@@ -1592,14 +1594,14 @@ class VoiceAssistantServer:
         return arguments.get("entity", "")
 
     async def _vacuum(self, arguments: dict, entity_ids: list[str]) -> str:
-        """The home's robot vacuum started, paused or sent back to its dock, awaited as a lock is: whoever leaves on
-        « aspirateur lancé » must be told when it did not start (AD-106)."""
+        """The home's robot vacuum started, in the rooms said (AD-107), paused or sent back to its dock, awaited as a
+        lock is: whoever leaves on « aspirateur lancé » must be told when it did not start (AD-106)."""
         if len(entity_ids) > 1:
             names = ", ".join(map(self.ha_client.display_name, entity_ids))
             return f"Rien n'a été fait : plusieurs aspirateurs ici ({names}), un seul est pris en charge"
         if (action := str(arguments.get("action") or "")) not in VACUUM_ACTIONS:
             return f"Rien n'a été fait : précise l'action ({', '.join(VACUUM_ACTIONS)})"
-        return await self.ha_client.vacuum(entity_ids[0], action)
+        return await self.ha_client.vacuum(entity_ids[0], action, str(arguments.get("room") or ""))
 
     async def _alarm(self, function_name: str, arguments: dict, entity_ids: list[str], call: dict) -> str:
         """The home's alarm armed in the mode asked, or proposed for disarming from the web app (AD-083)."""
@@ -2512,7 +2514,8 @@ class VoiceAssistantServer:
         locks = any(info["domain"] == "lock" for client in clients for info in client.entities.values())
         heating = list(dict.fromkeys(mode for client in clients for mode in client.heating_modes))
         alarm = list(dict.fromkeys(mode for client in clients for mode in client.alarm_modes()))
-        vacuum = any(client.vacuums for client in clients)
+        robots = [robot for client in clients for robot in client.vacuums]
+        vacuum_rooms = list(dict.fromkeys(room for robot in robots for room in vacuum_map(robot).get("rooms", ())))
         return get_tool_definitions(
             self.ha_client,
             self.calendar_client,
@@ -2521,7 +2524,8 @@ class VoiceAssistantServer:
             locks=locks,
             heating=heating,
             alarm=alarm,
-            vacuum=vacuum,
+            vacuum=bool(robots),
+            vacuum_rooms=vacuum_rooms,
         )
 
     def _continue(self, conversation) -> None:

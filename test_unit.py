@@ -48,6 +48,7 @@ from ha_client import (
     cover_all_the_way,
     cover_kind,
     normalize,
+    rooms_named,
     without_home,
 )
 from images import Picture, is_about
@@ -1370,6 +1371,24 @@ def robot_vacuum(state: str = "docked", status: str = "Charging") -> dict:
             "area_id": "living_room", "area_name": "Living Room"}  # fmt: skip
 
 
+# Paris's flat as the Roomba's map has it, the app's names said as HA's areas (AD-107)
+ROOMBA_MAP = {
+    "pmap_id": "o04SgdBESJqT3WlpquN87A",
+    "user_pmapv_id": "240326T112356",
+    "rooms": {
+        "Salon": "1", "Salle à manger": "2", "Chambre parents": "5", "Toilettes": "8", "Entrée": "17",
+        "Salle de bain": "18", "Chambre invités": "19", "Couloir": "20", "Chambre Charlie": "3", "Chambre Zoé": "4",
+        "Cuisine": "7",
+    },
+}  # fmt: skip
+
+
+def roomba_map(test):
+    """The Roomba's map in config.local.json, and the room group « enfants », for this test."""
+    test.enterContext(patch.dict("ha_client.LOCAL_CONFIG", {"vacuum_rooms": {VACUUM: ROOMBA_MAP}}))
+    test.enterContext(patch.dict("ha_client.ROOM_GROUPS", TestResolveAllEntities.ROOM_GROUPS, clear=True))
+
+
 class TestVacuum(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.client = make_client()
@@ -1409,17 +1428,17 @@ class TestVacuum(unittest.IsolatedAsyncioTestCase):
         await client.refresh_entities()
         self.assertEqual(client.entities[VACUUM]["friendly_name"], "Aspirateur")
 
-    async def act(self, action: str, *states: str) -> str:
+    async def act(self, action: str, *states: str, room: str = "") -> str:
         """vacuum(), the robot read as `states` one after another, the last for good; the order sent faked."""
         reads = [{"state": state, "attributes": {}} for state in states]
         self.client.get_entity_state = AsyncMock(side_effect=lambda _: reads.pop(0) if len(reads) > 1 else reads[0])
         self.client._send = AsyncMock(return_value=None)
         with patch("ha_client.asyncio.sleep", AsyncMock()):
-            return await self.client.vacuum(VACUUM, action)
+            return await self.client.vacuum(VACUUM, action, room)
 
     async def test_done_and_confirmed(self):
         for action, states, said in (
-            ("start", ("docked", "docked", "cleaning"), "Aspirateur lancé dans tout le logement : je ne sais pas le limiter à une pièce"),
+            ("start", ("docked", "docked", "cleaning"), "Aspirateur lancé dans tout le logement"),
             ("pause", ("cleaning", "paused"), "Aspirateur en pause"),
             ("return_to_base", ("paused", "returning"), "Aspirateur renvoyé à sa base"),
         ):
@@ -1448,10 +1467,62 @@ class TestVacuum(unittest.IsolatedAsyncioTestCase):
 
     def test_tool_offered_only_with_a_vacuum(self):
         tools = {t["name"]: t for t in get_tool_definitions(self.client, vacuum=True)}
-        self.assertEqual(
-            tools["vacuum"]["parameters"]["properties"]["action"]["enum"], ["start", "pause", "return_to_base"]
-        )
+        properties = tools["vacuum"]["parameters"]["properties"]
+        self.assertEqual(properties["action"]["enum"], ["start", "pause", "return_to_base"])
+        self.assertNotIn("room", properties)  # no map: the whole home only
         self.assertNotIn("vacuum", {t["name"] for t in get_tool_definitions(self.client)})
+        rooms = ["Salon", "Cuisine"]
+        tools = {t["name"]: t for t in get_tool_definitions(self.client, vacuum=True, vacuum_rooms=rooms)}
+        self.assertIn("parmi : Salon, Cuisine.", tools["vacuum"]["parameters"]["properties"]["room"]["description"])
+        self.assertIn("certaines pièces", tools["vacuum"]["description"])
+
+    def test_rooms_named(self):
+        roomba_map(self)
+        known = list(ROOMBA_MAP["rooms"])
+        for room, found, unknown in (
+            ("Cuisine", ["Cuisine"], []),
+            ("la cuisine et la salle à manger", ["Cuisine", "Salle à manger"], []),  # in the order said
+            ("salon, entrée", ["Salon", "Entrée"], []),
+            ("chambre de Zoé", ["Chambre Zoé"], []),
+            ("Chambre Zoe", ["Chambre Zoé"], []),
+            ("enfants", ["Chambre Charlie", "Chambre Zoé"], []),  # a room group
+            ("les chambres des enfants", ["Chambre Charlie", "Chambre Zoé"], []),
+            ("la chambre", ["Chambre parents", "Chambre invités", "Chambre Charlie", "Chambre Zoé"], []),
+            ("les chambres", [], ["les chambres"]),  # as the lights' rooms: the model has the map's names
+            ("la salle de bains", ["Salle de bain"], []),
+            ("salle de bain de Zoé", ["Salle de bain"], []),  # the one the robot knows
+            ("les toilettes", ["Toilettes"], []),
+            ("cuisine et garage", ["Cuisine"], ["garage"]),
+            ("buanderie", [], ["buanderie"]),
+        ):
+            self.assertEqual(rooms_named(room, known), (found, unknown), room)
+
+    async def test_started_in_the_rooms_said(self):
+        roomba_map(self)
+        said = await self.act("start", "docked", "cleaning", room="la cuisine et la salle à manger")
+        self.assertEqual(said, "Aspirateur lancé dans ces pièces seulement : Cuisine, Salle à manger")
+        regions = [{"region_id": "7", "type": "rid"}, {"region_id": "2", "type": "rid"}]
+        params = {"ordered": 1, "pmap_id": ROOMBA_MAP["pmap_id"], "regions": regions, "user_pmapv_id": "240326T112356"}
+        self.client._send.assert_awaited_once_with("vacuum", "send_command", VACUUM, command="start", params=params)
+
+    async def test_whole_home_or_no_room_kept(self):
+        roomba_map(self)
+        for room in ("partout", "tout le logement", "toutes les pièces", "l'appartement"):
+            said = await self.act("start", "docked", "cleaning", room=room)
+            self.assertEqual(said, "Aspirateur lancé dans tout le logement", room)
+            self.client._send.assert_awaited_once_with("vacuum", "start", VACUUM)
+        self.assertEqual(await self.act("pause", "cleaning", "paused", room="Cuisine"), "Aspirateur en pause")
+        self.client._send.assert_awaited_once_with("vacuum", "pause", VACUUM)
+
+    async def test_a_room_it_does_not_know(self):
+        roomba_map(self)
+        said = await self.act("start", "docked", room="garage")
+        self.assertTrue(said.startswith("Rien n'a été fait : Aspirateur ne connaît pas « garage ». Ses pièces : Salon"))
+        self.client._send.assert_not_awaited()
+        with patch.dict("ha_client.LOCAL_CONFIG", {"vacuum_rooms": {}}):  # no map: never the whole home instead
+            said = await self.act("start", "docked", room="Cuisine")
+        self.assertTrue(said.startswith("Rien n'a été fait : Aspirateur ne connaît pas les pièces"), said)
+        self.client._send.assert_not_awaited()
 
     def test_shortcut_in_effect(self):
         from voice_server import _device_in_effect
@@ -1489,7 +1560,7 @@ class TestVacuumFromTheServer(unittest.IsolatedAsyncioTestCase):
 
     async def test_started_in_the_action_said(self):
         self.assertEqual(await self.run_call("vacuum", {"action": "start"}), "Aspirateur lancé")
-        self.paris.ha_client.vacuum.assert_awaited_once_with(VACUUM, "start")
+        self.paris.ha_client.vacuum.assert_awaited_once_with(VACUUM, "start", "")
         self.paris.ha_client.call_service.assert_not_awaited()
         result = await self.run_call("vacuum", {"action": "stop"})  # none guessed
         self.assertEqual(result, "Rien n'a été fait : précise l'action (start, pause, return_to_base)")
@@ -1501,12 +1572,24 @@ class TestVacuumFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "Rien n'a été fait : pas d'aspirateur ici. Il y en a un à Paris : demande si c'est celui-là")
         self.paris.ha_client.vacuum.assert_not_awaited()
         self.assertEqual(await self.run_call("vacuum", {"action": "start", "home": "paris"}), "Aspirateur lancé (Paris)")
-        self.paris.ha_client.vacuum.assert_awaited_once_with(VACUUM, "start")
+        self.paris.ha_client.vacuum.assert_awaited_once_with(VACUUM, "start", "")
         self.assertIs(self.server.site, self.charras)
+
+    async def test_its_room_is_where_it_cleans(self):
+        """Not where it is: the robot's dock is in the living room, and « dans la cuisine » found no vacuum there."""
+        self.assertEqual(await self.run_call("vacuum", {"action": "start", "room": "Cuisine"}), "Aspirateur lancé")
+        self.paris.ha_client.vacuum.assert_awaited_once_with(VACUUM, "start", "Cuisine")
+        self.assertEqual(self.paris.ha_client.resolve_all_entities("aspirateur", room="Cuisine"), [VACUUM])
+        # « partout », the default anyway: no « which room? » when the request said none
+        self.assertEqual(await self.run_call("vacuum", {"action": "start", "room": "partout"}), "Aspirateur lancé")
 
     def test_tool_and_its_home(self):
         tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
         self.assertEqual(tools["vacuum"]["home"]["enum"], ["paris", "charras"])
+        self.assertNotIn("room", tools["vacuum"])
+        roomba_map(self)  # its rooms, from the home that has it
+        tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
+        self.assertIn("parmi : Salon, Salle à manger, Chambre parents,", tools["vacuum"]["room"]["description"])
         del self.paris.ha_client.entities[VACUUM]
         self.assertNotIn("vacuum", {t["name"] for t in self.server._tools()})
 

@@ -90,7 +90,7 @@ def is_whole_house(room: Optional[str]) -> bool:
 
 
 # The home itself, said: « partout », « la maison », « l'appart »
-_HOME_WORDS = r"partout|maison|appart|appartement"
+_HOME_WORDS = r"partout|maison|appart|appartement|logement"
 # A request asks for every room only in so many words, those of _WHOLE_HOUSE and more; « tout de
 # suite » or « c'est tout » do not
 _WHOLE_HOUSE_WORDS = re.compile(rf"\b(?:tout|tous|toute|toutes|{_HOME_WORDS})\b")
@@ -157,6 +157,33 @@ def _group_rooms(room: str) -> Optional[list[str]]:
 # Built in, whatever an older config.local.json still lists for them
 for _name in [name for name in ROOM_GROUPS if is_whole_house(name)]:
     del ROOM_GROUPS[_name]
+
+# « la cuisine et le salon », « cuisine, salon »
+_ROOM_LIST = re.compile(r",|\bet\b|&|\+", re.IGNORECASE)
+
+
+def rooms_named(room: str, known: list[str]) -> tuple[list[str], list[str]]:
+    """The rooms of `known` a room argument names, in its order, and its parts that name none (AD-107). Parts are
+    split on « , » and « et », a group (« enfants ») is its rooms, and a part is the room so named, else each one
+    _area_matches finds: « chambre » is every bedroom, « salle de bain de Zoé » the one bathroom the robot knows."""
+    known_norm = {name: normalize(name) for name in known}
+    found, unknown = [], []
+    for part in _ROOM_LIST.split(room):
+        for said in _group_rooms(part) or [part]:
+            if not (norm := normalize(said)):
+                continue
+            exact = [name for name, each in known_norm.items() if each == norm]
+            matched = exact or [name for name, each in known_norm.items() if _area_matches(each, norm)]
+            found += [name for name in matched if name not in found]
+            if not matched:
+                unknown.append(said.strip())
+    return found, unknown
+
+
+def vacuum_map(entity_id: str) -> dict:
+    """The map a robot vacuum cleans rooms of (config.local.json's `vacuum_rooms`, AD-107): its ids in iRobot's app,
+    and each room's region on it. Empty: it cleans only the whole home."""
+    return LOCAL_CONFIG.get("vacuum_rooms", {}).get(entity_id, {})
 
 
 # difflib ratio for a misheard name: at 0.4, « télé » found the light « Entrée » (0.5) and « lumière »
@@ -620,7 +647,8 @@ class HAClient:
             name, room = words[0], " ".join(words[1:])
         # Generic name (e.g. "volet" -> all shutters in the room), with its cover sub-kind
         target_domain, generic_kind = self._GENERIC_NAMES.get(normalize(name), (None, None))
-        if target_domain in self._HOME_WIDE and not room:
+        # A home's alarm or vacuum is never in the room said: the vacuum's is where it cleans (AD-107)
+        if target_domain in HOME_DEVICES or (target_domain in self._HOME_WIDE and not room):
             room = "tout"
         whole_house = is_whole_house(room)
         is_group = False
@@ -861,20 +889,44 @@ class HAClient:
             return error
         return await self._alarm_reached(entity_id, {armed, "arming"})
 
-    async def vacuum(self, entity_id: str, action: str) -> str:
-        """A robot vacuum started, paused or sent back to its dock (AD-106). Not sent when it already is so: a start
-        while it cleans would begin its round again. Awaited until it says it is so, for VACUUM_CONFIRM_SECONDS, as
-        the robot may refuse what HA handed on (a flat battery, a full bin)."""
+    async def vacuum(self, entity_id: str, action: str, room: str = "") -> str:
+        """A robot vacuum started, in the rooms said if any (AD-107), paused or sent back to its dock (AD-106). Not
+        sent when it already is so: a start while it cleans would begin its round again. Awaited until it says it
+        is so, for VACUUM_CONFIRM_SECONDS, as the robot may refuse what HA handed on (a flat battery, a full bin)."""
         wanted = VACUUM_ACTIONS[action]
+        rooms = []
+        if action == "start" and room and not (is_whole_house(room) or asks_every_room(room)):
+            rooms, refusal = self._vacuum_rooms(entity_id, room)
+            if refusal:
+                return refusal
         if (state := await self.get_entity_state(entity_id)) and state.get("state") in ("unavailable", "unknown"):
             return self.vacuum_words(entity_id, state)  # off the Wi-Fi: HA would take the order and drop it
         if state and state.get("state") in wanted:
             return self.vacuum_words(entity_id, state, adverb="déjà")
-        if error := await self._send("vacuum", action, entity_id):
+        if rooms:  # HA's iRobot integration has no room: the command iRobot's app sends, as is (roombapy)
+            plan = vacuum_map(entity_id)
+            regions = [{"region_id": plan["rooms"][each], "type": "rid"} for each in rooms]
+            params = {"ordered": 1, "pmap_id": plan["pmap_id"], "regions": regions}
+            params["user_pmapv_id"] = plan["user_pmapv_id"]
+            error = await self._send("vacuum", "send_command", entity_id, command="start", params=params)
+        else:
+            error = await self._send("vacuum", action, entity_id)
+        if error:
             return error
-        done = self._build_response("vacuum", action, self.display_name(entity_id), {})
+        done = self._build_response("vacuum", action, self.display_name(entity_id), {"rooms": rooms})
         words = partial(self.vacuum_words, entity_id)
         return await self._reached(entity_id, wanted, VACUUM_CONFIRM_SECONDS, words, done)
+
+    def _vacuum_rooms(self, entity_id: str, room: str) -> tuple[list[str], str]:
+        """The rooms of its map a start keeps to, else why it does not start."""
+        name, regions = self.display_name(entity_id), vacuum_map(entity_id).get("rooms")
+        if not regions:
+            return [], f"Rien n'a été fait : {name} ne connaît pas les pièces, il ne fait que tout le logement"
+        rooms, unknown = rooms_named(room, list(regions))
+        if unknown or not rooms:
+            said = ", ".join(unknown) or room
+            return [], f"Rien n'a été fait : {name} ne connaît pas « {said} ». Ses pièces : {', '.join(regions)}"
+        return rooms, ""
 
     async def _alarm_reached(self, entity_id: str, wanted: set[str]) -> str:
         def words(state: dict, adverb: str = "") -> str:
@@ -1132,7 +1184,11 @@ class HAClient:
             ("lock", "unlock"): f"{display_name} en cours de déverrouillage",
             ("select", "select_option"): f"{display_name} en mode {kwargs.get('option', '?')}",
             # « Passe l'aspirateur dans la cuisine » got « je lance l'aspirateur dans la cuisine » (AD-106)
-            ("vacuum", "start"): f"{display_name} lancé dans tout le logement : je ne sais pas le limiter à une pièce",
+            ("vacuum", "start"): (
+                f"{display_name} lancé dans ces pièces seulement : {', '.join(kwargs['rooms'])}"
+                if kwargs.get("rooms")
+                else f"{display_name} lancé dans tout le logement"
+            ),
             ("vacuum", "pause"): f"{display_name} en pause",
             ("vacuum", "return_to_base"): f"{display_name} renvoyé à sa base",
         }

@@ -6,6 +6,15 @@
     "enfants": ["Chambre Enfant 1", "Chambre Enfant 2"]
   },
 
+  "_vacuum_rooms": "A robot vacuum's map, by its entity: the ids iRobot's app sends with a room cleaning, and each room's region on it (AD-107). Without one, it cleans only the whole home.",
+  "vacuum_rooms": {
+    "vacuum.roomba": {
+      "pmap_id": "<map id>",
+      "user_pmapv_id": "<map version>",
+      "rooms": {"Cuisine": "1", "Salon": "2"}
+    }
+  },
+
   "family": [
     {"name": "Parent 1", "role": "parent"},
     {"name": "Parent 2", "role": "parent"},
