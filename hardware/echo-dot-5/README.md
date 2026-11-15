@@ -52,7 +52,8 @@ its visible face is the one with the microphones and the converter.
 ### Main board (replaced)
 
 A disc with four mounting holes and four larger holes the case screws pass through. Its diameter is
-not measured yet.
+about **77 mm**, within 1 mm: 76.3 mm read against a ruler lying on the components, some 5 mm above
+the board and so nearer the camera, on a photo taken at an angle. To confirm by a direct reading.
 
 Face towards the base ([photo](photos/main-board-bottom.jpg)):
 
@@ -114,7 +115,7 @@ box, reached through two pads. Its impedance is not measured.
 | Connector on the main board | `J4` ([photo](photos/j4-mic-connector.jpg)) | `J1` ([photo](photos/j1-display-connector.jpg)) |
 | Contacts | **25**, fine and staggered ([photo](photos/mic-cable-tip.jpg)) | **10**, wide ([photo](photos/display-cable-tip.jpg)) |
 | Printed on the cable | `MLB` at the main board's end, `MIC` at the other | |
-| Width of the tip | not measured | not measured |
+| Width of the tip | about **7.6 mm**, so a **0.3 mm** pitch (photo against a ruler) | not measured |
 
 The 25 were counted as 24 gaps along four lines across the enlarged photo; the 10 on the connector and
 again on the cable. Each cable has `P1` and a small triangle printed at its tip: the mark of contact 1.
@@ -149,7 +150,8 @@ Tools were missing on 2026-11-15: no multimeter, no logic analyzer.
 3. **The power plug's dimensions.** Its polarity is read on the label: measure it once before
    powering a board of ours.
 4. **The speaker's impedance**: across its two pads.
-5. **Dimensions**: the board's diameter, its holes, the width and pitch of both cable tips.
+5. **Dimensions**: where the board's holes, connectors, socket and LEDs sit, from photos taken square
+   on with nothing lying on the board; the display cable's tip.
 6. The unread chips of the microphone board, and the amplifier `AR1`.
 
 ## Sources
