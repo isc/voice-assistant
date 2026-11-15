@@ -53,6 +53,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `test_scenarios.py` | Conversations replayed with the real LLM against fake homes whose device states each scenario sets, the server's own code running every call (AD-084): what a dry run's « OK » cannot show, a speaker offline, a state read. The homes' devices come from the live server's `/api/snapshot` (this machine only) |
 | `review/` | The nightly review (AD-074): Claude Code reads the day's interactions, fixes the obvious bugs (pushed and deployed), emails Ivan proposals that open a Desktop session; then runs the model-backed tests and emails a turn that regressed (AD-085, `review/README.md`) |
 | `firmware/README.md` | How the Voice PE firmware is built and flashed (our build of 26.9.0 with ESPHome 2026.9.1, AD-054) |
+| `hardware/echo-dot-5/` | Teardown notes and photos of an Echo Dot 5 with clock, towards a replacement board that would make it a satellite: nothing designed yet |
 
 ## Pipeline flow (voice)
 

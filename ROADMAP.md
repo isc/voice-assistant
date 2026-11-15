@@ -148,3 +148,8 @@ Audio specs: 16 kHz mono float32 in [-1, 1] (the pipeline has 16-bit PCM, a triv
 What would reopen it: audio heard behind a long prompt, from a newer Ollama (the length effect may be its own, a short reproduction is worth reporting) or another runtime, then French recognition near Parakeet's on children and on speech over music. Splitting it in two calls (Gemma transcribes behind a short prompt, then the usual text request) works today, but gets point 2's accuracy for 0.8 s more.
 
 Trade-off: the web UI's debug log loses the transcript, unless the model is asked to write it out.
+
+## Hardware
+
+### A satellite inside an Echo Dot 5
+Paris has two Echo Dots with clock, 5th generation. A replacement main board would keep their shell, speaker and microphones, better than the Voice PE's speaker, and make them satellites. LocalDot does it for the 3rd generation; nothing exists for the 5th. One was opened on 2026-11-15: what is inside, what was read and counted, and what is still unknown (the microphone cable's pinout first, which needs a multimeter or a logic analyzer) is in `hardware/echo-dot-5/README.md`.
