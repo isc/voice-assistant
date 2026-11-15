@@ -94,8 +94,9 @@ Face towards the base ([photo](photos/main-board-bottom.jpg)):
 - A white ring lies on this face along the edge, with a window for each LED. It is soft and looks
   glued to the board (felt by hand, not peeled). Seen edge on, it is 0.3 to 0.5 mm wider than the
   board all round. Most likely a gasket pressed against the diffuser, which also keeps each LED's
-  light to its own window (**inferred**). Its thickness is not known: ring and board together are
-  1.3 to 1.9 mm, from a blurred photo of the caliper's jaws, which squeeze it.
+  light to its own window (**inferred**). Its thickness is not known. Ring and board together are
+  **1.25 mm** between the caliper's jaws at the rim, which squeeze the ring: the board is thinner
+  than the usual 1.6 mm, most likely 1.0 or 0.8 mm.
 - `U15`: TI **LP5036**, a 36-channel I2C LED driver; twelve RGB LEDs are 36 channels. **Read.**
 - `U7`: MediaTek **MT6398BN**, the processor's power management. **Read.**
 - `AR1`: marking unreadable. **Inferred** to be the amplifier, from its designator and from Dorey's
@@ -180,6 +181,10 @@ Brian Dorey opened a 5th generation without clock. This unit, with clock and mad
   used one microphone, with an echo cancellation its author called good but not perfect.
 - An amplifier for the speaker.
 - Twelve LEDs at the ring's positions. Addressable ones need one pin and no driver.
+- A thickness near the original's, without it being critical. The board is screwed from the LED
+  face, so its connector face rests on the chassis: the socket, both connectors and the speaker
+  contacts keep their place whatever the thickness, and the soft ring takes up the difference on
+  the other face (**inferred**).
 
 ## Still to find out
 
@@ -202,8 +207,8 @@ its inside jaws, one of each kind. With a battery it reads to 0.01 mm.
    ours.
 4. **The speaker's impedance**: across its two pads.
 5. **Dimensions to a tenth of a millimetre**, with the caliper: the distances between the holes and
-   their diameters, the board's own diameter under the ring, its thickness, the socket and both
-   connectors. The photos give them to about 1 mm.
+   their diameters, the board's own diameter under the ring, its thickness away from the ring (a jaw
+   through one of the large holes), the socket and both connectors. The photos give them to about 1 mm.
 6. **The white ring**: its thickness and what it is made of. Soft and glued, it may not come off
    whole: a new board needs it moved over, or another cut to its shape.
 7. The unread chips of the microphone board, and the amplifier `AR1`.
