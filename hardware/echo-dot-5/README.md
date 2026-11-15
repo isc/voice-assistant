@@ -144,16 +144,24 @@ Face towards the chassis ([photo](photos/main-board-top.jpg), [in place](photos/
 
 ### Microphone and button board (kept)
 
-[Photo](photos/mic-board.jpg), lit from the side so that the laser markings show, and
-[another](photos/mic-board-tracks.jpg) in even light, where the labels and the tracks read better.
+[Photo](photos/mic-board.jpg), lit from the side so that the laser markings show,
+[another](photos/mic-board-tracks.jpg) in even light, where the labels and the tracks read better,
+and a [close-up](photos/mic-board-closeup.jpg) of the half with `U23` and `U6`.
 
-- `U23`: marked `5704` / `2176`, 28 pins (7 a side). **Inferred** to be an AKM **AK5704**, a
+- `U23`: marked `5704` / `217G`, 28 pins (7 a side). **Inferred** to be an AKM **AK5704**, a
   four-channel 32-bit converter with microphone preamplifiers in a 4 × 4 mm 28-pin package, which is
   what marking and package say together. Its datasheet is public.
-- Three microphones are fitted: `MK1`, `MK2` and one whose label does not read on the photos
-  (presumably `MK4`). A fourth footprint, `MK3`, is empty. **Read.** They are analog, since they go
-  through the converter. **Inferred.**
-- `U1`, `U3`, `U6`, `VR1`: markings not read. `U25` is an empty footprint.
+- Three microphones are fitted: `MK1`, `MK2` and `MK4`. A fourth footprint, `MK3`, is empty: a
+  port hole and bare pads. **Read.** They are analog, since they go through the converter.
+  **Inferred.** Each can carries two lines of text and a data matrix, not read.
+- `U6`: a black block about 2 mm square and 1 mm high, with pads on its sides, marked with a dot,
+  three characters (a `2`, then `3` or `9`, then `5` or `S`) and a data matrix. **Inferred** to be
+  the accelerometer behind the tap gestures Amazon gave this generation: the package is that of
+  one, and nothing else on this face would be.
+- `RT1`, `RT2`: thermistors by their designators, for the temperature this generation reports.
+  **Inferred.**
+- `U1`, `U3`, `VR1`: markings not read. `U1`, the largest after `U23`, has pads on its sides and a
+  marking on two lines. `U5` (six bare pads) and `U25` are empty footprints.
 - About thirty gold test pads labelled `TM1`…`TM39` and `TP1`…`TP4`.
 - The tracks seen on this face leave the connector `J1` for a millimetre or two, then go through
   vias to inner layers: the cable's pinout does not read on a photo.
@@ -237,7 +245,8 @@ photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none 
    connectors. Photos and caliper read on its beam give them to about 0.5 mm.
 6. **The white ring**: its thickness and what it is made of. Soft and glued, it may not come off
    whole: a new board needs it moved over, or another cut to its shape.
-7. The unread chips of the microphone board, and the amplifier `AR1`.
+7. The unread chips of the microphone board (`U1` first, then `U3` and `VR1`), `U6`'s three
+   characters, and the amplifier `AR1`.
 
 ## Sources
 
