@@ -1354,6 +1354,162 @@ class TestAlarmFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("arm_alarm", {t["name"] for t in self.server._tools()})
 
 
+# ---------------------------------------------------------------------------
+# Tests: a robot vacuum, started, paused or sent home by voice (AD-106)
+# ---------------------------------------------------------------------------
+
+VACUUM = "vacuum.parispi"
+
+
+def robot_vacuum(state: str = "docked", status: str = "Charging") -> dict:
+    """Paris's Roomba i5 as HA's iRobot integration has it (start, state, locate, send_command, return_home, stop,
+    pause: 13084), and as refresh_entities keeps it, the home's one vacuum: « Aspirateur », in its dock's room."""
+    attributes = {"friendly_name": "Parispi", "supported_features": 13084, "status": status, "bin_full": False}
+    return {"friendly_name": "Aspirateur", "domain": "vacuum", "state": state, "attributes": attributes,
+            "area_id": "living_room", "area_name": "Living Room"}  # fmt: skip
+
+
+class TestVacuum(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.client = make_client()
+        self.client.entities[VACUUM] = robot_vacuum()
+
+    def test_listed_resolved_and_said(self):
+        self.assertIn("aspirateur: Aspirateur", self.client.get_entity_list_for_prompt())
+        for name in ("aspirateur", "l'aspirateur", "Aspirateur", "robot", "roomba"):
+            self.assertEqual(self.client.resolve_all_entities(name), [VACUUM], name)
+        self.assertNotIn(VACUUM, self.client.resolve_all_entities("lumières", room="Living Room"))
+        self.assertFalse(self.client.needs_room("aspirateur"))  # the home's: it cleans all of it
+        for state, status, said in (
+            ("docked", "Charging", "Aspirateur sur sa base, en charge"),
+            ("cleaning", "Running", "Aspirateur en train de faire le ménage"),
+            ("returning", "End Mission", "Aspirateur en train de rentrer à sa base"),
+            ("error", "Error", "Aspirateur en erreur"),
+            ("unavailable", "", "Aspirateur ne répond pas (hors ligne)"),
+        ):
+            state_data = {"state": state, "attributes": {"status": status}}
+            self.assertEqual(self.client.format_state_for_speech(VACUUM, state_data), said)
+
+    async def test_its_battery_said(self):
+        states = {VACUUM: {"state": "docked", "attributes": {"status": "Charging"}}, "sensor.parispi_battery": {"state": "14"}}
+        self.client.get_entity_state = AsyncMock(side_effect=lambda eid, **_: states.get(eid))
+        self.assertEqual(await self.client.spoken_state(VACUUM), "Aspirateur sur sa base, en charge, batterie à 14 %")
+        del states["sensor.parispi_battery"]
+        self.assertEqual(await self.client.spoken_state(VACUUM), "Aspirateur sur sa base, en charge")
+
+    async def test_the_one_vacuum_is_aspirateur(self):
+        client = self.client
+        states = [{"entity_id": VACUUM, "state": "docked", "attributes": robot_vacuum()["attributes"]}]
+        client._session = MagicMock()
+        response = MagicMock(status=200, json=AsyncMock(return_value=states))
+        client._session.get.return_value.__aenter__.return_value = response
+        client._fetch_areas, client._fetch_entity_areas = AsyncMock(), AsyncMock(return_value={})
+        client._fetch_screens, client._fetch_hidden = AsyncMock(return_value=[]), AsyncMock(return_value=set())
+        await client.refresh_entities()
+        self.assertEqual(client.entities[VACUUM]["friendly_name"], "Aspirateur")
+
+    async def act(self, action: str, *states: str) -> str:
+        """vacuum(), the robot read as `states` one after another, the last for good; the order sent faked."""
+        reads = [{"state": state, "attributes": {}} for state in states]
+        self.client.get_entity_state = AsyncMock(side_effect=lambda _: reads.pop(0) if len(reads) > 1 else reads[0])
+        self.client._send = AsyncMock(return_value=None)
+        with patch("ha_client.asyncio.sleep", AsyncMock()):
+            return await self.client.vacuum(VACUUM, action)
+
+    async def test_done_and_confirmed(self):
+        for action, states, said in (
+            ("start", ("docked", "docked", "cleaning"), "Aspirateur lancé dans tout le logement : je ne sais pas le limiter à une pièce"),
+            ("pause", ("cleaning", "paused"), "Aspirateur en pause"),
+            ("return_to_base", ("paused", "returning"), "Aspirateur renvoyé à sa base"),
+        ):
+            self.assertEqual(await self.act(action, *states), said, action)
+            self.client._send.assert_awaited_once_with("vacuum", action, VACUUM)
+
+    async def test_not_sent_when_already_so(self):
+        """A start while it cleans would begin its round again."""
+        for action, state, said in (
+            ("start", "cleaning", "Aspirateur déjà en train de faire le ménage"),
+            ("return_to_base", "docked", "Aspirateur déjà sur sa base"),
+            ("pause", "docked", "Aspirateur déjà sur sa base"),
+            ("start", "unavailable", "Aspirateur ne répond pas (hors ligne)"),  # off the Wi-Fi: HA would drop it
+        ):
+            self.assertEqual(await self.act(action, state), said, action)
+            self.client._send.assert_not_awaited()
+
+    async def test_not_started_unconfirmed(self):
+        """The robot may refuse what HA handed on: a flat battery, a full bin."""
+        with patch("ha_client.VACUUM_CONFIRM_SECONDS", 0):
+            result = await self.act("start", "docked")
+        from voice_server import _NOTHING_DONE
+
+        self.assertEqual(result, "Pas de confirmation : Aspirateur toujours sur sa base 0 secondes après l'ordre")
+        self.assertTrue(_NOTHING_DONE.search(result))
+
+    def test_tool_offered_only_with_a_vacuum(self):
+        tools = {t["name"]: t for t in get_tool_definitions(self.client, vacuum=True)}
+        self.assertEqual(
+            tools["vacuum"]["parameters"]["properties"]["action"]["enum"], ["start", "pause", "return_to_base"]
+        )
+        self.assertNotIn("vacuum", {t["name"] for t in get_tool_definitions(self.client)})
+
+    def test_shortcut_in_effect(self):
+        from voice_server import _device_in_effect
+
+        self.assertTrue(_device_in_effect("vacuum", {"action": "start"}, {"state": "cleaning"}))
+        self.assertTrue(_device_in_effect("vacuum", {"action": "return_to_base"}, {"state": "docked"}))
+        self.assertFalse(_device_in_effect("vacuum", {"action": "start"}, {"state": "docked"}))
+        self.assertFalse(_device_in_effect("vacuum", {}, {"state": "cleaning"}))
+
+    def test_claims(self):
+        self.assertTrue(claims_completed_action("J'ai lancé l'aspirateur."))
+        self.assertTrue(claims_completed_action("Je renvoie l'aspirateur à sa base."))
+        self.assertFalse(claims_completed_action("L'aspirateur est sur sa base."))
+
+
+class TestVacuumFromTheServer(unittest.IsolatedAsyncioTestCase):
+    """Paris's vacuum, from either home; Charras has none, and never gets Paris's unasked (AD-106)."""
+
+    def setUp(self):
+        server = self.server = make_server({"SITES": "paris,charras"})
+        server.spotify, server.calendar_client = None, None
+        self.paris, self.charras = server.sites
+        for site in server.sites:
+            site.ha_client = make_client()
+            site.ha_client.call_service = AsyncMock(return_value="C'est fait")
+            site.ha_client.reachable = AsyncMock(side_effect=lambda ids: ids)
+        robot = self.paris.ha_client
+        robot.entities[VACUUM] = robot_vacuum()
+        robot.vacuum = AsyncMock(return_value="Aspirateur lancé")
+        server.site = self.paris
+
+    async def run_call(self, function: str, args: dict) -> str:
+        self.server.new_request(None)
+        return await self.server.execute_function(function, args, {"function": function, "args": args})
+
+    async def test_started_in_the_action_said(self):
+        self.assertEqual(await self.run_call("vacuum", {"action": "start"}), "Aspirateur lancé")
+        self.paris.ha_client.vacuum.assert_awaited_once_with(VACUUM, "start")
+        self.paris.ha_client.call_service.assert_not_awaited()
+        result = await self.run_call("vacuum", {"action": "stop"})  # none guessed
+        self.assertEqual(result, "Rien n'a été fait : précise l'action (start, pause, return_to_base)")
+        self.paris.ha_client.vacuum.assert_awaited_once()
+
+    async def test_from_charras(self):
+        self.server.site = self.charras
+        result = await self.run_call("vacuum", {"action": "start"})  # no home said: never Paris's unasked
+        self.assertEqual(result, "Rien n'a été fait : pas d'aspirateur ici. Il y en a un à Paris : demande si c'est celui-là")
+        self.paris.ha_client.vacuum.assert_not_awaited()
+        self.assertEqual(await self.run_call("vacuum", {"action": "start", "home": "paris"}), "Aspirateur lancé (Paris)")
+        self.paris.ha_client.vacuum.assert_awaited_once_with(VACUUM, "start")
+        self.assertIs(self.server.site, self.charras)
+
+    def test_tool_and_its_home(self):
+        tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
+        self.assertEqual(tools["vacuum"]["home"]["enum"], ["paris", "charras"])
+        del self.paris.ha_client.entities[VACUUM]
+        self.assertNotIn("vacuum", {t["name"] for t in self.server._tools()})
+
+
 HEATING_MODES = ["Off", "Auto", "Confort", "Réduit"]
 
 

@@ -9,7 +9,7 @@ from typing import Optional
 
 import aiohttp
 
-from ha_client import fold
+from ha_client import VACUUM_ACTIONS, fold
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ _TOOL_NAMES = {
     "unlock",
     "arm_alarm",
     "disarm_alarm",
+    "vacuum",
 }
 
 
@@ -58,12 +59,14 @@ _TOOL_NAMES = {
 # promised: « je vais vérifier son état », « j'ai vérifié », and nothing read (AD-082).
 _PAST = (
     "ouvert|ferm|allum|eteint|regl|lanc|programm|activ|desactiv|mis|baiss|mont|verrouill|verifi|regard|control"
-    "|arm|desarm"
+    "|arm|desarm|renvoy"
 )
-_PRESENT = "ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille|verifie|regarde|controle"
+_PRESENT = (
+    "ferme|ouvre|allume|eteins|regle|lance|programme|mets|baisse|monte|verrouille|verifie|regarde|controle|renvoie"
+)
 _INFINITIVE = (
     "ouvrir|fermer|allumer|eteindre|regler|lancer|programmer|mettre|baisser|monter|verrouiller|activer|desactiver"
-    "|verifier|regarder|controler|armer|desarmer"
+    "|verifier|regarder|controler|armer|desarmer|renvoyer"
 )
 _ACTION_CLAIM = re.compile(
     r"c'est fait|c'est entendu|voila|je m'en occupe|"
@@ -102,12 +105,13 @@ _ALARM_MODE_WORDS = {
 
 
 def get_tool_definitions(
-    ha_client, calendar_client=None, music=False, homes=(), locks=False, heating=(), alarm=()
+    ha_client, calendar_client=None, music=False, homes=(), locks=False, heating=(), alarm=(), vacuum=False
 ) -> list:
-    """Return LLM tool definitions. `homes`: the homes' names, which the door, heating and alarm tools,
-    get_state and get_sensor may name when there are several (AD-068, AD-071, AD-083); `locks`: whether some
-    home has a lock; `heating`: the modes of the homes' heating, if some home's can be set (AD-071); `alarm`:
-    the modes the homes' alarms can be armed in, if some home has one (AD-083)."""
+    """Return LLM tool definitions. `homes`: the homes' names, which the door, heating, alarm and vacuum tools,
+    get_state and get_sensor may name when there are several (AD-068, AD-071, AD-083, AD-106); `locks`: whether
+    some home has a lock; `heating`: the modes of the homes' heating, if some home's can be set (AD-071); `alarm`:
+    the modes the homes' alarms can be armed in, if some home has one (AD-083); `vacuum`: whether some home has a
+    robot vacuum (AD-106)."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -637,6 +641,36 @@ def get_tool_definitions(
             }
         ]
 
+    # A home's robot vacuum, which cleans the whole home: no room, no device named (AD-106). « arrête » sends it home,
+    # where it charges, rather than leave it where it stopped
+    vacuum_tools = []
+    if vacuum:
+        vacuum_tools = [
+            {
+                "name": "vacuum",
+                "description": (
+                    "Le robot aspirateur : lancer le ménage (« lance l'aspirateur », « passe l'aspirateur »), le "
+                    "mettre en pause là où il est, ou le renvoyer à sa base (« arrête l'aspirateur »). Il fait "
+                    "toujours tout le logement. Pas pour la musique."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": list(VACUUM_ACTIONS),
+                            "description": (
+                                "start : lancer ou reprendre le ménage ; pause : le mettre en pause sur place ; "
+                                "return_to_base : l'arrêter et le renvoyer à sa base"
+                            ),
+                        },
+                        **elsewhere,
+                    },
+                    "required": ["action"],
+                },
+            }
+        ]
+
     return [
         {
             "name": "turn_on",
@@ -740,7 +774,7 @@ def get_tool_definitions(
             "name": "get_state",
             "description": (
                 "Obtenir l'état actuel d'un appareil (allumé/éteint, température, ouvert/fermé, verrouillé, "
-                "alarme armée)"
+                "alarme armée, aspirateur)"
             ),
             "parameters": {
                 "type": "object",
@@ -782,6 +816,7 @@ def get_tool_definitions(
         *lock_tools,
         *alarm_tools,
         *heating_tools,
+        *vacuum_tools,
         {
             "name": "end_conversation",
             "description": (

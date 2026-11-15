@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from contextvars import ContextVar
+from functools import partial
 from typing import Optional
 
 import aiohttp
@@ -34,7 +35,9 @@ def quieted():
         quiet.reset(token)
 
 # Domains we expose as LLM tools
-SUPPORTED_DOMAINS = {"light", "switch", "cover", "climate", "media_player", "lock", "select", "alarm_control_panel"}
+SUPPORTED_DOMAINS = {
+    "light", "switch", "cover", "climate", "media_player", "lock", "select", "alarm_control_panel", "vacuum",
+}  # fmt: skip
 
 # French stopwords to strip for fuzzy matching
 STOPWORDS = {"le", "la", "les", "l", "du", "de", "des", "un", "une", "d"}
@@ -242,6 +245,22 @@ _ALARM_STATES = {
     "pending": "sur le point de se déclencher",
     "triggered": "déclenchée",
 }
+# The devices a home has one of, which their tools name by no entity (AD-083, AD-106): the word, and how another
+# home's is offered (« Il y en a une à Charras : demande si c'est celle-là »)
+HOME_DEVICES = {"alarm_control_panel": ("alarme", "une", "celle-là"), "vacuum": ("aspirateur", "un", "celui-là")}
+# A robot vacuum's states (HA's VacuumActivity) as said after its name (AD-106)
+_VACUUM_STATES = {
+    "cleaning": "en train de faire le ménage",
+    "docked": "sur sa base",
+    "returning": "en train de rentrer à sa base",
+    "paused": "en pause",
+    "idle": "arrêté hors de sa base",
+    "error": "en erreur",
+}
+# The vacuum tool's actions, HA's vacuum services, and the states each leaves the robot in (AD-106)
+VACUUM_ACTIONS = {"start": {"cleaning"}, "pause": {"paused", "docked", "idle"}, "return_to_base": {"returning", "docked"}}
+# How long a robot vacuum takes to say it does what it was told: Paris's Roomba, over its local MQTT
+VACUUM_CONFIRM_SECONDS = 10
 
 
 def alarm_mode(said) -> Optional[str]:
@@ -456,9 +475,11 @@ class HAClient:
                 "area_name": area_name,
             }
 
-        # A home's one alarm is « Alarme » in the prompt and the replies, not « Somfy Home Alarm Maison » (AD-083)
-        if len(panels := self.alarm_panels) == 1:
-            self.entities[panels[0]]["friendly_name"] = "Alarme"
+        # A home's one alarm is « Alarme » in the prompt and the replies, not « Somfy Home Alarm Maison » (AD-083);
+        # its one vacuum « Aspirateur », not « Parispi », the name the family gave it in iRobot's app (AD-106)
+        for domain, (word, *_) in HOME_DEVICES.items():
+            if len(found := [eid for eid, info in self.entities.items() if info["domain"] == domain]) == 1:
+                self.entities[found[0]]["friendly_name"] = word.capitalize()
 
         # A setpoint sensor names its circuit's select: « Radiateurs consigne » has `circuit:
         # select.radiateurs_mode` (home-infra charras/oekofen/)
@@ -504,6 +525,7 @@ class HAClient:
                 "lock": "serrures",
                 "select": "chauffage",
                 "alarm_control_panel": "alarme",
+                "vacuum": "aspirateur",
             }.get(info["domain"], info["domain"])
             # Roof windows and mosquito screens are covers too — list them apart so the LLM never
             # offers a skylight, or a screen, when the user asked for a roller shutter.
@@ -544,11 +566,16 @@ class HAClient:
         "alarme": ("alarm_control_panel", None),
         "alarmes": ("alarm_control_panel", None),
         "l'alarme": ("alarm_control_panel", None),  # normalize() keeps an elided article
+        "aspirateur": ("vacuum", None),
+        "aspirateurs": ("vacuum", None),
+        "l'aspirateur": ("vacuum", None),
+        "robot": ("vacuum", None),
+        "roomba": ("vacuum", None),
     }
 
     # Kinds that are the home's, not a room's: « le chauffage » is every circuit of it, HA puts them nowhere
-    # (AD-071); « l'alarme », the house's (AD-083)
-    _HOME_WIDE = {"select", "alarm_control_panel"}
+    # (AD-071); « l'alarme », the house's (AD-083); « l'aspirateur », which cleans it all from its dock's room (AD-106)
+    _HOME_WIDE = {"select", "alarm_control_panel", "vacuum"}
 
     # Kinds of which a name several hold means them all (« Lumière terrasse », AD-096); « la Sonos » is one
     # speaker, and a switch or a window is not acted on unnamed
@@ -834,19 +861,41 @@ class HAClient:
             return error
         return await self._alarm_reached(entity_id, {armed, "arming"})
 
+    async def vacuum(self, entity_id: str, action: str) -> str:
+        """A robot vacuum started, paused or sent back to its dock (AD-106). Not sent when it already is so: a start
+        while it cleans would begin its round again. Awaited until it says it is so, for VACUUM_CONFIRM_SECONDS, as
+        the robot may refuse what HA handed on (a flat battery, a full bin)."""
+        wanted = VACUUM_ACTIONS[action]
+        if (state := await self.get_entity_state(entity_id)) and state.get("state") in ("unavailable", "unknown"):
+            return self.vacuum_words(entity_id, state)  # off the Wi-Fi: HA would take the order and drop it
+        if state and state.get("state") in wanted:
+            return self.vacuum_words(entity_id, state, adverb="déjà")
+        if error := await self._send("vacuum", action, entity_id):
+            return error
+        done = self._build_response("vacuum", action, self.display_name(entity_id), {})
+        words = partial(self.vacuum_words, entity_id)
+        return await self._reached(entity_id, wanted, VACUUM_CONFIRM_SECONDS, words, done)
+
     async def _alarm_reached(self, entity_id: str, wanted: set[str]) -> str:
-        """The alarm's state once it is a wanted one, read every half second; else what it still is after
-        ALARM_CONFIRM_SECONDS. HA's 200 only means the order was handed on: to MQTT, at Charras."""
-        deadline = time.monotonic() + ALARM_CONFIRM_SECONDS
+        def words(state: dict, adverb: str = "") -> str:
+            return self.alarm_words(entity_id, state["state"], adverb)
+
+        return await self._reached(entity_id, wanted, ALARM_CONFIRM_SECONDS, words)
+
+    async def _reached(self, entity_id: str, wanted: set[str], seconds: float, words, done: str = "") -> str:
+        """`done` (else the device's words) once its state is a wanted one, read every half second; else what it
+        still is after `seconds`. HA's 200 only means the order was handed on: to MQTT at Charras, which goes
+        through the alarm's own cloud and is never back at once; to the robot over its own MQTT at Paris."""
+        deadline = time.monotonic() + seconds
         while True:
-            await asyncio.sleep(0.5)  # the order goes through the alarm's own cloud, at Charras: never back at once
-            state = (await self.get_entity_state(entity_id) or {}).get("state") or "injoignable"
-            if state in wanted:
-                return self.alarm_words(entity_id, state)
+            await asyncio.sleep(0.5)
+            state = await self.get_entity_state(entity_id) or {}
+            state = {**state, "state": state.get("state") or "injoignable"}
+            if state["state"] in wanted:
+                return done or words(state)
             if time.monotonic() > deadline:
-                logger.warning(f"{entity_id} still {state} after {ALARM_CONFIRM_SECONDS} s, not {wanted}")
-                words = self.alarm_words(entity_id, state, "toujours")
-                return f"Pas de confirmation : {words} {ALARM_CONFIRM_SECONDS} secondes après l'ordre"
+                logger.warning(f"{entity_id} still {state['state']} after {seconds} s, not {wanted}")
+                return f"Pas de confirmation : {words(state, adverb='toujours')} {seconds} secondes après l'ordre"
 
     async def _send(self, domain: str, service: str, entity_id: str, **kwargs) -> Optional[str]:
         """Post a service call: None once HA took it, else what went wrong, in French."""
@@ -953,10 +1002,32 @@ class HAClient:
 
     async def spoken_state(self, entity_id: str) -> Optional[str]:
         """The device's state as a sentence for the reply, a heating circuit's with what it heats to (AD-075)."""
+        if entity_id.startswith("vacuum."):
+            # Its battery is a sensor of its own, named after it (iRobot's integration: `sensor.parispi_battery`)
+            battery = f"sensor.{entity_id.split('.', 1)[1]}_battery"
+            state, battery = await asyncio.gather(self.get_entity_state(entity_id), self.get_entity_state(battery))
+            return self.vacuum_words(entity_id, state, battery) if state else None
         if not (state := await self.get_entity_state(entity_id)):
             return None
         setpoint = await self.get_entity_state(sensor) if (sensor := self.setpoints.get(entity_id)) else None
         return self.format_state_for_speech(entity_id, state, setpoint)
+
+    def vacuum_words(self, entity_id: str, state: dict, battery: Optional[dict] = None, adverb: str = "") -> str:
+        """A robot vacuum's state as said, with its battery when known: « Aspirateur sur sa base, en charge,
+        batterie à 14 % », « Aspirateur déjà en pause » (AD-106)."""
+        value = state.get("state")
+        if value in ("unavailable", "unknown"):
+            return self.format_state_for_speech(entity_id, state)
+        attributes = state.get("attributes", {})
+        words = [" ".join(filter(None, (self.display_name(entity_id), adverb, _VACUUM_STATES.get(value, value))))]
+        if value == "docked" and str(attributes.get("status", "")).lower() == "charging":
+            words.append("en charge")
+        level = (battery or {}).get("state") or attributes.get("battery_level")
+        try:
+            words.append(f"batterie à {round(float(level))} %")
+        except (TypeError, ValueError):
+            pass
+        return ", ".join(words)
 
     @property
     def speakers(self) -> list[str]:
@@ -965,6 +1036,10 @@ class HAClient:
     @property
     def alarm_panels(self) -> list[str]:
         return [eid for eid, info in self.entities.items() if info["domain"] == "alarm_control_panel"]
+
+    @property
+    def vacuums(self) -> list[str]:
+        return [eid for eid, info in self.entities.items() if info["domain"] == "vacuum"]
 
     def alarm_words(self, entity_id: str, state: str, adverb: str = "") -> str:
         """An alarm's state as said: « Alarme armée en mode nuit », « Alarme déjà désarmée »."""
@@ -1056,6 +1131,10 @@ class HAClient:
             ("lock", "lock"): f"{display_name} en cours de verrouillage",
             ("lock", "unlock"): f"{display_name} en cours de déverrouillage",
             ("select", "select_option"): f"{display_name} en mode {kwargs.get('option', '?')}",
+            # « Passe l'aspirateur dans la cuisine » got « je lance l'aspirateur dans la cuisine » (AD-106)
+            ("vacuum", "start"): f"{display_name} lancé dans tout le logement : je ne sais pas le limiter à une pièce",
+            ("vacuum", "pause"): f"{display_name} en pause",
+            ("vacuum", "return_to_base"): f"{display_name} renvoyé à sa base",
         }
         return responses.get((domain, service), "C'est fait")
 
@@ -1123,6 +1202,9 @@ class HAClient:
 
         if domain == "alarm_control_panel":
             return self.alarm_words(entity_id, state)
+
+        if domain == "vacuum":
+            return self.vacuum_words(entity_id, state_data)
 
         if domain == "media_player":
             # Not « est off »: a Google Home playing nothing says off, which the model took for a speaker unable

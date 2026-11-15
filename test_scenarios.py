@@ -66,7 +66,8 @@ class _Response:
 _EFFECTS = {
     "turn_on": "on", "turn_off": "off", "toggle": "on", "open_cover": "open", "close_cover": "closed",
     "lock": "locked", "play_media": "playing", "media_play": "playing", "media_pause": "paused",
-    "media_stop": "idle", "alarm_disarm": "disarmed",
+    "media_stop": "idle", "alarm_disarm": "disarmed", "start": "cleaning", "pause": "paused",
+    "return_to_base": "returning",
 }  # fmt: skip
 # The template HAClient.reachable reads states with
 _STATES_TEMPLATE = re.compile(r"\{% for e in (\[.*?\]) %\}\{\{ e \}\} \{\{ states\(e\) \}\}")
@@ -208,8 +209,11 @@ def build_server(snapshot: dict, site: str):
     """A server with the snapshot's homes, each behind its FakeHA, serving `site`."""
     import ha_client
     from ha_client import HAClient
-    from test_unit import make_server
+    from test_unit import make_server, robot_vacuum
 
+    # Devices this checkout reaches that the live server's snapshot may not have yet, by home: Paris's Roomba,
+    # until AD-106 is deployed
+    added = {"paris": {"vacuum.parispi": robot_vacuum()}}
     config = snapshot["config"]
     ha_client.LOCAL_CONFIG.clear()
     ha_client.LOCAL_CONFIG.update(config)
@@ -225,6 +229,8 @@ def build_server(snapshot: dict, site: str):
         for key, value in home.items():
             if key != "name":
                 setattr(client, key, value)
+        for eid, info in added.get(each.name, {}).items():
+            client.entities.setdefault(eid, info)
         client._session = FakeHA(client.entities)
     server.site = server._voice_site = server.site_named(site)
     server.calendar_client = empty_calendar()
@@ -340,6 +346,26 @@ def moves(**services: str):
         return sent == wanted, ", ".join(f"{service} {name}" for name, service in services.items()) + ", nothing else"
 
     return check
+
+
+def vacuums(*actions: str, home: str = ""):
+    """The robot vacuum got these actions, and no other; at another home, by the calls that reached it."""
+
+    def check(t):
+        if home:
+            done = [c["args"].get("action") for c in t.calls if c["function"] == "vacuum"
+                    and str(c["args"].get("home", "")).lower() == home and not str(c.get("result")).startswith("Rien")]
+            return done == list(actions), f"vacuum {', '.join(actions) or 'nothing'} at {home}"  # fmt: skip
+        sent = [service for domain, service, _ in t.sent if domain == "vacuum"]
+        return sent == list(actions), f"vacuum {', '.join(actions) or 'nothing'}"
+
+    return check
+
+
+def pauses_music(t):
+    paused = any(c["function"] == "stop_media" or c["args"].get("action") == "pause" for c in t.calls if c["function"] != "vacuum")
+    robot = [service for domain, service, _ in t.sent if domain == "vacuum"]
+    return paused and not robot, "the music paused, not the vacuum"
 
 
 def says(*patterns: str, unlike: str = ""):
@@ -546,6 +572,30 @@ SCENARIOS = [
     ]),
     ("AD-102 every light, the bedside lamps' power kept", "paris", PARIS_EVENING, [
         ("Éteins toutes les lumières de l'appartement.", turns_off(*PARIS_EVENING_LIGHTS, allowed=("light.",)), {}),
+    ]),
+    # Paris's Roomba, in HA since 2026-11-15: started, paused, resumed, and « arrête » sends it to its dock (AD-106)
+    ("AD-106 the vacuum, start to dock", "paris", {"vacuum.parispi": "docked"}, [
+        ("Lance l'aspirateur.", vacuums("start"), {}),
+        ("Mets-le en pause.", vacuums("pause"), {}),
+        ("Tu peux le relancer ?", vacuums("start"), {}),
+        ("Arrête l'aspirateur.", vacuums("return_to_base"), {}),
+    ]),
+    ("AD-106 where is the vacuum", "paris", {"vacuum.parispi": "returning"}, [
+        ("Il est où l'aspirateur ?", says(r"rentr|base"), {}),
+    ]),
+    # It cleans the whole flat: a room said is not one it keeps to, and the reply says so, or asks
+    ("AD-106 the vacuum in the kitchen", "paris", {"vacuum.parispi": "docked"}, [
+        ("Passe l'aspirateur dans la cuisine.", says(r"\btout\b|\btoute\b|entier|ensemble|seule piece|\?"), {}),
+    ]),
+    # « Mets en pause » with music playing is the music's, though the robot cleans
+    ("AD-106 pause is the music's", "paris", {**PARIS_SPEAKERS, "vacuum.parispi": "cleaning"}, [
+        ("Mets le prélude numéro deux de Bach sur la Sonos.", plays_on("media_player.sonos_paris"), {}),
+        ("Mets en pause.", pauses_music, {}),
+    ]),
+    # Charras has none: Paris's is never started unasked, the model asks; then it is
+    ("AD-106 the vacuum from Charras", "charras", {}, [
+        ("Lance l'aspirateur.", vacuums(home="paris"), {}),
+        ("Oui, celui de Paris.", vacuums("start", home="paris"), {}),
     ]),
 ]  # fmt: skip
 

@@ -46,7 +46,7 @@ def reply(d: dict) -> str:
 # Calls that act, or speak, or make something; reads are left out
 ACTIONS = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_heating", "lock", "unlock",
-    "arm_alarm", "disarm_alarm",
+    "arm_alarm", "disarm_alarm", "vacuum",
     "play_radio", "play_music", "move_media", "music_control", "change_volume", "set_volume", "stop_media",
     "set_timer", "set_alarm", "cancel_timer", "create_event", "update_event", "show_image",
 }  # fmt: skip

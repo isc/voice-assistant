@@ -42,7 +42,9 @@ from aiohttp import web
 import onnx_gpu
 from ha_client import (
     ALARM_MODES,
+    HOME_DEVICES,
     LOCAL_CONFIG,
+    VACUUM_ACTIONS,
     alarm_mode,
     asks_every_room,
     asks_heating_on,
@@ -203,7 +205,7 @@ _NOTHING_DONE = re.compile(
 _REDOABLE = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock",
     "arm_alarm", "set_heating", "play_radio", "play_music", "move_media", "stop_media", "set_volume",
-    "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image",
+    "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image", "vacuum",
 }  # fmt: skip
 
 
@@ -245,6 +247,8 @@ def _device_in_effect(function_name: str, arguments: dict, state: dict) -> bool:
         return bool(mode) and value in (ALARM_MODES[mode][1], "arming")
     if function_name == "set_heating":
         return fold(str(value)) == fold(str(arguments.get("mode", "")))
+    if function_name == "vacuum":
+        return value in VACUUM_ACTIONS.get(arguments.get("action"), ())
     return False
 
 
@@ -1217,13 +1221,15 @@ class VoiceAssistantServer:
         "unlock": ["lock"],
         "arm_alarm": ["alarm_control_panel"],
         "disarm_alarm": ["alarm_control_panel"],
+        "vacuum": ["vacuum"],
         "get_state": None,
     }
-    # The alarm tools name no device: the home's alarm (AD-083)
+    # The alarm tools name no device: the home's alarm (AD-083); nor does the vacuum's, the home's vacuum (AD-106)
     _ALARM_TOOLS = {"arm_alarm", "disarm_alarm"}
-    # The calls that may name another home: its door from this one, its heating, its alarm, its states (AD-068,
-    # AD-071, AD-083)
-    _ANY_HOME = {"lock", "unlock", "arm_alarm", "disarm_alarm", "set_heating", "get_state", "get_sensor"}
+    _HOME_DEVICE_TOOLS = _ALARM_TOOLS | {"vacuum"}
+    # The calls that may name another home: its door from this one, its heating, its alarm, its vacuum, its states
+    # (AD-068, AD-071, AD-083, AD-106)
+    _ANY_HOME = {"lock", "unlock", "arm_alarm", "disarm_alarm", "set_heating", "vacuum", "get_state", "get_sensor"}
 
     def _home_named(self, arguments: dict) -> Optional[tuple[Site, dict]]:
         """The home a call names, and its arguments as read there: its `home`, else a home's name said in
@@ -1475,11 +1481,12 @@ class VoiceAssistantServer:
                 return f"Pas de {entity_name} ici, mais à {home.name.capitalize()} : {result}"
             if asks_room:
                 return _WHICH_ROOM
-            if function_name in self._ALARM_TOOLS:
-                # Another home's is never armed unasked, as the heating is not (AD-077): the model asks
+            if function_name in self._HOME_DEVICE_TOOLS:
+                # Another home's is never armed or started unasked, as the heating is not (AD-077): the model asks
+                _, article, pronoun = HOME_DEVICES[domains[0]]
                 there = self._only_home_with(entity_name, None, domains)
-                ask = f". Il y en a une à {there.name.capitalize()} : demande si c'est celle-là" if there else ""
-                return f"Rien n'a été fait : pas d'alarme ici{ask}"
+                ask = f". Il y en a {article} à {there.name.capitalize()} : demande si c'est {pronoun}" if there else ""
+                return f"Rien n'a été fait : pas d'{entity_name} ici{ask}"
             return f"Appareil {entity_name} non trouvé"
 
         if function_name == "get_state":
@@ -1495,6 +1502,8 @@ class VoiceAssistantServer:
             return self._offer("unlock", entity_ids, call)
         if function_name in self._ALARM_TOOLS:
             return await self._alarm(function_name, arguments, entity_ids, call)
+        if function_name == "vacuum":
+            return await self._vacuum(arguments, entity_ids)
 
         extra = {}
         if function_name == "set_temperature" and "temperature" in arguments:
@@ -1577,8 +1586,20 @@ class VoiceAssistantServer:
         return None
 
     def _entity_said(self, function_name: str, arguments: dict) -> str:
-        """The device a call names; the alarm tools name none, the home's alarm (AD-083)."""
-        return "alarme" if function_name in self._ALARM_TOOLS else arguments.get("entity", "")
+        """The device a call names; the alarm and vacuum tools name none, the home's own (AD-083, AD-106)."""
+        if function_name in self._HOME_DEVICE_TOOLS:
+            return HOME_DEVICES[self._DEVICE_DOMAINS[function_name][0]][0]
+        return arguments.get("entity", "")
+
+    async def _vacuum(self, arguments: dict, entity_ids: list[str]) -> str:
+        """The home's robot vacuum started, paused or sent back to its dock, awaited as a lock is: whoever leaves on
+        « aspirateur lancé » must be told when it did not start (AD-106)."""
+        if len(entity_ids) > 1:
+            names = ", ".join(map(self.ha_client.display_name, entity_ids))
+            return f"Rien n'a été fait : plusieurs aspirateurs ici ({names}), un seul est pris en charge"
+        if (action := str(arguments.get("action") or "")) not in VACUUM_ACTIONS:
+            return f"Rien n'a été fait : précise l'action ({', '.join(VACUUM_ACTIONS)})"
+        return await self.ha_client.vacuum(entity_ids[0], action)
 
     async def _alarm(self, function_name: str, arguments: dict, entity_ids: list[str], call: dict) -> str:
         """The home's alarm armed in the mode asked, or proposed for disarming from the web app (AD-083)."""
@@ -2491,6 +2512,7 @@ class VoiceAssistantServer:
         locks = any(info["domain"] == "lock" for client in clients for info in client.entities.values())
         heating = list(dict.fromkeys(mode for client in clients for mode in client.heating_modes))
         alarm = list(dict.fromkeys(mode for client in clients for mode in client.alarm_modes()))
+        vacuum = any(client.vacuums for client in clients)
         return get_tool_definitions(
             self.ha_client,
             self.calendar_client,
@@ -2499,6 +2521,7 @@ class VoiceAssistantServer:
             locks=locks,
             heating=heating,
             alarm=alarm,
+            vacuum=vacuum,
         )
 
     def _continue(self, conversation) -> None:
