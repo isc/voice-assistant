@@ -10,9 +10,6 @@ On 2026-10-10 the Voice PE most likely rebooted after a reply asked for follow-u
 ### Back to the official Voice PE firmware
 The Voice PE runs our build of 26.9.0 with ESPHome 2026.9.1, for the mixer fix (AD-054). Once a release is built with 2026.9.1 or later (`esphome-version` in its `build.yml`), install it from the update entity. If an announcement hangs again before then (no sound, « Queue full » in the device log), it is a second bug: compare with [#643](https://github.com/esphome/home-assistant-voice-pe/issues/643) and take it upstream.
 
-### Drop the app's spoken reply as a file (after 2026-11-22)
-Since AD-105 the web app asks `/api/listen?stream=1` and plays the reply's speech as it comes; a page loaded before (an iPhone PWA left in the background keeps its code for days) still gets the URL of a file. Once every phone has reloaded, drop that branch: `streamed` in `web_ui.handle_listen`, `speak` in `answer_recording`, the page's `stream: '1'`.
-
 ### Listen for the answer while the satellite plays
 A reply that asks a question gets no follow-up while the satellite plays music itself (AD-045): on 2026-11-07 « la Google Home ou la Sonos ? » could only be answered with the wake word and the whole request again (AD-095 removed that question, not the others). Two reasons: the 2026-10-10 reboot, inferred from the LED, after a reply asked for follow-up over its own player, on a firmware since replaced (AD-054); and its microphone hearing its own music, which the VAD may take for speech. Pausing its music for the follow-up (the reply, then 5 s) and resuming it unless a request came would answer both. To try in front of the Paris satellite, someone ready to see whether it reboots: no test shows it. With Spotify the pause is the stream's, 10 s ahead (AD-091), resumed by the server this time.
 

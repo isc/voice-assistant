@@ -472,12 +472,10 @@ def setup_routes(app, server):
         « end » when the user is done speaking, « hold » while the button is held; closing drops the request.
 
         ?site=… as for a typed request; ?client=… the browser's id (AD-060); ?follow_up=1 for the listening
-        that follows a reply; ?stream=1 from a page that plays the reply as it is made: then the reply has the
-        audio's `rate`, its PCM follows in binary messages, and the socket's close ends it (AD-105). A page
-        loaded before gets the URL of a file, `audio`."""
+        that follows a reply. The reply has its speech's `rate`; the speech follows in binary messages as it is
+        made, and the socket's close ends it (AD-105)."""
         await serve(request, dict(request.query))
         follow_up = request.query.get("follow_up") == "1"
-        streamed = request.query.get("stream") == "1"
         if not follow_up:
             server.warm_llm()  # while the request is spoken
         ws = web.WebSocketResponse()
@@ -491,17 +489,13 @@ def setup_routes(app, server):
                 follow_up,
                 lambda transcript: _send(ws, {"type": "transcript", "text": transcript}),
                 lambda audio_url: _send(ws, {"type": "wait", "audio": _page_path(audio_url)}),
-                speak=not streamed,
             )
         except Exception:
             logger.exception("App request failed")
             reply = {"response": None}
         if reply and reply["response"]:
-            if streamed:
-                await _send(ws, {"type": "reply", **reply, "rate": server.tts.sample_rate})
-                await _speak_to(ws, server.tts, reply["response"])
-            else:
-                await _send(ws, {"type": "reply", **reply, "audio": _page_path(reply["tts_url"])})
+            await _send(ws, {"type": "reply", **reply, "rate": server.tts.sample_rate})
+            await _speak_to(ws, server.tts, reply["response"])
         elif reply:
             await _send(ws, {"type": "error"})
         await ws.close()

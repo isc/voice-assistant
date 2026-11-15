@@ -2762,12 +2762,11 @@ class VoiceAssistantServer:
         follow_up: bool,
         on_transcript: Callable[[str], Awaitable],
         on_wait: Callable[[str], Awaitable],
-        speak: bool = True,
     ) -> Optional[dict]:
         """Answer a request the phone heard (AD-059): recorded, transcribed unless the VAD heard no speech
         (AD-036), told to `on_transcript`, answered, « Un petit instant. » given to `on_wait` if that takes long
-        (AD-079); with `speak`, the reply's audio file, for a page that does not play it as it is made (AD-105).
-        None when nothing was said; errors are logged and raised."""
+        (AD-079). No audio file: the page plays the reply's speech as it is made (AD-105). None when nothing was
+        said; errors are logged and raised."""
         timings = {}
         # What became of the request, beside its recording, as for the satellite's
         entry = {"site": self.site.name, "source": self._source("app"), "follow_up": follow_up, "vad_speech": heard}
@@ -2780,7 +2779,7 @@ class VoiceAssistantServer:
             unanswered = self._unanswered(transcript, follow_up)
             await on_transcript("" if unanswered else transcript)  # the page ends a follow-up that got nothing
             if not unanswered:
-                reply = await self.answer(transcript, "app", timings, speak, audio=entry["audio"], on_wait=on_wait)
+                reply = await self.answer(transcript, "app", timings, False, audio=entry["audio"], on_wait=on_wait)
                 entry.update(response=reply["response"], tool_calls=reply["tool_calls"])
                 return reply
             if heard or not follow_up:  # a follow-up nobody spoke in is how conversations end

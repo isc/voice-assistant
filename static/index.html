@@ -908,7 +908,7 @@ async function startVoice(followUp = false) {
 
   const url = new URL('api/listen', location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  url.search = new URLSearchParams(tagged({stream: '1', ...(followUp ? {follow_up: '1'} : {})}));
+  url.search = new URLSearchParams(tagged(followUp ? {follow_up: '1'} : {}));
   const ws = session.ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { session.early.forEach((message) => ws.send(message)); session.early = []; };

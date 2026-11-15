@@ -4572,6 +4572,11 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         server.stt = MagicMock(transcribe=AsyncMock(return_value="ferme les volets"))
         server.text_to_speech_file = AsyncMock(return_value="http://192.168.1.10:8888/tts/reply_1.flac")
 
+        async def chunks(text):
+            yield b"\x00\x00" * 4
+
+        server.tts = MagicMock(sample_rate=24000, chunks=chunks)
+
         async def process_with_llm(api, text, dry_run=False):
             server._last_tool_calls = [{"function": "close_cover", "args": {"entity": "volets"}, "result": "OK"}]
             return "C'est fait."
@@ -4591,7 +4596,7 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([m["type"] for m in messages], ["speech", "heard", "transcript", "reply"])
         self.assertEqual(messages[2]["text"], "ferme les volets")
         reply = messages[3]
-        self.assertEqual((reply["response"], reply["audio"]), ("C'est fait.", "tts/reply_1.flac"))
+        self.assertEqual((reply["response"], reply["rate"]), ("C'est fait.", 24000))
         self.assertTrue(reply["follow_up"])
         entry = self.server.exchange_log.entries[-1]
         self.assertEqual(entry["client"], "phone42")  # its own conversation, for the page (AD-060)
@@ -4603,7 +4608,7 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         with wave.open(str(self.server.recordings.path(entry["audio"]))) as recording:
             self.assertEqual(recording.getnframes(), 3 * 1024)
 
-    async def test_a_page_that_streams_gets_the_speech_after_the_reply(self):
+    async def test_the_speech_follows_the_reply(self):
         """The reply's PCM in binary messages of 160 ms at most as Phonon makes it, then the socket's close; no file
         (AD-105)."""
 
@@ -4614,7 +4619,7 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
         self.server.tts = MagicMock(sample_rate=24000, chunks=chunks)
         client = await self.client()
         with patch("web_ui.SpeechEnd", FakeSpeech):
-            ws = await client.ws_connect("/api/listen?stream=1")
+            ws = await client.ws_connect("/api/listen")
             for _ in range(3):
                 await ws.send_bytes(bytes(2048))
             messages = [await ws.receive_json() for _ in range(4)]
