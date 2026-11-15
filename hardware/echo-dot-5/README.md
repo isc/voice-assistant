@@ -250,6 +250,18 @@ So the pinout of the 25-contact cable, the display's, and a board to this outlin
 published anywhere found. Worth searching again before a board is drawn: LocalDot's author, or a
 buyer of his board, is the likeliest to turn to the later generations.
 
+### The Echo Pop, the household's other model
+
+Not opened. **From** Dorey's teardown of it, and a search like the one above: no replacement board
+and no pinout published, no exploit (« churro », secure boot on); one repository reuses its speaker
+alone. It is built otherwise: one main board carries the microphones (three under the top, one at
+an edge), the three buttons, four LEDs behind a light pipe, the converter (an ES7243, from a
+reader of his) and the amplifier (a TI TAS5805M). The shell holds besides only the speaker, on
+spring tabs, and a small board for the 12 V jack. A board for it would have no cable to trace, and
+nothing to reuse but the shell, the speaker and the jack: its own microphones, placed under the
+shell's holes, and its own buttons under the caps. It opens by prying off the fabric front, held
+by foam tape.
+
 ## What a replacement board would carry
 
 - The same outline and holes, the barrel socket and the two speaker contacts at the same places.
@@ -311,5 +323,6 @@ photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none 
   other software on Amazon's own board, older models
 - [kaeru issue 118](https://github.com/R0rt1z2/kaeru/issues/118), the 5th generation's boot chain
 - Liam Pettigrew, [The Franken Dot](https://fulloch.com/posts/the-franken-dot/)
+- Brian Dorey, [Amazon Echo Pop teardown](https://www.briandorey.com/post/echo-pop-smart-speaker-teardown)
 - [Turning an old Echo Dot into a local voice assistant](https://dev.to/adamjrg/turning-an-old-echo-dot-into-a-local-voice-assistant-1nlb),
   for which models have an exploit
