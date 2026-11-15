@@ -209,11 +209,7 @@ def build_server(snapshot: dict, site: str):
     """A server with the snapshot's homes, each behind its FakeHA, serving `site`."""
     import ha_client
     from ha_client import HAClient
-    from test_unit import make_server, robot_vacuum
-
-    # Devices this checkout reaches that the live server's snapshot may not have yet, by home: Paris's Roomba,
-    # until AD-106 is deployed
-    added = {"paris": {"vacuum.parispi": robot_vacuum()}}
+    from test_unit import make_server
     config = snapshot["config"]
     ha_client.LOCAL_CONFIG.clear()
     ha_client.LOCAL_CONFIG.update(config)
@@ -229,8 +225,6 @@ def build_server(snapshot: dict, site: str):
         for key, value in home.items():
             if key != "name":
                 setattr(client, key, value)
-        for eid, info in added.get(each.name, {}).items():
-            client.entities.setdefault(eid, info)
         client._session = FakeHA(client.entities)
     server.site = server._voice_site = server.site_named(site)
     server.calendar_client = empty_calendar()
