@@ -276,6 +276,26 @@ by foam tape.
   contacts keep their place whatever the thickness, and the soft ring takes up the difference on
   the other face (**inferred**).
 
+## What it would cost
+
+An estimate of 2026-11-15 for the household's three units, from JLCPCB's published fees and parts
+prices, with no design to quote. The same method gave half of what PCBWay really quoted for
+MiciMike's Home Mini board (935 $ for five), so take it as a floor.
+
+- **Parts, a board**: about 16 $ with an ESP32-S3 module (5 $), a TAS5805M amplifier, twelve
+  addressable LEDs, the two ribbon connectors, the socket, a regulator and a display driver; about
+  33 $ with an XMOS XU316 and its flash beside it, as in the Voice PE.
+- **A run of five** (the least a maker sells; three and two spares): parts on both faces, so the
+  standard assembly, 135 to 250 $ of fixed fees; with parts, shipping and VAT, 300 to 550 $.
+- **Runs**: a first board seldom works whole (a pinout read wrong, a part that fouls the chassis).
+  Two runs, perhaps three; the first ones with two boards assembled of the five.
+- **Before any board**: a multimeter, a logic analyser, the caliper's battery, a way to tap the
+  25 contacts, an ESP32-S3 kit and an amplifier on the bench: 80 to 250 €.
+
+In all 700 to 1900 €, 230 to 630 € a unit, most of it fixed: once a board works, one more costs
+its parts. Three Voice PEs cost about 180 $. What this buys is the speaker, the clock and a design
+others can have made, not a saving.
+
 ## Still to find out
 
 Tools were missing on 2026-11-15: no multimeter, no logic analyzer.
