@@ -3433,6 +3433,17 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
         self.server.new_request("phone2")
         self.assertEqual(self.server.conversation.history, [])
 
+    async def test_a_reply_said_again_is_no_unbacked_claim(self):
+        """« tu peux me redonner ta réponse ? » got « Désolé, je n'ai pas réussi à faire ça » (2026-11-15 14:06)."""
+        done = "C'est fait, j'ai allumé la lumière de la salle à manger."
+        call = {"id": "c1", "function": {"name": "turn_on", "arguments": '{"entity": "Salle à manger"}'}}
+        self.replies = [{"role": "assistant", "content": "", "tool_calls": [call]}, {"role": "assistant", "content": done}]
+        self.assertEqual(await self.ask(text="allume la salle à manger"), done)
+        self.replies = [{"role": "assistant", "content": done}]
+        self.assertEqual(await self.ask(text="tu peux me redonner ta réponse ?"), done)
+        self.assertEqual(self.completion.await_count, 1)  # not challenged
+        self.assertEqual(self.server.conversation.history[-1]["content"], done)
+
     async def test_dry_run_leaves_the_conversation_alone(self):
         """A test's « C'est fait » (never run) in the family's history made a real request call nothing (AD-047)."""
         live = self.server.conversation

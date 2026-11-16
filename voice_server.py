@@ -2306,6 +2306,14 @@ class VoiceAssistantServer:
             starts = [i for i, m in enumerate(history) if m["role"] == "user"]
             conversation.history = history[starts[-5] :] if len(starts) > 5 else history
 
+        # A reply already given in this conversation passed this check then: said again (« tu peux me
+        # redonner ta réponse ? »), it claims nothing new. Challenged, the light gemma had really turned
+        # on became « Désolé, je n'ai pas réussi à faire ça » (2026-11-15)
+        said_before = {m["content"].strip() for m in conversation.history if m["role"] == "assistant" and m.get("content")}
+
+        def unbacked_claim(text):
+            return not self._last_tool_calls and text not in said_before and claims_completed_action(text)
+
         # Tool call loop: keep calling LLM until it returns text (max 3 rounds)
         self._last_tool_calls = []
         done: dict[tuple, str] = {}  # (function, arguments) -> result, this turn
@@ -2318,7 +2326,7 @@ class VoiceAssistantServer:
                 # claim is false by construction. Give it one chance to actually
                 # act before the answer reaches the user.
                 claim = (message.get("content") or "").strip()
-                if not self._last_tool_calls and not challenged_empty_claim and claims_completed_action(claim):
+                if not challenged_empty_claim and unbacked_claim(claim):
                     challenged_empty_claim = True
                     logger.warning(f"Action claimed with no function call: {claim!r} — challenging")
                     messages.append(message)
@@ -2452,7 +2460,7 @@ class VoiceAssistantServer:
 
         # Last resort: never hand back a claim of an action that never ran. Safe
         # because we only get here with zero tool calls executed this turn.
-        if not self._last_tool_calls and claims_completed_action(content):
+        if unbacked_claim(content):
             logger.error(f"Unbacked action claim survived the challenge: {content!r}")
             response = "Désolé, je n'ai pas réussi à faire ça."
             save_to_history(response)
