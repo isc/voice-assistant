@@ -1134,3 +1134,25 @@ This document tracks all architecture and technology decisions made for this pro
 - **Measured**: the same first turn, 6,780 → 6,546 tokens (−234): AD-107 and AD-108 now cost 294. `test_scenarios.py`, 10 runs each, AD-108 as deployed then this change: AD-108's 80/80 → 80/80, AD-107's 70/70 → 70/70 (21/21 of 3 runs on the deployed code), AD-106's 90/90 → 90/90 (27/27 of 3 runs on the deployed code).
 - **Rejected**: a larger window (12K): more of the card the STT shares with the model (AD-053, AD-098), for one home's robot.
 - **Trade-off**: shorter descriptions leave the model fewer hints; the scenarios are what says they suffice.
+
+## 2026-11-16: The STT stays Parakeet
+
+### AD-110: Qwen3-ASR 1.7B neither replaces Parakeet nor runs beside it
+- **Context**: The weekly tech watch kept naming Qwen3-ASR 1.7B (Apache 2.0, 2026-06) as the one open STT worth trying: 4.75 % WER on FLEURS French in its report, against 5.15 % for Parakeet TDT 0.6B v3 in NVIDIA's (different normalisations). The STT was the last link of the voice chain not reviewed since the LLM (AD-098) and the TTS (AD-103).
+- **Measured** on 2026-11-16, on the 110 recordings of 2026-10-11 (Paris, 99 of them heard by the VAD), read from `recordings/` into memory, both models on charras's bottom card: Parakeet through `stt.ParakeetSTT` as production runs it, Qwen3-ASR through its `qwen-asr` package (0.0.6, transformers backend, bf16), one request at a time, a second pass timed. Words wrong on the 28 requests with known words of « STT through the LLM » (ROADMAP), with its metric (lowercase, punctuation dropped); Parakeet's 3.6 % is the figure of 2026-10-11 again.
+
+  | | Words wrong (28 requests) | Requests with an error | Latency, median / p90 (110) | GPU memory |
+  |---|---|---|---|---|
+  | Parakeet | 9/248 (3.6 %) | 7 | 104 / 124 ms | 2.9 GB (3.1 at most) |
+  | Qwen3-ASR 1.7B, language detected | 9/248 (3.6 %) | 6 | 184 / 378 ms | 4.6 GB (4.8 at most) |
+  | … French forced | 9/248 (3.6 %) | 6 | 147 / 335 ms | 4.6 GB (4.8) |
+  | … French, the house's names as context | 10/248 (4.0 %) | 6 | 213 / 748 ms | 4.6 GB (4.8) |
+  | Qwen3-ASR 0.6B, language detected | 28/248 (11.3 %) | 12 | 162 / 331 ms | 1.9 GB (2.2) |
+
+  - Not the same errors. Qwen hears names Parakeet misses: « Sonos » (Parakeet « sonneuse »), « écouter du Chopin » (« goûter du chopin »), « une autre devinette » (« une haute »), and among the day's other requests « radio Fip » (« Pflip »), « séquoia », « Beaugrenelle », a child's « Fais une devinette pour Charlie » (« Film de Vinette pour Charlie »). It misses others: « Altamundi » for Altermundi, « Charlie » 3 times of the 7 Parakeet wrote (« Charmy », « Cherni », « Charles »), « Quelle heure est-il ? » as « Quel arrêt il ? », « C minor » as « si mineur ». It writes standard French (« on ne sait pas » for « on sait pas », a repeated word or a spoken « il » dropped), which counts as errors here and would not mislead the model.
+  - What it writes when no French is said rules it out. Language detected: 7 of the 99 heard recordings come out in Chinese, a French one among them (« C'est moi qui a fait tout ça. » → « 青蛙先生。 »); Parakeet writes the room's English there, which AD-093 drops. French forced: no Chinese, but the room's English becomes French (« Oh shit, please. » → « je suis affligé. », « What are you doing? » → « Tu vois un autre bouton? »; fastText finds none of its transcripts in another language, Parakeet's 5), a follow-up the model would answer; and the 11 recordings the VAD found silent get « Oui. », « Ah. », « Je ne sais pas. », « J'ai tout perdu. ». With the family's, speakers' and stations' names as context (`transcribe(context=…)`), « Charlie » 6 times of 7, « Hey Jarvis », « FIP », but 13 of the 99 come out as the context itself (« Ivan, Emilie, Zoé, Charlie. Sonos, … »), one taking 3.5 s.
+  - Its latency grows with what it writes, a token at a time: 110 ms under 3 s of speech, 196 ms at 3–5 s, 310 ms at 5–8 s, 580 ms beyond, 1.8 s for a 30 s recording. Parakeet's is ~100 ms whatever the length (production's in November: 70 ms median, 140 ms p90).
+  - Runtime: `qwen-asr` brings torch 2.15 (CUDA 13) and transformers 4.57, a 6.4 GB venv. The transformers backend could live in this server's process beside ONNX Runtime; its vLLM backend (faster, streaming) is an engine of its own that reserves a share of the card up front.
+- **Decision**: Parakeet stays the STT, alone. Qwen3-ASR 1.7B does not replace it: as many words right, worse failures on what is not a French request, twice as slow, 1.7 GB more on a card that would then hold ~15.5 of its 16.3 GB, where AD-053 ran out. Nor does it run beside it: two transcripts each right on other words need a rule to choose between them, and a second model on the GPU, for a handful of names.
+- **Rejected**: the 0.6B (11.3 %). The vLLM backend: no room for its reservation on the top card (13.7 of 16.3 GB used, Ollama 10.75, this server 2.94), and it would change none of the failures above.
+- **Trade-off**: Parakeet keeps missing some of the house's names (« sonneuse », « goûter du chopin »), which the model and the device matching absorb or not.
