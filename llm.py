@@ -657,23 +657,23 @@ def get_tool_definitions(
     # sends it home, where it charges, rather than leave it where it stopped
     vacuum_tools = []
     if vacuum:
-        where, rooms = "de tout le logement", {}
+        # Short: the prompt is ~6.8K tokens of gemma's 8K, the room list given once (AD-109)
+        home = {}
+        if elsewhere:
+            home["home"] = {**elsewhere["home"], "description": "La maison, si la demande en nomme une (« à Paris »)"}
+        rooms, where = {}, ""
         if vacuum_rooms:
-            where = "de tout le logement ou de certaines pièces"
+            where = " ou celui de certaines pièces"
             rooms["room"] = {
                 "type": "string",
-                "description": (
-                    "Seulement si la demande nomme des pièces : celles à nettoyer, séparées par des virgules, "
-                    f"parmi : {', '.join(vacuum_rooms)}. Sans pièce, il fait tout le logement"
-                ),
+                "description": f"Si la demande nomme des pièces, séparées par des virgules : {', '.join(vacuum_rooms)}",
             }
         vacuum_tools = [
             {
                 "name": "vacuum",
                 "description": (
-                    f"Le robot aspirateur : lancer le ménage {where} (« lance l'aspirateur », « passe "
-                    "l'aspirateur »), le mettre en pause là où il est, ou le renvoyer à sa base (« arrête "
-                    "l'aspirateur »). Pas pour la musique."
+                    f"Le robot aspirateur : lancer le ménage{where} (« passe l'aspirateur »), le mettre en pause sur "
+                    "place, ou le renvoyer à sa base (« arrête l'aspirateur »). Pas pour la musique."
                 ),
                 "parameters": {
                     "type": "object",
@@ -681,13 +681,10 @@ def get_tool_definitions(
                         "action": {
                             "type": "string",
                             "enum": list(VACUUM_ACTIONS),
-                            "description": (
-                                "start : lancer ou reprendre le ménage ; pause : le mettre en pause sur place ; "
-                                "return_to_base : l'arrêter et le renvoyer à sa base"
-                            ),
+                            "description": "start : lancer ou reprendre ; pause : sur place ; return_to_base : à sa base",
                         },
                         **rooms,
-                        **elsewhere,
+                        **home,
                     },
                     "required": ["action"],
                 },
@@ -697,23 +694,16 @@ def get_tool_definitions(
             schedule_rooms = {}
             if vacuum_rooms:
                 schedule_rooms = {
-                    "room": {
-                        "type": "string",
-                        "description": (
-                            f"add, change : les pièces à faire, séparées par des virgules, parmi : "
-                            f"{', '.join(vacuum_rooms)} ; « tout » pour tout le logement"
-                        ),
-                    },
-                    "except_room": {"type": "string", "description": "change : les pièces à ne plus faire ce jour-là"},
+                    "room": {"type": "string", "description": "add, change : les pièces, comme pour vacuum ; « tout »"},
+                    "except_room": {"type": "string", "description": "change : les pièces à retirer"},
                 }
             vacuum_tools.append(
                 {
                     "name": "vacuum_schedule",
                     "description": (
-                        "Les programmations du robot aspirateur, les passages qu'il fait seul chaque semaine : les "
-                        "dire, en ajouter, changer l'heure ou les pièces de celle d'un jour, en supprimer, les "
-                        "désactiver ou les réactiver (« on part en vacances jusqu'au 28 » : disable avec until). "
-                        "Pas pour lancer le ménage maintenant."
+                        "Les programmations hebdomadaires du robot aspirateur : les dire, en ajouter, changer, "
+                        "supprimer, désactiver ou réactiver (vacances : disable avec until). Pas pour lancer le "
+                        "ménage maintenant."
                     ),
                     "parameters": {
                         "type": "object",
@@ -721,20 +711,13 @@ def get_tool_definitions(
                             "action": {
                                 "type": "string",
                                 "enum": list(SCHEDULE_ACTIONS),
-                                "description": (
-                                    "show : les dire ; add : en ajouter une ; change : changer celle d'un jour ; "
-                                    "remove : supprimer celle d'un jour ; disable, enable : désactiver ou réactiver "
-                                    "celle d'un jour, ou toutes sans jour"
-                                ),
+                                "description": "show : les dire. Sauf add : celle d'un jour, ou toutes sans jour",
                             },
-                            "day": {"type": "string", "description": "Le jour : lundi, mardi… Sans jour : toutes"},
-                            "time": {"type": "string", "description": "HH:MM : l'heure d'une nouvelle, ou la nouvelle"},
+                            "day": {"type": "string", "description": "lundi, mardi…"},
+                            "time": {"type": "string", "description": "HH:MM, d'une nouvelle ou la nouvelle"},
                             **schedule_rooms,
-                            "until": {
-                                "type": "string",
-                                "description": "disable sans jour : la date du retour (AAAA-MM-JJ), où les réactiver",
-                            },
-                            **elsewhere,
+                            "until": {"type": "string", "description": "disable sans jour : date du retour, AAAA-MM-JJ"},
+                            **home,
                         },
                         "required": ["action"],
                     },

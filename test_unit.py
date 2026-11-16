@@ -1475,7 +1475,7 @@ class TestVacuum(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("vacuum", {t["name"] for t in get_tool_definitions(self.client)})
         rooms = ["Salon", "Cuisine"]
         tools = {t["name"]: t for t in get_tool_definitions(self.client, vacuum=True, vacuum_rooms=rooms)}
-        self.assertIn("parmi : Salon, Cuisine.", tools["vacuum"]["parameters"]["properties"]["room"]["description"])
+        self.assertTrue(tools["vacuum"]["parameters"]["properties"]["room"]["description"].endswith(": Salon, Cuisine"))
         self.assertIn("certaines pièces", tools["vacuum"]["description"])
 
     def test_rooms_named(self):
@@ -1591,7 +1591,7 @@ class TestVacuumFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("room", tools["vacuum"])
         roomba_map(self)  # its rooms, from the home that has it
         tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
-        self.assertIn("parmi : Salon, Salle à manger, Chambre parents,", tools["vacuum"]["room"]["description"])
+        self.assertIn(": Salon, Salle à manger, Chambre parents,", tools["vacuum"]["room"]["description"])
         del self.paris.ha_client.entities[VACUUM]
         self.assertNotIn("vacuum", {t["name"] for t in self.server._tools()})
 
@@ -1756,7 +1756,8 @@ class TestVacuumSchedules(unittest.IsolatedAsyncioTestCase):
         tools = {t["name"]: t["parameters"]["properties"] for t in self.server()._tools()}
         actions = ["show", "add", "change", "remove", "disable", "enable"]
         self.assertEqual(tools["vacuum_schedule"]["action"]["enum"], actions)
-        self.assertIn("parmi : Salon, Salle à manger,", tools["vacuum_schedule"]["room"]["description"])
+        self.assertIn("comme pour vacuum", tools["vacuum_schedule"]["room"]["description"])  # its list said once
+        self.assertIn(": Salon, Salle à manger,", tools["vacuum"]["room"]["description"])
 
     async def test_run_by_the_server(self):
         server = self.server()
