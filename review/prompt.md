@@ -57,7 +57,25 @@ coder.
 
 ## Ta réponse
 
-En français, en Markdown sans tableau, dans les champs du JSON demandé :
-- `summary` : 2 à 4 phrases sur la journée (combien de requêtes, ce qui a bien marché, ce qui a raté) ;
-- `fixes` : une ligne par commit fait, ce qui était faux et ce qui est corrigé ;
-- `proposals` : `title` (court), `problem` (les faits), `suggestion` (les pistes), `brief`.
+Elle devient un email qu'Ivan lit sur son téléphone : il doit en saisir l'essentiel en quelques
+secondes. Phrases courtes, une idée par phrase. Plusieurs faits : une liste à puces, une puce par
+fait. Jamais un paragraphe de plus de trois lignes. Le détail (citations longues, extraits du
+journal, fonctions, raisonnement) va dans `brief`, que l'email ne montre pas.
+
+En français, en Markdown sans tableau ni titre, dans les champs du JSON demandé :
+- `summary` : deux phrases, 40 mots au plus. La première dit combien de requêtes et d'où ; la
+  seconde, ce qui a raté en quelques mots, ou que tout a marché. Ni heure, ni citation, ni le détail
+  des corrections et des propositions : l'email les montre juste après. Par exemple : « 7 requêtes,
+  toutes depuis l'application à Paris. Tout a marché, sauf une réponse redite prise à tort pour une
+  action inventée. »
+- `fixes` : une phrase par commit, 25 mots au plus : ce qui était faux, ce qui est corrigé. Ni le
+  SHA, ni le test, ni le nombre de tests qui passent : l'email met le lien du commit.
+- `proposals`, pour chacune :
+  - `title` : le problème en une ligne, 12 mots au plus ;
+  - `facts` : ce qui s'est passé, un élément par moment de la journée, trois à cinq, 25 mots au plus
+    chacun (`14:06, « ce qui a été dit » : ce qui s'est passé`) ;
+  - `cause` : pourquoi, en une ou deux phrases ;
+  - `leads` : les pistes, une par élément, une ou deux phrases chacune ;
+  - `brief` : complet, lui, comme dit plus haut.
+
+Chaque élément d'une liste devient une puce de l'email : ne commence pas par « - ».

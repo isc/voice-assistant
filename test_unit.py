@@ -58,7 +58,7 @@ from llm import claims_completed_action, get_tool_definitions, parse_text_tool_c
 from places import week
 from recordings import Recordings
 from review.collect import NOISE, interactions
-from review.nightly import UNSTABLE, compare, scores_of
+from review.nightly import UNSTABLE, compare, failure, new_turns, scores_of
 from sites import load_sites, site_at_address
 from vad import FRAME_BYTES, SpeechEnd
 from web_ui import (
@@ -5511,6 +5511,23 @@ class TestNightlyTests(unittest.TestCase):
         scores, model, failures = scores_of(runs)
         self.assertEqual(scores, {self.KEY: 1, "AD-002 a scenario · a request": 1})
         self.assertEqual((model, failures), ("gemma4:12b-8k", {self.KEY: runs[1]}))
+
+    def test_the_email_reads_a_failure_line_by_line(self):
+        """Read on a phone: one line each, the calls' arguments as the model gave them, the reply cut on a word."""
+        turn = {"expect": "lock", "calls": [["lock", {"entity": "Porte", "room": "Entrée"}, "Fait"]],
+                "response": "mot " * 60}
+        expected, calls, response = failure(turn)
+        self.assertEqual((expected, calls), ("Attendu : lock", "Obtenu : lock(entity=Porte, room=Entrée)"))
+        self.assertTrue(response.endswith("mot… »"), response)
+        self.assertEqual(failure({"error": "TimeoutError"}), ["Erreur : TimeoutError"])
+
+    def test_the_new_turns_in_a_line(self):
+        """Their decisions, and only the turns not passed every run."""
+        new = {"AD-106 the vacuum · Lance-le.": 3, "AD-106 the vacuum · Arrête-le.": 3, "AD-107 a room · Cuisine.": 3}
+        self.assertEqual(new_turns(new), "**Nouveaux** : 3 tours (AD-106, AD-107), tous réussis 3 fois sur 3.")
+        self.assertEqual(new_turns({**new, "AD-107 a room · Salon.": 1}),
+                         "**Nouveaux** : 4 tours (AD-106, AD-107), 3 réussis 3 fois sur 3, sauf :\n\n"
+                         "- AD-107 a room · Salon. : 1/3")
 
     def test_journal_without_dry_runs(self):
         """Their lines are not the family's: the server tags each, a traceback's too, and the next review's journal

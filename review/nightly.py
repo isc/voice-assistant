@@ -51,10 +51,14 @@ SCHEMA = json.dumps({
     "properties": {
         "summary": {"type": "string"},
         "fixes": {"type": "array", "items": {"type": "string"}},
+        # The facts and the leads as lists, which the email shows as bullets: a paragraph is unreadable on a phone
         "proposals": {"type": "array", "items": {
             "type": "object",
-            "properties": {k: {"type": "string"} for k in ("title", "problem", "suggestion", "brief")},
-            "required": ["title", "problem", "suggestion", "brief"],
+            "properties": {
+                **{k: {"type": "string"} for k in ("title", "cause", "brief")},
+                **{k: {"type": "array", "items": {"type": "string"}} for k in ("facts", "leads")},
+            },
+            "required": ["title", "facts", "cause", "leads", "brief"],
         }},
     },
     "required": ["summary", "fixes", "proposals"],
@@ -312,11 +316,32 @@ def scores_of(turns):
     return scores, model, failures
 
 
+def clip(text, length=150):
+    return text if len(text) <= length else text[:length].rsplit(" ", 1)[0] + "…"
+
+
 def failure(turn):
+    """A failed turn, one line each: what was expected, the calls, the reply."""
     if "error" in turn:
-        return turn["error"]
-    calls = ", ".join(f"{call[0]}({call[1]})" for call in turn["calls"]) or "aucun appel"
-    return f"attendu {turn['expect']} ; obtenu {calls}, « {turn['response'][:150]} »"
+        return [f"Erreur : {clip(turn['error'], 300)}"]
+
+    def call(name, args, *_):
+        args = ", ".join(f"{k}={v}" for k, v in args.items()) if isinstance(args, dict) else args
+        return f"{name}({args})"
+
+    calls = ", ".join(call(*c) for c in turn["calls"]) or "aucun appel"
+    return [f"Attendu : {turn['expect']}", f"Obtenu : {calls}", f"Réponse : « {clip(turn['response'])} »"]
+
+
+def new_turns(new):
+    """The turns new tonight, in a line: how many, their decisions, and only those not passed every run."""
+    decisions = dict.fromkeys(re.match(r"AD-\d+|[^·]+", key).group().strip() for key in new)
+    missed = {key: passes for key, passes in new.items() if passes < TEST_RUNS}
+    line = f"**Nouveaux** : {len(new)} tour{'s' * (len(new) > 1)} ({', '.join(decisions)}), "
+    if not missed:
+        return line + f"{'tous réussis' if len(new) > 1 else 'réussi'} {TEST_RUNS} fois sur {TEST_RUNS}."
+    return line + f"{len(new) - len(missed)} réussis {TEST_RUNS} fois sur {TEST_RUNS}, sauf :\n\n" + "\n".join(
+        f"- {key} : {passes}/{TEST_RUNS}" for key, passes in missed.items())
 
 
 @dataclass
@@ -356,8 +381,8 @@ def tests(day, out):
         totals.append(f"{label} {sum(scores.values())}/{len(scores) * TEST_RUNS}")
     (out / "tests.json").write_text(json.dumps(night, ensure_ascii=False, indent=1) + "\n")
     if night["scores"]:
-        tested.notes.append(f"`{night['model']}`, {TEST_RUNS} passages, commit `{night['commit'][:7]}` : "
-                            f"{', '.join(totals)}. Chaque passage : `{out}/test_*.jsonl`.")
+        tested.notes.append(f"{', '.join(totals).capitalize()}. `{night['model']}`, {TEST_RUNS} passages, "
+                            f"commit `{night['commit'][:7]}`.")
         tested.notes += against_earlier(day, night, failures, tested)
     return tested
 
@@ -372,15 +397,17 @@ def against_earlier(day, night, failures, tested):
         notes.append(f"Le modèle a changé depuis la dernière mesure (`{earlier[-1].get('model')}`).")
     regressed, new = compare([past["scores"] for past in earlier], night["scores"])
     tested.regressions = len(regressed)
-    lines = []
+    items = []
     for key, history in regressed.items():
-        line = f"- {key} : {' → '.join(f'{p}/{TEST_RUNS}' for p in history)}"
-        line += " (instable, deux nuits de suite)" if len(history) > 2 else ""
-        lines.append(line + (f". Cette nuit : {failure(failures[key])}" if key in failures else ""))
-    title = f"**Régressions** (réussites sur {TEST_RUNS}, de la nuit comparée à celle-ci) :\n"
-    notes.append(title + "\n".join(lines) if lines else "Aucune régression.")
+        case, _, request = key.partition(" · ")
+        lines = [f"- **{case}** : {' → '.join(f'{p}/{TEST_RUNS}' for p in history)}"
+                 + (" (instable, deux nuits de suite)" if len(history) > 2 else "")]
+        lines += [f"« {request} »"] if request else []
+        lines += failure(failures[key]) if key in failures else []
+        items.append("\n  ".join(lines))
+    notes.append("**Régressions**\n\n" + "\n\n".join(items) if items else "Aucune régression.")
     if new:
-        notes.append("Nouveaux : " + ", ".join(f"{key} {p}/{TEST_RUNS}" for key, p in new.items()) + ".")
+        notes.append(new_turns(new))
     return notes
 
 
@@ -409,18 +436,18 @@ def report(day, out, interactions, review, error, shipped, tested):
         brief = out / "proposals" / f"{n}-{slug(proposal['title'])}.md"
         brief.write_text(f"# {proposal['title']}\n\n{proposal['brief']}\n")
         link = f"{OPEN_BRIEF}?{urllib.parse.urlencode({'brief': str(brief.relative_to(STATE))})}"
-        parts.append(f"## {n}. {proposal['title']}\n\n{proposal['problem']}\n\n**Pistes.** {proposal['suggestion']}"
+        facts, leads = ("\n".join(f"- {line}" for line in proposal[k]) for k in ("facts", "leads"))
+        parts.append(f"## {n}. {proposal['title']}\n\n{facts}\n\n{proposal['cause']}\n\n**Pistes**\n\n{leads}"
                      f"\n\n[Ouvrir dans Claude Code]({link}) · ou dans une session : `Lis {brief}`")
     if tested.notes:
         parts.append("## Tests du modèle\n\n" + "\n\n".join(tested.notes))
-    if review.get("session_id"):
-        parts.append(f"La revue elle-même se reprend sur charras : `cd {CLONE} && claude --resume "
-                     f"{review['session_id']}`.")
     stats = f"{len(interactions)} requêtes"
     if review.get("cost") is not None:
         stats += f", revue {review['cost']:.2f} $"
-    footer = (f"voice-assistant-review sur charras, journée du {day} ({stats}) · données : {out} · "
-              "arrêter : systemctl --user disable --now voice-assistant-review.timer")
+    footer = f"voice-assistant-review sur charras, journée du {day} ({stats}) · données : {out}"
+    if review.get("session_id"):
+        footer += f" · reprendre la revue : cd {CLONE} && claude --resume {review['session_id']}"
+    footer += " · arrêter : systemctl --user disable --now voice-assistant-review.timer"
     return "\n\n".join(parts), footer
 
 
