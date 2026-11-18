@@ -33,7 +33,6 @@ Custom voice assistant replacing Home Assistant's voice pipeline. Runs on ESPHom
 ### LLM
 - Any OpenAI-compatible endpoint: cloud (GPT-5.4 Nano tested) or local (Ollama / llama.cpp; Gemma 4 12B in use)
 - Multi-round tool loop, concurrent tool calls ("éteins la lumière et dis-moi la météo")
-- Text fallback parser for local models that output tool calls as plain text
 
 ### Infrastructure
 - Linux server in production (systemd, CUDA, Ollama); macOS for development (launchd, secrets in Keychain)

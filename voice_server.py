@@ -1359,7 +1359,7 @@ class VoiceAssistantServer:
 
         # Timers — standalone, doesn't need HA
         if function_name == "set_timer":
-            # A string from the text fallback ("5" * 60 is a 60-digit number), or nothing at all
+            # A string ("5" * 60 is a 60-digit number), or nothing at all
             try:
                 total_seconds = int(float(arguments.get("duration_minutes") or 0) * 60)
             except (TypeError, ValueError):
@@ -1621,8 +1621,7 @@ class VoiceAssistantServer:
             return f"Rien n'a été fait : plusieurs alarmes ici ({', '.join(entity_ids)}), une seule est prise en charge"
         alarm = entity_ids[0]
         if function_name == "arm_alarm":
-            # No mode guessed: absence while the family sleeps sounds the siren at the first step (the text
-            # fallback's « arm_alarm("nuit") » reads as an entity, not a mode)
+            # No mode guessed: absence while the family sleeps sounds the siren at the first step
             if not (said := str(arguments.get("mode") or "")):
                 return f"Rien n'a été fait : précise le mode ({', '.join(self.ha_client.alarm_modes(alarm))})"
             return await self.ha_client.arm(alarm, alarm_mode(said) or said)
@@ -2251,11 +2250,7 @@ class VoiceAssistantServer:
 
     async def process_with_llm(self, api: Optional[APIClient], text: str, dry_run: bool = False) -> Optional[str]:
         """LLM via OpenAI-compatible API (local llama.cpp or cloud provider)"""
-        from llm import (
-            chat_completion,
-            claims_completed_action,
-            parse_text_tool_call,
-        )
+        from llm import chat_completion, claims_completed_action
 
         self._dry_run = dry_run
         logger.info(f'LLM input: "{text}"')
@@ -2439,24 +2434,11 @@ class VoiceAssistantServer:
             save_to_history(response)
             return response
 
-        # Direct response (possibly with text-encoded tool call)
+        # Direct response
         content = message.get("content", "")
         if not LLM_API_KEY and "</think>" in content:
             content = content.split("</think>")[-1]
         content = content.strip()
-
-        fn_name, fn_args = parse_text_tool_call(content)
-        if fn_name in offered and fn_args and not dry_run:
-            logger.info(f"Function call (text fallback): {fn_name}({fn_args})")
-            fn_name, fn_args = self._as_asked(fn_name, fn_args)
-            # In the log like any call: the web app shows it, and a picture with it (AD-069)
-            tc_entry = {"function": fn_name, "args": fn_args}
-            result = await self._run_call(tc_entry)
-            if "error" not in tc_entry:
-                _mark_outcome(tc_entry, result)
-                self._last_tool_calls.append(tc_entry)
-                save_to_history(result)
-                return result
 
         # Last resort: never hand back a claim of an action that never ran. Safe
         # because we only get here with zero tool calls executed this turn.

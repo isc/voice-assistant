@@ -1,6 +1,5 @@
-"""LLM integration — chat completion, tool calling, text fallback parser."""
+"""LLM integration — chat completion, tool calling."""
 
-import json
 import logging
 import os
 import re
@@ -18,39 +17,6 @@ logger = logging.getLogger(__name__)
 # Local models default to "none" (see chat_completion); cloud APIs validate this
 # field strictly, so there it is only sent when explicitly configured.
 REASONING_EFFORT = os.environ.get("LLM_REASONING_EFFORT", "")
-
-# What the text fallback may run; its call has a log entry, for a button to confirm (AD-068) as for a picture (AD-069)
-_TOOL_NAMES = {
-    "turn_on",
-    "turn_off",
-    "open_cover",
-    "close_cover",
-    "set_cover_position",
-    "set_temperature",
-    "set_heating",
-    "get_state",
-    "get_sensor",
-    "set_timer",
-    "set_alarm",
-    "cancel_timer",
-    "query_calendar",
-    "create_event",
-    "update_event",
-    "play_radio",
-    "stop_media",
-    "set_volume",
-    "change_volume",
-    "play_music",
-    "music_control",
-    "show_image",
-    "lock",
-    "unlock",
-    "arm_alarm",
-    "disarm_alarm",
-    "vacuum",
-    "vacuum_schedule",
-}
-
 
 # Claims of having carried something out, or of being about to, matched on
 # accent-stripped lowercase. Deliberately about what the model does: a state report
@@ -883,37 +849,6 @@ def get_tool_definitions(
             },
         },
     ]
-
-
-def parse_text_tool_call(content: str) -> tuple[Optional[str], Optional[dict]]:
-    """Parse tool calls that local LLMs output as plain text instead of structured tool_calls.
-    Handles: fn({"entity":"X","room":"Y"}), fn("X"), fn(entity="X", room="Y").
-    No French-verb guess: « Fermeture des volets impossible » would have closed a shutter, and it
-    never fired in 223 requests with gemma4:12b.
-    """
-    # Pattern 1: fn({"key": "val", ...})
-    m = re.match(r"(\w+)\s*\(\s*(\{.*\})\s*\)", content, re.DOTALL)
-    if m and m.group(1) in _TOOL_NAMES:
-        try:
-            return m.group(1), json.loads(m.group(2))
-        except json.JSONDecodeError:
-            pass
-
-    # Pattern 2: fn("value")
-    m = re.match(r'(\w+)\s*\(\s*"([^"]+)"\s*\)', content)
-    if m and m.group(1) in _TOOL_NAMES:
-        return m.group(1), {"entity": m.group(2)}
-
-    # Pattern 3: fn(entity="X", room="Y") — Python-style kwargs
-    m = re.match(r"(\w+)\s*\((.+)\)", content, re.DOTALL)
-    if m and m.group(1) in _TOOL_NAMES:
-        args = {}
-        for kv in re.findall(r'(\w+)\s*=\s*"([^"]*)"', m.group(2)):
-            args[kv[0]] = kv[1]
-        if args:
-            return m.group(1), args
-
-    return None, None
 
 
 def _max_tokens_key(api_key: str) -> str:

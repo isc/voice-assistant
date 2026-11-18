@@ -54,7 +54,7 @@ from ha_client import (
 )
 from images import Picture, is_about
 import llm
-from llm import claims_completed_action, get_tool_definitions, parse_text_tool_call
+from llm import claims_completed_action, get_tool_definitions
 from places import week
 from recordings import Recordings
 from review.collect import NOISE, interactions
@@ -2252,43 +2252,6 @@ class TestOpeningHours(unittest.TestCase):
 
     def test_offered_without_home_assistant(self):
         self.assertIn("find_place", {t["name"] for t in get_tool_definitions(None)})
-
-
-# ---------------------------------------------------------------------------
-# Tests: parse_text_tool_call (fallback parser for local LLM)
-# ---------------------------------------------------------------------------
-
-
-class TestParseTextToolCall(unittest.TestCase):
-    def test_json_args(self):
-        fn, args = parse_text_tool_call('turn_on({"entity": "Plafonnier", "room": "Salon"})')
-        self.assertEqual(fn, "turn_on")
-        self.assertEqual(args["entity"], "Plafonnier")
-        self.assertEqual(args["room"], "Salon")
-
-    def test_quoted_string(self):
-        fn, args = parse_text_tool_call('turn_off("Appliques salon")')
-        self.assertEqual(fn, "turn_off")
-        self.assertEqual(args["entity"], "Appliques salon")
-
-    def test_python_kwargs(self):
-        fn, args = parse_text_tool_call('close_cover(entity="Volet", room="Chambre")')
-        self.assertEqual(fn, "close_cover")
-        self.assertEqual(args["entity"], "Volet")
-        self.assertEqual(args["room"], "Chambre")
-
-    def test_no_french_verb_guess(self):
-        """A reply is never taken for a command: « Fermeture des volets impossible » closed a shutter."""
-        for reply in ("Éteins les appliques salon.", "Fermeture des volets impossible.", "Plus fort !"):
-            self.assertEqual(parse_text_tool_call(reply), (None, None), reply)
-
-    def test_plain_text_no_match(self):
-        fn, args = parse_text_tool_call("Il fait beau aujourd'hui.")
-        self.assertIsNone(fn)
-
-    def test_unknown_function(self):
-        fn, args = parse_text_tool_call('reboot({"target": "server"})')
-        self.assertIsNone(fn)
 
 
 # ---------------------------------------------------------------------------
