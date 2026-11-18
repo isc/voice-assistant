@@ -8,7 +8,9 @@ Nothing is designed yet. This file records what was seen, so that the work can r
 device open on the table. Each claim says how it is known: **read** on the part, **counted** on a
 photo, **inferred**, or **from** a source listed at the end.
 
-No such board exists for this model, and nobody has published the pinout of its cables: see
+No such board exists for this model. Most of what it must talk to is known since 2026-11-18, from
+Amazon's own published source code and from a replacement board begun in 2024 and left at its
+connectors: see [What Amazon's source code says](#what-amazons-source-code-says) and
 [Prior work](#prior-work-searched-on-2026-11-15).
 
 ## Telling the model without opening it
@@ -110,6 +112,16 @@ it was read. So the plan is confirmed to about 0.5 mm, not refined. Both give on
 Across the four passages of the case screws, the two diagonals read 54.0 and 53.4: with the photos'
 centres, holes of 5.7 to 6 mm, where both jaws in one hole had read 5.4 on a blurred photo.
 
+#### Against esphome-dot's outline
+
+esphome-dot's KiCad board (see [Prior work](#prior-work-searched-on-2026-11-15)), drawn from a unit
+without clock, has the same eight holes: 3.0 mm for the board's screws, 5.6 mm for the case's.
+Taken from its own disc's centre (77.0 mm across, the flat 37.3 mm from it), each hole sits 0.9 to
+1.2 mm higher than in the table above, towards the flat, and 0.3 mm to the right, within 0.5 mm of
+that shift each. So the two surveys agree on the holes between them, and differ by a millimetre on
+where the outline lies around them: its flat is 75.8 mm from the opposite edge, ours 74.9 over the
+ring. The caliper, with its battery, settles it.
+
 Face towards the base ([photo](photos/main-board-bottom.jpg)):
 
 - Twelve RGB LEDs around the edge (`DS1`…`DS12`), the light ring. **Counted.**
@@ -162,11 +174,11 @@ and two close-ups: the half with [`U23` and `U6`](photos/mic-board-closeup.jpg),
 - `RT1`, `RT2`: thermistors by their designators, for the temperature this generation reports.
   **Inferred.**
 - `U1`: marked `45575` / `M2113` / `BAA`, a package with pads on its sides, the largest after `U23`.
-  **Read**, on two photos. Not identified. The Echo Spot's microphone board has a chip marked the
-  same way, `46256` / `Z3111` / `UAB`, which Dorey's oscilloscope shows driving the LEDs and the
-  microphone-off function: **inferred** to be the same kind of part here, a small programmed
-  controller for the microphone-off button and its LEDs. Aggarwal's unit carries `45575` / `N211J` /
-  `UAA` at `U1`, and he found no part by that marking either: `45575` is the part, the rest its lot.
+  **Read**, on two photos. A Silego (now Renesas) GreenPAK programmed for Amazon, `SLG4BZ45575`, at
+  I2C address 0x08: buttons, the microphone-off state, which it holds in hardware, the mute LED and
+  the converter's reset (**from** Amazon's source code, see
+  [below](#what-amazons-source-code-says)). Aggarwal's unit carries `45575` / `N211J` / `UAA`:
+  `45575` is the part, the rest its lot.
 - `U3`: marked `CM5` after a bar, five or six pins. `CM5` is the marking of TI's SN74LVC1G125 in an
   SC70 package, a single buffer whose output can be switched off (**from** TI's and distributors'
   marking tables). What it gates is not known: a line of the converter, cut when the microphones are
@@ -191,9 +203,12 @@ none of it maps over as is, but it says what to look for on the 25 contacts.
 - A flexible circuit held on two pegs against the front of the shell, with three foam blocks behind it.
 - This face has no chip: three rows of 19 gold points, and four gold strips along one edge. **Counted.**
 - The LEDs are on the other face, against the fabric. Not seen.
-- **Where its driver is, is not known.** Either on the hidden face, and the 10-contact cable carries a
-  bus and power, or on Amazon's main board, and the cable carries the matrix itself. Ten contacts are
-  few for a matrix of this size, which favours the first.
+- **Its drivers are on the flex**, out of sight: three 36-channel LED drivers on the main board's
+  I2C bus, at 0x30, 0x32 and 0x33 (**from** Amazon's source code). Nothing near `J1` on Amazon's
+  main board is big enough to drive a matrix: a 6-pin part marked `SKB`, two transistors
+  (**read**). So the 10-contact cable carries the I2C bus, an enable, a fault line and power
+  (**inferred**). The channel maps run in groups of five, a matrix five dots high, which fits the
+  « 5 × 21 » a forum poster counted (**inferred**).
 
 ### Speaker (kept)
 
@@ -213,6 +228,57 @@ The widths are read on photos of each tip against a ruler. A 10-contact cable at
 pitch is 5.5 mm wide. The 25 were counted as 24 gaps along four lines across the enlarged photo; the 10 on the connector and
 again on the cable. Each cable has `P1` and a small triangle printed at its tip: the mark of contact 1.
 
+### The 25 contacts, as far as known
+
+From esphome-dot's `pinout.md` (2024, a unit without clock, traced with a multimeter to the
+AK5704's pins), its numbering, unchecked on ours:
+
+| Contact | Signal | Contact | Signal |
+|---|---|---|---|
+| 1 | ground | 2 | AVDD, 3.3 V |
+| 3 | action button, pulled up | 4 | interrupt, low on a button press |
+| 6 | I2C SDA | 8 | LRCK, the frame clock |
+| 10, 12, 14, 15, 16 | ground | 11 | MCKI, the master clock |
+| 13 | BCLK, the bit clock | 17 | SDTO1, the microphones' data, through the buffer `U3` |
+| 21 | I2C SCL | 23 | TVDD, 1.8 V |
+
+Contacts 5, 7, 9, 18 to 20, 22, 24 and 25 are not named. Amazon's source code would put there the
+accelerometer's own I2C bus, the thermistors' analog lines, perhaps a second supply (**inferred**).
+TVDD at 1.8 V is the converter's interface supply: the bus and the clocks are 1.8 V logic, which an
+ESP32-S3's 3.3 V pins need translating to (**inferred**).
+
+## What Amazon's source code says
+
+Amazon publishes the GPL part of each Echo's software on
+[amazon.com/echonotices](https://www.amazon.com/echonotices). The release
+`Echo_Dot_5th_Gen_Clock_src-6.5.7.1-20251027.tar.bz2` holds a Linux 5.4 tree (`kernel/mediatek/5.4`)
+whose device tree describes the board: `cannoli` is the Echo Dot 5, `cheesecake` the one with
+clock, both built on `arch/arm/boot/dts/mediatek/cannoli-cheesecake.dtsi`. Read there on
+2026-11-18:
+
+- **The microphone board's I2C bus** (the SoC's `i2c4`): the controller `U1` at 0x08
+  (`amzn,cpld45575`, « SLG4BZ45575 », a 3-button variant; `cpld45165` has 4); the converter, an
+  AK5704 at 0x10 or a TLV320ADC5140 at 0x4c, both disabled in the tree, the bootloader enabling the
+  one fitted; the light sensor, an ams TSL2540 at 0x39; a TMP108 thermometer at 0x48.
+- **`U1`** (`drivers/gpio/gpio-amzncpld.c`, `include/dt-bindings/gpio/amzncpld-gpio.h`): an I2C
+  expander with registers 0xF0 to 0xF6 and an interrupt line to the SoC (its GPIO86). Its lines:
+  volume down, volume up, microphone-off button, microphone-off state, a software mute pulsed
+  50 ms, the mute LED's PWM, the converter's reset. « On button press Silego locks the current
+  state »: the microphones are cut in hardware. On a 45575, the action button is a direct line to
+  the SoC (GPIO41).
+- **The microphones' audio**: TDM, four channels of 32 bits at 96 kHz, `dsp_b` format, the bit
+  clock inverted; the converter drives the bit and frame clocks, the SoC gives it a 24.576 MHz
+  master clock.
+- **The display**: three LED drivers of 36 channels on the main bus (`i2c0`) at 0x30, 0x32 and
+  0x33, TI LP5036, ISSI IS31FL3246 or Awinic AW21036 depending on the unit; an enable (GPIO63), a
+  power switch (GPIO17), a fault line (GPIO61). The light ring's driver shares the bus at 0x31, in
+  the same three makes: Dorey's « W4970 3246 » is the ISSI.
+- **The amplifier**: a MAX98396 or a TI TAS2764, I2S from the SoC, 2 × 32 bits at 96 kHz.
+- **The accelerometer**: on a bus of its own, read by the DSP, not by Linux; Amazon's build adds
+  ST's LIS2DW12 driver, the likely `U6` (**inferred**).
+
+The tree gives no supply voltage for the microphone board or the display, and no contact numbers.
+
 ## What differs from the published teardowns
 
 Brian Dorey opened a 5th generation without clock. This unit, with clock and made in 2022, differs:
@@ -227,11 +293,27 @@ Brian Dorey opened a 5th generation without clock. This unit, with clock and mad
 ## Prior work, searched on 2026-11-15
 
 Searched: the web in English and German, GitHub's repositories and LocalDot's issues, the Home
-Assistant forum, the three board numbers and `U1`'s marking. For this model:
+Assistant forum, the three board numbers and `U1`'s marking. Searched again on 2026-11-18, with
+Amazon's source code and the FCC filings. For this model:
 
 - **Teardowns** by Dorey and by Aggarwal: the chips of the main board, photos of both boards. Neither
   traces a cable, counts its contacts or names a test point's signal.
-- **A replacement board: none.** LocalDot (ESP32-S3 and ESP32-P4, on Crowd Supply since November
+- **A replacement board begun, for the model without clock**:
+  [esphome-dot](https://github.com/gcormier/esphome-dot), by Greg Cormier, June to November 2024,
+  missed on 2026-11-15. A KiCad board with its outline, holes and connectors placed (the rest of
+  its parts not), a schematic with a bare ESP32-S3 and a chip antenna, a TAS5805M, a TPS62932; the
+  25-contact cable's contacts half traced (see [above](#the-25-contacts-as-far-as-known)); `U1`'s
+  registers and the AK5704's start-up sequence read with a logic analyser, the captures with them.
+  Nothing on the display. Its connectors: Molex 502598-2593 for the 25, Adam Tech ADC-055B-9 for
+  the socket, SF2212 spring contacts for the speaker.
+- **Amazon's GPL source code**, which describes the board: see
+  [What Amazon's source code says](#what-amazons-source-code-says).
+- **The FCC filings**: `2A4DH-1115` with clock, `2A4DH-0821` without, granted in September 2022.
+  Their internal photos are of prototypes (main board `30-007131`, microphone board `30-007043`)
+  at a resolution where no marking reads. They show the microphone board's hidden face: four
+  buttons in a cross, two LEDs, the light sensor under a button. Not the display's LED face, which
+  no published teardown shows either.
+- **No other replacement board.** LocalDot (ESP32-S3 and ESP32-P4, on Crowd Supply since November
   2026, boards due in April 2027) is for the 3rd generation, whose microphone board and 40-contact
   cable are others; its repository and its issues name no later generation. echo-419 drew an
   EasyEDA schematic for the 4th generation in April 2023, four commits, nothing since.
@@ -246,9 +328,9 @@ Assistant forum, the three board numbers and `U1`'s marking. For this model:
   soldered to the speaker's two pads, a Waveshare ESP32-S3 audio board and its screen glued over
   the buttons. All of the Echo's electronics are taken out.
 
-So the pinout of the 25-contact cable, the display's, and a board to this outline are not
-published anywhere found. Worth searching again before a board is drawn: LocalDot's author, or a
-buyer of his board, is the likeliest to turn to the later generations.
+So the 25-contact cable is half traced and its signals are all named; the display's cable is not
+traced, but what it must carry is known. Worth searching again before a board is drawn: LocalDot's
+author, or a buyer of his board, is the likeliest to turn to the later generations.
 
 ### The Echo Pop, the household's other model
 
@@ -265,60 +347,83 @@ by foam tape.
 ## What a replacement board would carry
 
 - The same outline and holes, the barrel socket and the two speaker contacts at the same places.
-- A 25-contact and a 10-contact ribbon connector, where the cables reach.
+- A 25-contact and a 10-contact ribbon connector, where the cables reach. esphome-dot chose a Molex
+  502598-2593 for the 25.
 - A microcontroller with Wi-Fi running ESPHome, which is what this assistant's server already talks
-  to. LocalDot pairs an ESP32-S3 with an ESP32-P4 for the microphones' processing: an ESP32-S3 alone
-  used one microphone, with an echo cancellation its author called good but not perfect.
-- An amplifier for the speaker.
+  to: an ESP32-S3.
+- Level translators between its 3.3 V pins and the microphone board's 1.8 V bus and clocks
+  (**inferred** from TVDD, to measure).
+- On the microphone board's bus: `U1` to release the converter's reset and read the buttons and
+  the microphone-off state, then the converter itself, an AK5704 or a TLV320ADC5140 as the unit
+  has. On the main bus, the display's three drivers behind `J1`, their enable and power switch.
+- An amplifier for the speaker. A TAS5805M runs from the 12 V, ESPHome drives it since 2026.10
+  (`tas58xx`), and its `SDOUT` pin gives back what it plays: wired to an I2S input of the ESP32,
+  a reference for echo cancellation, locked to the samples (**inferred** from TI's datasheet).
 - Twelve LEDs at the ring's positions. Addressable ones need one pin and no driver.
 - A thickness near the original's, without it being critical. The board is screwed from the LED
   face, so its connector face rests on the chassis: the socket, both connectors and the speaker
   contacts keep their place whatever the thickness, and the soft ring takes up the difference on
   the other face (**inferred**).
 
+### What the firmware would need
+
+- **The converters**: no ESPHome component for either. The AK5704's register sequence is in
+  esphome-dot (`ak_comp.h`, `i2c.md`, `pll.md`) and in Amazon's Linux driver; the TLV320ADC5140's
+  in mainline Linux (`tlv320adcx140.c`). A component shaped as ESPHome's `es7243e`, a hundred and
+  fifty lines, for each (**inferred**). `U1` and the display's drivers likewise.
+- **Echo cancellation**, to hear the wake word over music: not in ESPHome as of 2026.11. Two
+  external components try it on an ESP32-S3, neither proven there
+  ([esphome-audio-stack](https://github.com/n-IA-hane/esphome-audio-stack), ESP-SR;
+  [esphome-aec](https://github.com/matt123p/esphome-aec), SpeexDSP). LocalDot's ESP32-S3 alone did
+  it « quite good, not perfect », then its author moved it to an ESP32-P4. The Voice PE does it on
+  its XMOS. The open question that most moves the design: an ESP32-S3 alone, or with an XMOS or a
+  P4 beside it.
+
 ## What it would cost
 
 Worked out on 2026-11-18 for the household's three units: the bare board from JLCPCB's quote page,
-its assembly from JLCPCB's published fees, the parts at LCSC's prices. With no design yet, it
-prices a sketch of one. It replaces an estimate of 2026-11-15 (700 to 1900 €) that put the fixed
-fees at about twice these. PCBWay quoted MiciMike's Home Mini board at about twice what JLCPCB's
-grid gives (935 $ for five): a dearer maker, not a reason to double this.
+its assembly from JLCPCB's published fees and its parts pages, the parts at LCSC's prices. With no
+design yet, it prices a sketch of one. It replaces an estimate of 2026-11-15 (700 to 1900 €) that
+put the fixed fees at about twice these. PCBWay quoted MiciMike's Home Mini board at about twice
+what JLCPCB's grid gives (935 $ for five): a dearer maker, not a reason to double this.
 
 - **The bare board**: 4 layers, 77 × 77 mm, 1.2 mm thick, five of them: 8 $.
-- **Parts, a board**: about 12 $. An ESP32-S3-WROOM-1 module (5.1 $), a TAS5805M amplifier fed
+- **Parts, a board**: about 13 $. An ESP32-S3-WROOM-1 module (5.4 $), a TAS5805M amplifier fed
   from the 12 V (1.3 $), twelve addressable LEDs (1 to 1.4 $), the two ribbon connectors (0.2 $),
-  two pogo pins on the speaker's pads, a 12 V to 5 V converter and a 3.3 V regulator, a USB-C
-  socket to flash it, some fifty passives. The 4.0 × 1.7 mm barrel socket is not at LCSC: bought
-  apart and soldered by hand. A display driver, if the display needs one, adds up to 2 $. The
-  Voice PE's XMOS XU316 adds about 20 $ (18 $ the chip, ten in stock on 2026-11-18) and an XTAG4
-  to load it.
-- **Assembly, fixed per run**: setup, stencil, a fee per distinct part (about 28, 15 of them
-  extended), fixtures, hand soldering. The joints, 0.0016 $ each, come to 0.6 $ a board.
+  two spring contacts on the speaker's pads, a 4.0 × 1.7 mm barrel socket (Hroparts DC-098-165A,
+  LCSC C129001, 0.25 $), a 12 V to 5 V converter and a 3.3 V regulator, level translators, a USB-C
+  socket to flash it, some fifty passives. The display's drivers are on its flex: nothing to add.
+  The Voice PE's XMOS XU316 adds about 20 $ (18 $ the chip, ten in stock on 2026-11-18) and an
+  XTAG4 to load it.
+- **Assembly, fixed per run**: setup, stencil, a fee per distinct part (about 31), fixtures, hand
+  soldering. The joints, 0.0016 $ each, come to 0.6 $ a board, and the module's X-ray 1.6 $.
+  JLCPCB places ESP32-S3 modules in Standard assembly only (« Standard Only, X-ray Inspection
+  Required » on their parts pages); the ribbon connectors and the barrel socket in either.
 
   | Assembly | When | Fixed |
   |---|---|---|
-  | Economic, one face | every part on the chassis face, the LEDs reverse-mounted (SK6812MINI-E, lit through a hole in the board) | about 60 $ |
-  | Standard, one face | the same, if JLCPCB will not place the 25-contact connector in Economic (its limit is a 0.40 mm pitch; the connector's 0.3 mm is two staggered rows of 0.6) | about 100 $ |
-  | Standard, both faces | the LEDs on the base face as Amazon's, the rest on the chassis face | about 130 $ |
+  | Standard, one face | every part on the chassis face, the LEDs reverse-mounted (SK6812MINI-E, lit through a hole in the board, as in keyboards) | about 100 $ |
+  | Standard, both faces | the LEDs on the base face as Amazon's, the rest on the chassis face | about 135 $ |
 
-  Whether everything fits on the chassis face depends on the room under the chassis, not measured.
+  Whether everything fits on the chassis face depends on the room under the chassis, not measured:
+  the module is 3.1 mm thick. Economic assembly, about 60 $, would take the bare ESP32-S3 chip and
+  an antenna of our own, as esphome-dot drew it, and the SK6812MINI-EA, Economic where the -E is
+  not: cheaper by 40 to 75 $ a run, against a radio design to get right.
 - **A run**: five bare boards, two or five of them assembled, UPS shipping (26 $) and 20 % VAT:
-  125 to 165 € in Economic, 200 to 240 € on both faces.
-- **Runs**: two, perhaps three; the first ones with two boards assembled. A first board seldom works
-  whole here, for reasons a published design has already met: two cables whose pinout is read with
-  a multimeter, not documented (a connector with its contacts on the wrong side mirrors all of
-  them); a microphone board whose controller `U1` may expect something from Amazon's board, and
-  whose converter differs between units; a display whose driver is not located; an outline to fit
-  within half a millimetre; a 12 V class-D amplifier beside the microphone lines, a Wi-Fi antenna
-  beside the metal chassis. On a 0.3 mm connector or under a module, a wrong track cannot be
-  mended with a wire.
+  175 to 220 € on one face, 210 to 260 € on both.
+- **Runs**: two, perhaps three; the first ones with two boards assembled. Since Amazon's source
+  code and esphome-dot, the signals are known, and the contacts mostly: what remains is to check
+  them on this unit and to fit the board. A first board can still fail on a connector with its
+  contacts on the wrong side (all of them mirrored), an outline a millimetre off, a 12 V class-D
+  amplifier beside the microphone lines, a Wi-Fi antenna beside the metal chassis. On a 0.3 mm
+  connector or under a module, a wrong track cannot be mended with a wire.
 - **Before any board**: a multimeter, a logic analyser, the caliper's battery, a breakout for the
   25-contact cable, an ESP32-S3 kit and an amplifier on the bench: 60 to 150 €.
 
-In all, without the XMOS: 350 to 600 € in two runs, 470 to 800 € in three. Once a board works,
-one more in a run of five costs 30 to 50 €, its parts and its share of the run. Three Voice PEs
-cost about 180 $. What this buys is the speaker, the clock and a design others can have made, not
-a saving.
+In all, without the XMOS: 450 to 600 € in two runs, 630 to 830 € in three. Once a board works,
+one more in a run of five costs about 45 to 50 €, its parts and its share of the run. Three Voice
+PEs cost about 180 $. What this buys is the speaker, the clock and a design others can have made,
+not a saving.
 
 ## Still to find out
 
@@ -334,11 +439,13 @@ its inside jaws. A reading is good to 0.3 mm at best, and less on the hole dista
 end is a wall some millimetre high, bright as a mirror, and where it meets the scale is judged on
 photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none of this matters.
 
-1. **The 25-contact cable's pinout**: which contact is power, ground, I2C, the audio clocks and data,
-   each button, each LED. With a multimeter, by continuity from the cable to the test pads and to the
-   AK5704's pins, whose roles its datasheet gives. With a logic analyzer on the running device, the
-   I2C traffic would also give the settings Amazon writes to the converter.
-2. **The display's driver**: look at the hidden face, or probe the 10-contact cable while it runs.
+1. **The 25-contact cable's pinout, checked on this unit**: esphome-dot's table (above), its
+   unnamed contacts, and the voltages: 1.8 V logic or 3.3 V. With a multimeter, by continuity from
+   the cable to the AK5704's pins, whose roles its datasheet gives, and by voltage on the running
+   device. A logic analyzer on the running device would show `U1` at 0x08 and the converter at 0x10
+   on the bus, and the settings Amazon writes to it.
+2. **The display's cable**: which of the 10 contacts is the I2C bus (it should answer at 0x30, 0x32
+   and 0x33), the enable, the fault line, the supply and its voltage. Probed while it runs.
 3. **The power socket's polarity**, read on the label: measure it once before powering a board of
    ours.
 4. **The speaker's impedance**: across its two pads.
@@ -347,8 +454,9 @@ photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none 
    connectors. Photos and caliper read on its beam give them to about 0.5 mm.
 6. **The white ring**: its thickness and what it is made of. Soft and glued, it may not come off
    whole: a new board needs it moved over, or another cut to its shape.
-7. What `U1` is and what it needs from the main board, `U6`'s three characters, and the amplifier
-   `AR1`.
+7. **The room between the board's connector face and the chassis**, at the centre and towards the
+   edge, with the caliper: whether a 3.1 mm module and every other part can go on that face.
+8. `U6`'s three characters, if the accelerometer is to be used.
 
 ## Sources
 
@@ -368,5 +476,17 @@ photos taken at an angle. With a battery the caliper reads to 0.01 mm, and none 
 - [kaeru issue 118](https://github.com/R0rt1z2/kaeru/issues/118), the 5th generation's boot chain
 - Liam Pettigrew, [The Franken Dot](https://fulloch.com/posts/the-franken-dot/)
 - Brian Dorey, [Amazon Echo Pop teardown](https://www.briandorey.com/post/echo-pop-smart-speaker-teardown)
+- Greg Cormier, [esphome-dot](https://github.com/gcormier/esphome-dot), a replacement board begun
+  for the model without clock
+- Amazon, [Echo device software notices and source code](https://www.amazon.com/echonotices):
+  `Echo_Dot_5th_Gen_Clock_src-6.5.7.1-20251027.tar.bz2`
+- FCC, [2A4DH-1115](https://fcc.report/FCC-ID/2A4DH-1115/) (with clock) and
+  [2A4DH-0821](https://fcc.report/FCC-ID/2A4DH-0821/) (without)
+- JLCPCB, [assembly fees](https://jlcpcb.com/help/article/pcb-assembly-price) and
+  [assembly capabilities](https://jlcpcb.com/capabilities/pcb-assembly-capabilities); its parts
+  pages for the assembly class of each part
+- Hroparts, [DC-098-165A](https://www.lcsc.com/datasheet/lcsc_datasheet_2108131530_Korean-Hroparts-Elec-DC-098-165A_C129001.pdf),
+  a 4.0 × 1.7 mm socket
+- ESPHome, [tas58xx](https://esphome.io/components/audio_dac/tas58xx/)
 - [Turning an old Echo Dot into a local voice assistant](https://dev.to/adamjrg/turning-an-old-echo-dot-into-a-local-voice-assistant-1nlb),
   for which models have an exploit
