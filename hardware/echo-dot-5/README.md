@@ -278,23 +278,47 @@ by foam tape.
 
 ## What it would cost
 
-An estimate of 2026-11-15 for the household's three units, from JLCPCB's published fees and parts
-prices, with no design to quote. The same method gave half of what PCBWay really quoted for
-MiciMike's Home Mini board (935 $ for five), so take it as a floor.
+Worked out on 2026-11-18 for the household's three units: the bare board from JLCPCB's quote page,
+its assembly from JLCPCB's published fees, the parts at LCSC's prices. With no design yet, it
+prices a sketch of one. It replaces an estimate of 2026-11-15 (700 to 1900 €) that put the fixed
+fees at about twice these. PCBWay quoted MiciMike's Home Mini board at about twice what JLCPCB's
+grid gives (935 $ for five): a dearer maker, not a reason to double this.
 
-- **Parts, a board**: about 16 $ with an ESP32-S3 module (5 $), a TAS5805M amplifier, twelve
-  addressable LEDs, the two ribbon connectors, the socket, a regulator and a display driver; about
-  33 $ with an XMOS XU316 and its flash beside it, as in the Voice PE.
-- **A run of five** (the least a maker sells; three and two spares): parts on both faces, so the
-  standard assembly, 135 to 250 $ of fixed fees; with parts, shipping and VAT, 300 to 550 $.
-- **Runs**: a first board seldom works whole (a pinout read wrong, a part that fouls the chassis).
-  Two runs, perhaps three; the first ones with two boards assembled of the five.
-- **Before any board**: a multimeter, a logic analyser, the caliper's battery, a way to tap the
-  25 contacts, an ESP32-S3 kit and an amplifier on the bench: 80 to 250 €.
+- **The bare board**: 4 layers, 77 × 77 mm, 1.2 mm thick, five of them: 8 $.
+- **Parts, a board**: about 12 $. An ESP32-S3-WROOM-1 module (5.1 $), a TAS5805M amplifier fed
+  from the 12 V (1.3 $), twelve addressable LEDs (1 to 1.4 $), the two ribbon connectors (0.2 $),
+  two pogo pins on the speaker's pads, a 12 V to 5 V converter and a 3.3 V regulator, a USB-C
+  socket to flash it, some fifty passives. The 4.0 × 1.7 mm barrel socket is not at LCSC: bought
+  apart and soldered by hand. A display driver, if the display needs one, adds up to 2 $. The
+  Voice PE's XMOS XU316 adds about 20 $ (18 $ the chip, ten in stock on 2026-11-18) and an XTAG4
+  to load it.
+- **Assembly, fixed per run**: setup, stencil, a fee per distinct part (about 28, 15 of them
+  extended), fixtures, hand soldering. The joints, 0.0016 $ each, come to 0.6 $ a board.
 
-In all 700 to 1900 €, 230 to 630 € a unit, most of it fixed: once a board works, one more costs
-its parts. Three Voice PEs cost about 180 $. What this buys is the speaker, the clock and a design
-others can have made, not a saving.
+  | Assembly | When | Fixed |
+  |---|---|---|
+  | Economic, one face | every part on the chassis face, the LEDs reverse-mounted (SK6812MINI-E, lit through a hole in the board) | about 60 $ |
+  | Standard, one face | the same, if JLCPCB will not place the 25-contact connector in Economic (its limit is a 0.40 mm pitch; the connector's 0.3 mm is two staggered rows of 0.6) | about 100 $ |
+  | Standard, both faces | the LEDs on the base face as Amazon's, the rest on the chassis face | about 130 $ |
+
+  Whether everything fits on the chassis face depends on the room under the chassis, not measured.
+- **A run**: five bare boards, two or five of them assembled, UPS shipping (26 $) and 20 % VAT:
+  125 to 165 € in Economic, 200 to 240 € on both faces.
+- **Runs**: two, perhaps three; the first ones with two boards assembled. A first board seldom works
+  whole here, for reasons a published design has already met: two cables whose pinout is read with
+  a multimeter, not documented (a connector with its contacts on the wrong side mirrors all of
+  them); a microphone board whose controller `U1` may expect something from Amazon's board, and
+  whose converter differs between units; a display whose driver is not located; an outline to fit
+  within half a millimetre; a 12 V class-D amplifier beside the microphone lines, a Wi-Fi antenna
+  beside the metal chassis. On a 0.3 mm connector or under a module, a wrong track cannot be
+  mended with a wire.
+- **Before any board**: a multimeter, a logic analyser, the caliper's battery, a breakout for the
+  25-contact cable, an ESP32-S3 kit and an amplifier on the bench: 60 to 150 €.
+
+In all, without the XMOS: 350 to 600 € in two runs, 470 to 800 € in three. Once a board works,
+one more in a run of five costs 30 to 50 €, its parts and its share of the run. Three Voice PEs
+cost about 180 $. What this buys is the speaker, the clock and a design others can have made, not
+a saving.
 
 ## Still to find out
 
