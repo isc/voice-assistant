@@ -46,7 +46,7 @@ def reply(d: dict) -> str:
 # Calls that act, or speak, or make something; reads are left out
 ACTIONS = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_heating", "lock", "unlock",
-    "arm_alarm", "disarm_alarm", "vacuum",
+    "arm_alarm", "disarm_alarm", "vacuum", "open_building_door",
     "play_radio", "play_music", "move_media", "music_control", "change_volume", "set_volume", "stop_media",
     "set_timer", "set_alarm", "cancel_timer", "create_event", "update_event", "show_image",
 }  # fmt: skip
@@ -135,6 +135,13 @@ def proposes_disarm(d):
 
 def arms(mode: str, where=lambda tc: True, expect: str = ""):
     return has("arm_alarm", lambda tc: where(tc) and arg(tc, "mode") == norm(mode), expect or f"arm_alarm {mode}")
+
+
+def opens_building_door(from_charras: bool = False):
+    """Paris's building door opened, `home` said from Charras, which has none; the flat's door left alone."""
+    homes = ("paris",) if from_charras else ("paris", "")
+    door = has("open_building_door", lambda tc: arg(tc, "home") in homes)
+    return lambda d: (door(d)[0] and not calls(d, "unlock", "lock"), "open_building_door at Paris, no lock or unlock")
 
 
 def france_inter_or_asked(d):
@@ -245,6 +252,18 @@ CASES = [
     ("AD-083 an alarm clock", "charras", [("mets une alarme à 7 heures", instead("set_alarm", "arm_alarm"))]),
     ("AD-083 Charras's alarm from Paris", "paris", [
         ("active l'alarme à Charras", arms("absence", lambda tc: arg(tc, "home") == "charras", "arm_alarm at Charras")),
+    ]),
+    # Paris's building door, by voice at any time; plain « ouvre la porte » with no ring is the flat's (AD-111). A dry
+    # run reads the ring sensor of the real HA: a ring then would make it the building's
+    ("AD-111 la porte de l'immeuble", "paris", [("ouvre la porte de l'immeuble", opens_building_door())]),
+    ("AD-111 ouvre en bas", "paris", [("ouvre en bas", opens_building_door())]),
+    ("AD-111 la porte d'en bas", "paris", [("tu peux ouvrir la porte d'en bas ?", opens_building_door())]),
+    ("AD-111 la porte de la rue", "paris", [("ouvre la porte de la rue", opens_building_door())]),
+    ("AD-111 l'interphone", "paris", [("ça sonne à l'interphone, tu peux ouvrir ?", opens_building_door())]),
+    ("AD-111 la personne qui sonne", "paris", [("ouvre à la personne qui sonne", opens_building_door())]),
+    ("AD-111 ouvre la porte", "paris", [("ouvre la porte", instead("unlock", "open_building_door"))]),
+    ("AD-111 from Charras", "charras", [
+        ("ouvre la porte de l'immeuble à Paris", opens_building_door(from_charras=True)),
     ]),
     ("AD-062 pasta timer", "paris", [
         ("Lance un minuteur de trois minutes pour les pâtes",

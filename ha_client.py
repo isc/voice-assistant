@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Optional
 
@@ -125,6 +126,15 @@ def asks_heating_on(text: str) -> bool:
     return bool(_TURN_ON_WORDS.search(flat)) and not _HEATING_MODE_WORDS.search(flat)
 
 
+# A request a ring at the building door may be about: « ouvre la porte », « ouvre », « tu peux ouvrir ? » (AD-111)
+_DOOR_WORDS = re.compile(r"\b(?:porte|ouvr)")
+
+
+def about_a_door(text: str) -> bool:
+    """Whether a request may be about a door: the ring is read for it alone, not for the rest, 40 to 60 ms each."""
+    return bool(_DOOR_WORDS.search(fold(text)))
+
+
 # « ouvre le volet », « tu me le rouvres », « ferme-le »: all the way, unless the request says how far (« à moitié »,
 # « un peu », « à 30 % », « pas complètement »). gemma read « au niveau de la table à manger » (by it) as a level:
 # 50 %, 10 of 10 (AD-099). Words that may say how far are many, and any of them leaves the model's call as it is
@@ -178,6 +188,12 @@ def rooms_named(room: str, known: list[str]) -> tuple[list[str], list[str]]:
             if not matched:
                 unknown.append(said.strip())
     return found, unknown
+
+
+def building_doors() -> dict:
+    """The buttons that open a building's street door (config.local.json's `building_doors`, AD-111), each with the
+    sensor a ring at the flat's intercom turns on: Paris's Comelit board, home-infra paris/README.md."""
+    return LOCAL_CONFIG.get("building_doors", {})
 
 
 def vacuum_map(entity_id: str) -> dict:
@@ -316,6 +332,15 @@ VACUUM_ACTIONS = {"start": {"cleaning"}, "pause": {"paused", "docked", "idle"}, 
 VACUUM_CONFIRM_SECONDS = 10
 # The services that read and write a Roomba's schedules: Paris's custom integration (AD-108, home-infra paris/)
 SCHEDULE_SERVICE = "roomba_schedule"
+# A ring this recent at a building door's panel makes « ouvre la porte » that door (AD-111): the ring sensor on at some
+# moment of the last minute. Paris's Comelit board turns it off 30 s after a ring, and opens at once within 60 s of
+# one, else switches the panel's camera on first, 4 s (home-infra paris/README.md)
+RING_SECONDS = 60
+# A building door's button pressed: what the model is told, as nothing tells whether the door opened (AD-111)
+BUILDING_DOOR_OPENED = (
+    "Ordre d'ouverture envoyé à la porte de l'immeuble : elle se débloquera dans quelques secondes, il faudra la "
+    "pousser. Dis que l'ordre est envoyé, pas qu'elle est ouverte ou déverrouillée"
+)
 
 
 def alarm_mode(said) -> Optional[str]:
@@ -364,6 +389,9 @@ class HAClient:
         self.hidden: set[str] = set()
         # Whether this HA reads and writes its Roomba's schedules: Paris's custom integration (AD-108)
         self.robot_schedules = False
+        # The building's street door, if this HA has the button config.local.json names for one: {"button", "ring"}
+        # (AD-111)
+        self.building_door: Optional[dict] = None
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def connect(self) -> bool:
@@ -568,6 +596,18 @@ class HAClient:
             logger.info(f"Total: {len(self.entities)} entities in {len(by_area)} areas")
             if left_out:
                 logger.info(f"Left out by their name, not hidden in HA: {', '.join(sorted(left_out))}")
+
+        # A building's street door: by the button config.local.json names, never by HA's buttons, of which this is the
+        # one the server may press (AD-111)
+        present = {state["entity_id"] for state in states}
+        door = next(
+            ({"button": button, "ring": config.get("ring")} for button, config in building_doors().items()
+             if button in present),
+            None,
+        )  # fmt: skip
+        if door != self.building_door:
+            self.building_door = door
+            logger.info(f"Building door: {door['button'] if door else 'none'}")
 
         screens = await self._fetch_screens()
         if screens != self.screens:
@@ -871,13 +911,15 @@ class HAClient:
         return []
 
     # Never by voice, whatever route a call takes to get here (AD-041); unlocking is unlock()'s alone (AD-068),
-    # disarming disarm()'s (AD-083). An alarm is never set off: no trigger, and its siren's switch is out of reach
+    # disarming disarm()'s (AD-083). An alarm is never set off: no trigger, and its siren's switch is out of reach. No
+    # button is pressed, press being a button's one service: the building door's alone, by open_building_door (AD-111)
     _NOT_BY_VOICE = "Rien n'a été fait : le {} ne se fait pas à la voix"
     _FORBIDDEN_SERVICES = {
         ("lock", "unlock"): _NOT_BY_VOICE.format("déverrouillage"),
         ("lock", "open"): _NOT_BY_VOICE.format("déverrouillage"),
         ("alarm_control_panel", "alarm_disarm"): _NOT_BY_VOICE.format("désarmement"),
         ("alarm_control_panel", "alarm_trigger"): "Rien n'a été fait : l'alarme ne se déclenche jamais d'ici",
+        ("button", "press"): "Rien n'a été fait : aucun bouton ne se presse d'ici",
     }
 
     async def call_service(self, domain: str, service: str, entity_id: str, **kwargs) -> str:
@@ -890,6 +932,39 @@ class HAClient:
     async def unlock(self, entity_id: str) -> str:
         """Unlock a door: only for a tap on the web app's confirmation button, never for the model (AD-068)."""
         return await self._call_service("lock", "unlock", entity_id)
+
+    async def open_building_door(self) -> str:
+        """The building's street door released by its button, config.local.json's, the one button the server presses
+        (AD-111). Its board takes a few seconds to act, and nothing says the door opened: the order sent is all the
+        result says. One HA says is offline is not pressed: HA would take the press and drop it."""
+        if not (door := self.building_door):
+            return "Rien n'a été fait : pas de porte d'immeuble ici"
+        if ((await self.get_entity_state(door["button"], timeout=2)) or {}).get("state") == "unavailable":
+            return "Rien n'a été fait : la porte de l'immeuble ne répond pas (hors ligne)"
+        status, _ = await self._post_service("button", "press", {"entity_id": door["button"]})
+        if status is None:
+            return "Rien n'a été fait : Home Assistant injoignable"
+        return BUILDING_DOOR_OPENED if status == 200 else "Rien n'a été fait : erreur de Home Assistant"
+
+    async def rang(self) -> bool:
+        """Whether someone rang the flat at the building door's panel within RING_SECONDS: its ring sensor on at some
+        moment of them, by HA's history, where the board back on the Wi-Fi (unavailable, then off) rings nothing
+        (AD-111). Paris's answers in 40 to 60 ms; False when HA does not say within 1 s: « ouvre la porte » is then the
+        flat's, which unlocks nothing without a tap."""
+        if not (ring := (self.building_door or {}).get("ring")):
+            return False
+        since = (datetime.now(timezone.utc) - timedelta(seconds=RING_SECONDS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            async with self._session.get(
+                f"{self.base_url}/api/history/period/{since}",
+                params={"filter_entity_id": ring, "minimal_response": "", "no_attributes": ""},
+                timeout=aiohttp.ClientTimeout(total=1),
+            ) as resp:
+                history = await resp.json() if resp.status == 200 else []
+        except Exception as e:
+            logger.warning(f"Ring not read ({ring}): {e}")
+            return False
+        return any(entry.get("state") == "on" for states in history for entry in states)
 
     async def disarm(self, entity_id: str) -> str:
         """Disarm an alarm: only for a tap on the web app's confirmation button, never for the model (AD-083)."""

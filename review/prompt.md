@@ -38,8 +38,9 @@ script s'en charge, déploie, et reviendra en arrière si le serveur ne redémar
 Trois corrections au plus par nuit.
 
 Ne corrige jamais toi-même, propose seulement : les serrures et le déverrouillage (`lock`,
-`unlock`, `confirm`), l'alarme et son désarmement (`arm_alarm`, `disarm_alarm`, `HAClient.arm`,
-`HAClient.disarm`), le contrôle d'accès (`access_control`, `cross_site_guard`, clés, Funnel), les
+`unlock`, `confirm`), la porte de l'immeuble et sa sonnerie (`open_building_door`,
+`HAClient.open_building_door`, `HAClient.rang`, `building_doors`), l'alarme et son désarmement
+(`arm_alarm`, `disarm_alarm`, `HAClient.arm`, `HAClient.disarm`), le contrôle d'accès (`access_control`, `cross_site_guard`, clés, Funnel), les
 secrets, l'enregistrement des voix, les dépendances, le firmware, et tout ce qui change le prompt
 système ou le comportement de l'assistant d'une façon qui se discute.
 

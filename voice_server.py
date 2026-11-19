@@ -46,6 +46,7 @@ from ha_client import (
     HOME_DEVICES,
     LOCAL_CONFIG,
     VACUUM_ACTIONS,
+    about_a_door,
     alarm_mode,
     asks_every_room,
     asks_heating_on,
@@ -95,6 +96,9 @@ _WAIT_PHRASE_AFTER = 5
 _WAIT_PHRASE = "Un petit instant."  # « Un instant. » alone, Kokoro's came out « Un estompe » to Whisper
 # Said when speech after the wake word came out of Parakeet as nothing, then listened for again (AD-094)
 _ASK_AGAIN = "Je n'ai pas compris, tu peux répéter ?"
+# In the context message while someone has just rung at the building door: plain « ouvre la porte » is that door, not
+# the flat's (AD-111). There, not in the system prompt, which stays the same for Ollama's cache
+_RANG = "On vient de sonner à l'interphone de l'immeuble : « ouvre la porte » seul, c'est open_building_door."
 
 
 # French web radio streams. All MP3: the Voice PE does not decode AAC.
@@ -208,6 +212,7 @@ _REDOABLE = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock",
     "arm_alarm", "set_heating", "play_radio", "play_music", "move_media", "stop_media", "set_volume",
     "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image", "vacuum",
+    "open_building_door",
 }  # fmt: skip
 
 
@@ -1231,10 +1236,10 @@ class VoiceAssistantServer:
     # AD-108)
     _ALARM_TOOLS = {"arm_alarm", "disarm_alarm"}
     _HOME_DEVICE_TOOLS = _ALARM_TOOLS | {"vacuum", "vacuum_schedule"}
-    # The calls that may name another home: its door from this one, its heating, its alarm, its vacuum, its states
-    # (AD-068, AD-071, AD-083, AD-106, AD-108)
+    # The calls that may name another home: its door from this one, its heating, its alarm, its vacuum, its states,
+    # its building's door (AD-068, AD-071, AD-083, AD-106, AD-108, AD-111)
     _ANY_HOME = {"lock", "unlock", "arm_alarm", "disarm_alarm", "set_heating", "vacuum", "vacuum_schedule", "get_state",
-                 "get_sensor"}  # fmt: skip
+                 "get_sensor", "open_building_door"}  # fmt: skip
 
     def _home_named(self, arguments: dict) -> Optional[tuple[Site, dict]]:
         """The home a call names, and its arguments as read there: its `home`, else a home's name said in
@@ -1454,6 +1459,9 @@ class VoiceAssistantServer:
         if not self.ha_client:
             return "Home Assistant non disponible"
 
+        if function_name == "open_building_door":
+            return await self._open_building_door()
+
         # Sensors are searched by keyword, not resolved like actionable entities
         if function_name == "get_sensor":
             return await self.ha_client.search_sensors(arguments.get("query", ""))
@@ -1598,6 +1606,21 @@ class VoiceAssistantServer:
         if function_name in self._HOME_DEVICE_TOOLS:
             return HOME_DEVICES[self._DEVICE_DOMAINS[function_name][0]][0]
         return arguments.get("entity", "")
+
+    async def _open_building_door(self) -> str:
+        """This home's building door released, at any time, from the satellite as from the web app, no tap to confirm:
+        Ivan's choice, unlike the flat's door (AD-111). Another home's only when the call names it: the model asks."""
+        if self.ha_client.building_door:
+            return await self.ha_client.open_building_door()
+        there = next((site for site in self.sites if site.ha_client and site.ha_client.building_door), None)
+        if not there:
+            return "Rien n'a été fait : pas de porte d'immeuble ici"
+        # « pas de porte d'immeuble ici. Il y en a une à Paris : demande si c'est celle-là », the vacuum's words
+        # (AD-106), got « C'est fait, j'ai ouvert la porte de l'immeuble à Paris » 2 times of 2
+        return (
+            f"Rien n'a été fait, aucune porte ouverte : {self.site.name.capitalize()} n'a pas de porte d'immeuble. "
+            f"Celle de {there.name.capitalize()} reste fermée : demande si c'est celle-là"
+        )
 
     async def _vacuum(self, arguments: dict, entity_ids: list[str]) -> str:
         """The home's robot vacuum started, in the rooms said (AD-107), paused or sent back to its dock, awaited as a
@@ -2265,8 +2288,12 @@ class VoiceAssistantServer:
         context = [f"Date et heure actuelles: {time.strftime('%A %d %B %Y, %H:%M')}."]
         if timers_info := format_timers_for_prompt(self.timer_manager.get_timers(self._client)):
             context.append(timers_info)
-        if music_info := await self._music_for_prompt():
+        music_info, rang = await asyncio.gather(self._music_for_prompt(), self._rang(text))
+        if music_info:
             context.append(music_info)
+        if rang:
+            logger.info("A ring at the building door: « ouvre la porte » is that one")
+            context.append(_RANG)
 
         tools = self._tools()
         # Only these run: a name the model made up (« unlock ») or a tool this house lacks does not
@@ -2453,6 +2480,11 @@ class VoiceAssistantServer:
             save_to_history(content)
         return content if content else None
 
+    async def _rang(self, text: str) -> bool:
+        """Whether someone has just rung this home's flat at its building door's panel, for a request about a door
+        (AD-111)."""
+        return bool(self.ha_client) and about_a_door(text) and await self.ha_client.rang()
+
     def _expired(self, conversation) -> bool:
         return time.time() - conversation.last_time > self.CONVERSATION_TIMEOUT
 
@@ -2530,6 +2562,7 @@ class VoiceAssistantServer:
             vacuum=bool(robots),
             vacuum_rooms=vacuum_rooms,
             vacuum_schedules=schedules,
+            building_door=any(client.building_door for client in clients),
         )
 
     def _continue(self, conversation) -> None:

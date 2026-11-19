@@ -83,13 +83,15 @@ def get_tool_definitions(
     vacuum=False,
     vacuum_rooms=(),
     vacuum_schedules=False,
+    building_door=False,
 ) -> list:
     """Return LLM tool definitions. `homes`: the homes' names, which the door, heating, alarm and vacuum tools,
     get_state and get_sensor may name when there are several (AD-068, AD-071, AD-083, AD-106); `locks`: whether
     some home has a lock; `heating`: the modes of the homes' heating, if some home's can be set (AD-071); `alarm`:
     the modes the homes' alarms can be armed in, if some home has one (AD-083); `vacuum`: whether some home has a
     robot vacuum (AD-106); `vacuum_rooms`: the rooms it knows, if it can clean some only (AD-107);
-    `vacuum_schedules`: whether its weekly schedules can be changed from here (AD-108)."""
+    `vacuum_schedules`: whether its weekly schedules can be changed from here (AD-108); `building_door`: whether
+    some home has a building's street door to open (AD-111)."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -512,6 +514,10 @@ def get_tool_definitions(
                 "appareils ne sont pas dans la liste : entity tel que la demande le dit (« porte », « chauffage »)"
             ),
         }
+    # The same, short, for the tools that name no device (AD-109)
+    home = {}
+    if elsewhere:
+        home["home"] = {**elsewhere["home"], "description": "La maison, si la demande en nomme une (« à Paris »)"}
 
     # No lock, no tool. Unlocking only proposes: a tap in the web app confirms, and the satellite refuses (AD-068)
     lock_tools = []
@@ -547,6 +553,22 @@ def get_tool_definitions(
                 ),
                 "parameters": door_params,
             },
+        ]
+
+    # A building's street door, opened by voice at any time, from the satellite too: Ivan's choice, unlike the flat's
+    # door (AD-111). Plain « ouvre la porte » is the flat's but just after a ring, which the context message says
+    door_tools = []
+    if building_door:
+        door_tools = [
+            {
+                "name": "open_building_door",
+                "description": (
+                    "Ouvrir la porte de l'immeuble, en bas sur la rue (« ouvre la porte de l'immeuble », « ouvre "
+                    "en bas », « la porte d'en bas », « ouvre à la personne qui sonne », « l'interphone »). Pas la "
+                    "porte de l'appartement : c'est unlock."
+                ),
+                "parameters": {"type": "object", "properties": {**home}, "required": []},
+            }
         ]
 
     # An alarm, armed by voice; disarming only proposes, as unlocking does (AD-068, AD-083). « Pas un réveil »:
@@ -624,9 +646,6 @@ def get_tool_definitions(
     vacuum_tools = []
     if vacuum:
         # Short: the prompt is ~6.8K tokens of gemma's 8K, the room list given once (AD-109)
-        home = {}
-        if elsewhere:
-            home["home"] = {**elsewhere["home"], "description": "La maison, si la demande en nomme une (« à Paris »)"}
         rooms, where = {}, ""
         if vacuum_rooms:
             where = " ou celui de certaines pièces"
@@ -833,6 +852,7 @@ def get_tool_definitions(
         },
         *standalone_tools,
         *lock_tools,
+        *door_tools,
         *alarm_tools,
         *heating_tools,
         *vacuum_tools,

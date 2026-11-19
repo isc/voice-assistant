@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -81,9 +82,13 @@ class FakeHA:
 
     timeout = None
 
-    def __init__(self, entities: dict):
+    def __init__(self, entities: dict, building_door: Optional[dict] = None):
         self.entities = entities
         self.states = {eid: info["state"] for eid, info in entities.items()}
+        if building_door:  # its button and ring sensor, which are no devices of the snapshot (AD-111)
+            self.states.update({building_door["button"]: "unknown", building_door["ring"]: "off"})
+        # (since when, entity, state): HA's history, which the ring is read from; each state since ever at first
+        self.changes: list[tuple[float, str, str]] = [(0.0, eid, state) for eid, state in self.states.items()]
         self.sensors: dict[str, dict] = {}  # a scenario's sensors, HA's whole state: the snapshot has no sensor
         self.calls: list[tuple[str, str, dict]] = []
         from test_unit import FakeRoombaSchedule
@@ -91,22 +96,33 @@ class FakeHA:
         self.robot = FakeRoombaSchedule()  # the Roomba's own schedules, through roomba_schedule (AD-108)
 
     def _state(self, entity_id: str) -> dict:
-        attributes = self.entities[entity_id]["attributes"]
+        attributes = self.entities.get(entity_id, {}).get("attributes", {})
         return {"entity_id": entity_id, "state": self.states[entity_id], "attributes": attributes}
 
-    def set(self, entity_id: str, state):
-        """HA's side: a device's state, or a sensor's whole state (sensors)."""
+    def set(self, entity_id: str, state, ago: float = 0):
+        """HA's side: a device's state, since `ago` seconds, or a sensor's whole state (sensors)."""
         if isinstance(state, dict):
             self.sensors[entity_id] = state
         else:
             self.states[entity_id] = state
+            self.changes.append((time.time() - ago, entity_id, state))
 
-    def get(self, url, **_):
+    def history(self, entity_id: str, since: float) -> list[dict]:
+        """HA's history of a device from `since`: its state then, and each change after."""
+        changes = sorted((when, state) for when, eid, state in self.changes if eid == entity_id)
+        then = [state for when, state in changes if when <= since][-1:]
+        return [{"state": state} for state in then + [state for when, state in changes if when > since]]
+
+    def get(self, url, **kwargs):
         path = URL(url).path
         if path == "/api/states":
             return _Response(200, [self._state(eid) for eid in self.states] + list(self.sensors.values()))
         if (eid := path.removeprefix("/api/states/")) in self.states:
             return _Response(200, self._state(eid))
+        if since := re.fullmatch(r"/api/history/period/(.+)", path):
+            eid = kwargs.get("params", {}).get("filter_entity_id")
+            when = datetime.fromisoformat(since[1]).timestamp()
+            return _Response(200, [self.history(eid, when)] if eid in self.states else [])
         return _Response(404, {"message": "Entity not found."})
 
     def post(self, url, **kwargs):
@@ -236,7 +252,8 @@ def build_server(snapshot: dict, site: str):
         for key, value in home.items():
             if key != "name":
                 setattr(client, key, value)
-        client._session = FakeHA(client.entities)
+        # getattr: code before AD-111 has none, as « before » runs this file on main's (CLAUDE.md, Tests)
+        client._session = FakeHA(client.entities, getattr(client, "building_door", None))
     server.site = server._voice_site = server.site_named(site)
     server.calendar_client = empty_calendar()
     server.spotify = FakeSpotify()
@@ -258,6 +275,7 @@ class Turn:
     music: Optional[tuple[str, str]]
     wall: float
     robot_schedule: list  # the Roomba's schedules after it (AD-108)
+    pressed: list[str]  # the homes whose HA got a button pressed, the other home's too (AD-111)
 
     @property
     def said(self) -> str:
@@ -416,6 +434,70 @@ def says(*patterns: str, unlike: str = ""):
         any(re.search(p, t.said) for p in patterns) and not (unlike and re.search(unlike, t.said)),
         f"« {' » or « '.join(patterns)} » said" + (f", not « {unlike} »" if unlike else ""),
     )
+
+
+# The sensor a ring at the Paris flat turns on, at its building door (AD-111)
+RING = "binary_sensor.comelit_incoming_call"
+
+
+def _offered_unlock(t) -> bool:
+    return any(c["function"] == "unlock" and c.get("confirm") for c in t.calls)
+
+
+# A reply saying the door open, when only the order is known to have gone: its board acts within ~6 s, and says
+# nothing back (AD-111)
+_SAID_OPEN = re.compile(
+    r"\b(?:est|a ete) (?:bien )?(?:ouverte?|deverrouillee?)\b|\bj'ai (?:bien )?(?:ouvert|deverrouille)"
+)
+
+
+def opens_building_door(t):
+    """Paris's building door pressed once, the flat's door neither locked nor offered for unlocking, and the reply
+    not saying the door is open."""
+    locks = [service for domain, service, _ in t.sent if domain == "lock"]
+    ok = t.pressed == ["paris"] and not locks and not _offered_unlock(t) and not _SAID_OPEN.search(t.said)
+    return ok, "the building door opened once, no lock, not said open"
+
+
+def offers_flat_door(t):
+    """The flat's door offered for a tap in the app (AD-068), the building's left shut."""
+    return _offered_unlock(t) and not t.pressed, "the flat's door offered for unlocking, the building's not opened"
+
+
+def refuses_flat_door(t):
+    """From the satellite: the flat's door refused (AD-068), the building's left shut, neither said open."""
+    refused = any(c["function"] == "unlock" and "enceinte" in str(c.get("result")) for c in t.calls)
+    return refused and not t.pressed and not _SAID_OPEN.search(t.said), "the flat's door refused, nothing opened"
+
+
+def locks_flat_door(t):
+    sent = [(domain, service) for domain, service, _ in t.sent]
+    return sent == [("lock", "lock")] and not t.pressed, "the flat's door locked, the building's not opened"
+
+
+def nothing_opened_asks(t):
+    """Charras has no building door: Paris's not opened unasked, the model asks."""
+    return not t.pressed and "?" in t.reply, "nothing opened, a question"
+
+
+def ringing(ended: float = 0, satellite: bool = False):
+    """Someone rang at Paris's building door: its ring sensor on, or on until `ended` seconds ago, for 30 s as the
+    board keeps it; the request from the satellite rather than the app, if `satellite`."""
+
+    def change(server):
+        paris = server.site_named("paris").ha_client._session
+        paris.set(RING, "on", ago=ended + 30)
+        if ended:
+            paris.set(RING, "off", ago=ended)
+        if satellite:
+            from_satellite(server)
+
+    return change
+
+
+def from_satellite(server):
+    """The request from the home's satellite rather than a browser of the web app: no button to tap there."""
+    server._client = None
 
 
 def number(value: str) -> str:
@@ -695,6 +777,50 @@ SCENARIOS = [
         ("Lance l'aspirateur.", vacuums(home="paris"), {}),
         ("Oui, celui de Paris.", vacuums("start", home="paris"), {}),
     ]),
+    # Paris's building door, opened by voice at any time, from the satellite as from the app (AD-111). Its words
+    ("AD-111 la porte de l'immeuble", "paris", {}, [("Ouvre la porte de l'immeuble.", opens_building_door, {})]),
+    ("AD-111 la porte d'en bas", "paris", {}, [("Tu peux ouvrir la porte d'en bas ?", opens_building_door, {})]),
+    ("AD-111 la porte du bas", "paris", {}, [("Ouvre la porte du bas.", opens_building_door, {})]),
+    ("AD-111 ouvre en bas", "paris", {}, [("Ouvre en bas.", opens_building_door, {})]),
+    ("AD-111 la porte de la rue", "paris", {}, [("Ouvre la porte de la rue.", opens_building_door, {})]),
+    ("AD-111 l'interphone", "paris", {}, [("Ça sonne à l'interphone, tu peux ouvrir ?", opens_building_door, {})]),
+    ("AD-111 la personne qui sonne", "paris", {}, [
+        ("Ouvre à la personne qui sonne.", opens_building_door, ringing()),
+    ]),
+    ("AD-111 the satellite", "paris", {}, [("Ouvre la porte de l'immeuble.", opens_building_door, from_satellite)]),
+    # Plain « ouvre la porte »: the building's just after a ring, else the flat's, a tap in the app (AD-068)
+    ("AD-111 ouvre la porte, ringing", "paris", {}, [("Ouvre la porte.", opens_building_door, ringing())]),
+    ("AD-111 ouvre la porte, rang 40 s ago", "paris", {}, [("Ouvre la porte.", opens_building_door, ringing(40))]),
+    ("AD-111 ouvre la porte, ringing, the satellite", "paris", {}, [
+        ("Ouvre la porte.", opens_building_door, ringing(satellite=True)),
+    ]),
+    # Then the building's, said: the satellite's refusal of the flat's door (« l'enceinte n'ouvre aucune porte ») must
+    # not make it refuse that one
+    ("AD-111 ouvre la porte, no ring", "paris", {}, [
+        ("Ouvre la porte.", offers_flat_door, {}),
+        ("Non, celle d'en bas.", opens_building_door, {}),
+    ]),
+    ("AD-111 ouvre la porte, no ring, the satellite", "paris", {}, [
+        ("Ouvre la porte.", refuses_flat_door, from_satellite),
+        ("Non, celle d'en bas.", opens_building_door, from_satellite),
+    ]),
+    ("AD-111 verrouille la porte, ringing", "paris", {}, [("Verrouille la porte.", locks_flat_door, ringing())]),
+    ("AD-111 ferme la porte", "paris", {}, [("Tu peux fermer la porte ?", locks_flat_door, {})]),
+    # From Charras, which has none: Paris's when named, else a question, as the vacuum (AD-106)
+    ("AD-111 from Charras, à Paris", "charras", {}, [
+        ("Ouvre la porte de l'immeuble à Paris.", opens_building_door, {}),
+    ]),
+    ("AD-111 from Charras, à Paris, the satellite", "charras", {}, [
+        ("Ouvre la porte de l'immeuble à Paris.", opens_building_door, from_satellite),
+    ]),
+    ("AD-111 from Charras, unnamed", "charras", {}, [
+        ("Ouvre la porte de l'immeuble.", nothing_opened_asks, {}),
+        ("Oui, celle de Paris.", opens_building_door, {}),
+    ]),
+    # Paris's ring is not Charras's: « ouvre la porte » there is Charras's door
+    ("AD-111 from Charras, ouvre la porte while Paris rings", "charras", {}, [
+        ("Ouvre la porte.", offers_flat_door, ringing()),
+    ]),
 ]  # fmt: skip
 
 
@@ -702,12 +828,13 @@ async def replay(snapshot: dict, site: str, states: dict, turns: list):
     """One run of a scenario, from a new server; yields each turn with its index."""
     server = build_server(snapshot, site)
     fake = server.ha_client._session
+    homes = {each.name: each.ha_client._session for each in server.sites}
     for eid, state in states.items():
         fake.set(eid, state)
         if not isinstance(state, dict):
             server.ha_client.entities[eid]["state"] = state
     for i, (text, _, changes) in enumerate(turns):
-        sent, t0 = len(fake.calls), time.monotonic()
+        sent, t0 = {name: len(home.calls) for name, home in homes.items()}, time.monotonic()
         server.new_request("replay")  # a browser of the web app, with its own conversation (AD-061)
         if callable(changes):
             changes(server)
@@ -718,7 +845,9 @@ async def replay(snapshot: dict, site: str, states: dict, turns: list):
         await asyncio.gather(*server._pending_service_calls, *server._background_tasks, return_exceptions=True)
         wall = round(time.monotonic() - t0, 2)
         robot = copy.deepcopy(fake.robot.schedule)
-        yield i, Turn(reply, list(server._last_tool_calls), fake.calls[sent:], server._spotify_here, wall, robot)
+        new = {name: home.calls[sent[name] :] for name, home in homes.items()}
+        pressed = [name for name, calls in new.items() for domain, *_ in calls if domain == "button"]
+        yield i, Turn(reply, list(server._last_tool_calls), new[site], server._spotify_here, wall, robot, pressed)
 
 
 async def main():

@@ -37,7 +37,10 @@ _LAN_PATHS = (*_SPEAKER_PATHS, "/health")
 # Tailscale Funnel's proxy runs on this machine: the internet arrives from loopback, told apart by these
 _PROXY_HEADERS = ("X-Forwarded-For", "Tailscale-Funnel-Request")
 # What a home's HAClient knows of its devices, all a replay needs to build one (test_scenarios.py)
-_SNAPSHOT = ("home_name", "entities", "areas", "entity_areas", "home", "screens", "setpoints", "robot_schedules")
+_SNAPSHOT = (
+    "home_name", "entities", "areas", "entity_areas", "home", "screens", "setpoints", "robot_schedules",
+    "building_door",
+)  # fmt: skip
 # Fetched without the cookie when Chrome installs the app, the icons by Google's WebAPK server. static/
 # holds only the shell and its icons: data stays behind api/, tts/, recordings/ and health
 _INSTALL_PATHS = ("/manifest.webmanifest", "/static/")

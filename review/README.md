@@ -23,8 +23,8 @@ session on it (AD-074). Then the model-backed tests run, and a turn that regress
    each WAV again, beside Parakeet's transcript; the WAVs are then deleted.
 3. Claude (Opus, `claude -p --restricted`, `dontAsk`) works in a clone of `main`
    (`~/.local/share/voice-assistant-review/repo`, reset each night): one commit per obvious fix, with
-   its test, three at most; never locks, access control, secrets, recordings, dependencies, firmware,
-   or the assistant's behaviour where it can be discussed. Its answer: a summary, its fixes, its proposals.
+   its test, three at most; never locks or the building door, access control, secrets, recordings,
+   dependencies, firmware, or the assistant's behaviour where it can be discussed. Its answer: a summary, its fixes, its proposals.
 4. The script checks the commits: only `*.py`, `*.md` and `static/` outside `review/`, rebased on
    `main`, unit tests passing. Then pushes to `main` and deploys (`git pull` in `/opt`, restart), unless
    go-librespot plays or a timer runs. The server not healthy within 5 minutes: `/opt` goes back to the

@@ -15,6 +15,11 @@
     }
   },
 
+  "_building_doors": "A building's street door, by the HA button that releases it, with the binary_sensor a ring at the flat turns on (AD-111). Opened by voice at any time; plain « ouvre la porte » is this door just after a ring. Without one, no such tool.",
+  "building_doors": {
+    "button.comelit_open_door": {"ring": "binary_sensor.comelit_incoming_call"}
+  },
+
   "family": [
     {"name": "Parent 1", "role": "parent"},
     {"name": "Parent 2", "role": "parent"},

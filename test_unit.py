@@ -175,6 +175,7 @@ def make_server(env=None):
     server._spotify_at = None
     server._tool_semaphore = asyncio.Semaphore(4)
     server._background_tasks = set()
+    server._offers = {}
     server.recording_task = None
     server.warm_llm = MagicMock()  # no LLM to warm; deleted for the real one
     return server
@@ -213,6 +214,7 @@ def make_client() -> HAClient:
     client.setpoints = {}
     client.hidden = set()
     client.robot_schedules = False
+    client.building_door = None
     client._session = None
     return client
 
@@ -1013,7 +1015,6 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         server = self.server = make_server({"SITES": "paris,charras"})
         server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
         server.spotify, server.calendar_client = None, None
-        server._offers = {}
         self.paris, self.charras = server.sites
         for site, eid, name in (
             (self.paris, "lock.smart_lock_pro", "Smart Lock Pro"),
@@ -1269,7 +1270,6 @@ class TestAlarmFromTheServer(unittest.IsolatedAsyncioTestCase):
         server = self.server = make_server({"SITES": "paris,charras"})
         server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
         server.spotify, server.calendar_client = None, None
-        server._offers = {}
         self.paris, self.charras = server.sites
         for site in server.sites:
             site.ha_client = make_client()
@@ -1356,6 +1356,222 @@ class TestAlarmFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tools["disarm_alarm"]["home"]["enum"], ["paris", "charras"])
         self.charras.ha_client.entities = {}
         self.assertNotIn("arm_alarm", {t["name"] for t in self.server._tools()})
+
+
+# ---------------------------------------------------------------------------
+# Tests: the building's street door, opened by voice at any time, from either home (AD-111)
+# ---------------------------------------------------------------------------
+
+DOOR_BUTTON, RING = "button.comelit_open_door", "binary_sensor.comelit_incoming_call"
+
+
+def history_answer(*states: str, status: int = 200) -> MagicMock:
+    """HA's session, answering the ring sensor's history of the last minute with these states."""
+    session = MagicMock()
+    response = MagicMock(status=status, json=AsyncMock(return_value=[[{"state": s} for s in states]] if states else []))
+    session.get.return_value.__aenter__.return_value = response
+    return session
+
+
+class TestBuildingDoor(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.client = make_client()
+        self.client.building_door = {"button": DOOR_BUTTON, "ring": RING}
+
+    async def test_found_by_the_button_the_config_names(self):
+        """A door is the button config.local.json names, when this HA has it; no other button ever is, and it is
+        no device the other tools reach."""
+        client = make_client()
+        states = [
+            {"entity_id": DOOR_BUTTON, "state": "unknown", "attributes": {"friendly_name": "Comelit Open Door"}},
+            {"entity_id": "button.freebox_reboot", "state": "unknown", "attributes": {"friendly_name": "Reboot"}},
+        ]
+        client._session = MagicMock()
+        response = MagicMock(status=200, json=AsyncMock(return_value=states))
+        client._session.get.return_value.__aenter__.return_value = response
+        client._fetch_areas, client._fetch_entity_areas = AsyncMock(), AsyncMock(return_value={})
+        client._fetch_hidden, client._fetch_screens = AsyncMock(return_value=set()), AsyncMock(return_value=[])
+        client._loaded = AsyncMock(return_value=False)
+        for doors, found in (
+            ({DOOR_BUTTON: {"ring": RING}}, {"button": DOOR_BUTTON, "ring": RING}),
+            ({"button.comelit_other": {"ring": RING}}, None),  # Charras: its HA has no such button
+            ({}, None),
+        ):
+            with patch.dict("ha_client.LOCAL_CONFIG", {"building_doors": doors}):
+                await client.refresh_entities()
+            self.assertEqual(client.building_door, found)
+            self.assertEqual(client.entities, {})
+
+    async def test_call_service_presses_no_button(self):
+        """Whatever route a call takes, no button is pressed there, the door's included: open_building_door's alone."""
+        self.client._post_service = AsyncMock(return_value=(200, None))
+        for button in (DOOR_BUTTON, "button.freebox_reboot"):
+            result = await self.client.call_service("button", "press", button)
+            self.assertEqual(result, "Rien n'a été fait : aucun bouton ne se presse d'ici")
+        self.client._post_service.assert_not_awaited()
+
+    async def test_pressed_and_said_sent_not_open(self):
+        """Nothing says the door opened: its board takes up to ~6 s, and HA's press answers at once."""
+        from voice_server import _NOTHING_DONE
+
+        self.client.get_entity_state = AsyncMock(return_value={"state": "2026-11-19T07:22:02+00:00"})
+        self.client._post_service = AsyncMock(return_value=(200, None))
+        result = await self.client.open_building_door()
+        self.client._post_service.assert_awaited_once_with("button", "press", {"entity_id": DOOR_BUTTON})
+        self.assertTrue(result.startswith("Ordre d'ouverture envoyé à la porte de l'immeuble"), result)
+        # Without it, 10 replies of 60 said it « déverrouillée » (AD-111)
+        self.assertIn("pas qu'elle est ouverte ou déverrouillée", result)
+        self.assertIsNone(_NOTHING_DONE.search(result))  # the app does not show it failed
+
+    async def test_not_pressed_offline_nor_said_done_on_failure(self):
+        from voice_server import _NOTHING_DONE
+
+        self.client._post_service = AsyncMock(return_value=(200, None))
+        self.client.get_entity_state = AsyncMock(return_value={"state": "unavailable"})
+        offline = await self.client.open_building_door()
+        self.assertEqual(offline, "Rien n'a été fait : la porte de l'immeuble ne répond pas (hors ligne)")
+        self.client._post_service.assert_not_awaited()
+        self.client.get_entity_state.return_value = {"state": "unknown"}  # never pressed since HA has it
+        for status, said in ((500, "erreur de Home Assistant"), (None, "Home Assistant injoignable")):
+            self.client._post_service.return_value = (status, None)
+            result = await self.client.open_building_door()
+            self.assertEqual(result, f"Rien n'a été fait : {said}")
+            self.assertTrue(_NOTHING_DONE.search(result))
+        self.client.building_door = None
+        self.assertEqual(await self.client.open_building_door(), "Rien n'a été fait : pas de porte d'immeuble ici")
+
+    async def test_a_ring_by_the_history_of_the_last_minute(self):
+        """The ring sensor on at some moment of the last minute is a ring, off since or not; the board back on the
+        Wi-Fi (unavailable, then off), as on 2026-11-18 at 21:45 UTC, is none."""
+        for states, rang in (
+            (("on",), True),
+            (("off", "on", "off"), True),
+            (("off",), False),
+            (("unavailable", "off"), False),
+            ((), False),  # the sensor in no history
+        ):
+            self.client._session = history_answer(*states)
+            self.assertEqual(await self.client.rang(), rang, states)
+        url, kwargs = self.client._session.get.call_args.args[0], self.client._session.get.call_args.kwargs
+        self.assertRegex(url, r"^http://fake/api/history/period/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(kwargs["params"]["filter_entity_id"], RING)
+        self.client._session = history_answer("on", status=500)
+        self.assertFalse(await self.client.rang())
+        self.client._session.get.side_effect = asyncio.TimeoutError
+        self.assertFalse(await self.client.rang())  # not said: « ouvre la porte » stays the flat's
+        self.client._session = history_answer("on")
+        self.client.building_door = {"button": DOOR_BUTTON, "ring": None}
+        self.assertFalse(await self.client.rang())
+        self.client.building_door = None
+        self.assertFalse(await self.client.rang())
+        self.client._session.get.assert_not_called()
+
+    def test_offered_only_with_a_building_door(self):
+        self.assertIn("open_building_door", {t["name"] for t in get_tool_definitions(self.client, building_door=True)})
+        self.assertNotIn("open_building_door", {t["name"] for t in get_tool_definitions(self.client)})
+
+
+class TestBuildingDoorFromTheServer(unittest.IsolatedAsyncioTestCase):
+    """Paris's building door opened from the satellite and the web app alike, with no tap; from Charras, which has
+    none, only when the call names Paris (AD-111)."""
+
+    def setUp(self):
+        from ha_client import BUILDING_DOOR_OPENED
+
+        server = self.server = make_server({"SITES": "paris,charras"})
+        server.spotify, server.calendar_client = None, None
+        server._keep_llm_loaded = lambda: None
+        self.paris, self.charras = server.sites
+        for site in server.sites:
+            site.ha_client = make_client()
+            site.ha_client.call_service = AsyncMock(return_value="C'est fait")
+            site.ha_client.rang = AsyncMock(return_value=False)
+        self.door = self.paris.ha_client
+        self.door.building_door = {"button": DOOR_BUTTON, "ring": RING}
+        self.door.open_building_door = AsyncMock(return_value=BUILDING_DOOR_OPENED)
+        server.site = self.paris
+
+    async def run_call(self, args: dict, browser=None) -> dict:
+        self.server.new_request(browser)
+        call = {"function": "open_building_door", "args": args}
+        call["result"] = await self.server.execute_function("open_building_door", args, call)
+        return call
+
+    async def test_opened_from_the_satellite_and_the_app_with_no_tap(self):
+        for browser in (None, "phone42"):
+            call = await self.run_call({}, browser)
+            self.assertTrue(call["result"].startswith("Ordre d'ouverture envoyé"), browser)
+            self.assertNotIn("confirm", call)
+        self.assertEqual(self.door.open_building_door.await_count, 2)
+        self.assertEqual(self.server._offers, {})
+        self.assertIsNone(self.server._refused("open_building_door", {}))  # what a dry run gets: « OK »
+        self.door.call_service.assert_not_awaited()
+
+    async def test_from_charras_only_named(self):
+        self.server.site = self.charras
+        call = await self.run_call({})
+        self.assertEqual(
+            call["result"],
+            "Rien n'a été fait, aucune porte ouverte : Charras n'a pas de porte d'immeuble. "
+            "Celle de Paris reste fermée : demande si c'est celle-là",
+        )
+        self.door.open_building_door.assert_not_awaited()
+        call = await self.run_call({"home": "paris"})
+        self.assertTrue(call["result"].endswith("(Paris)"), call["result"])
+        self.door.open_building_door.assert_awaited_once()
+        self.assertIs(self.server.site, self.charras)  # the request's home stays
+        self.door.building_door = None
+        self.assertEqual((await self.run_call({}))["result"], "Rien n'a été fait : pas de porte d'immeuble ici")
+
+    def test_offered_where_some_home_has_one(self):
+        tools = {t["name"]: t["parameters"]["properties"] for t in self.server._tools()}
+        self.assertEqual(tools["open_building_door"]["home"]["enum"], ["paris", "charras"])
+        self.door.building_door = None
+        self.assertNotIn("open_building_door", {t["name"] for t in self.server._tools()})
+
+    async def test_a_shortcut_never_in_effect(self):
+        from voice_server import _redoable
+
+        self.assertTrue(_redoable("open_building_door", {}))
+        self.assertFalse(await self.server._call_in_effect("open_building_door", {}, AsyncMock()))
+
+    async def ask(self, text: str, dry_run: bool = False) -> list:
+        """A request at the home served, the model calling open_building_door: the messages it was given."""
+        call = {"id": "c1", "function": {"name": "open_building_door", "arguments": "{}"}}
+        replies = [{"role": "assistant", "content": "", "tool_calls": [call]}, {"role": "assistant", "content": "Ok."}]
+        with patch("llm.chat_completion", AsyncMock(side_effect=replies)) as completion:
+            await self.server.process_with_llm(None, text, dry_run=dry_run)
+        return completion.await_args_list[0].args[3]
+
+    async def test_a_dry_run_presses_nothing(self):
+        self.server.new_request()
+        await self.ask("ouvre la porte de l'immeuble", dry_run=True)
+        self.assertEqual(self.server._last_tool_calls[0]["result"], "OK")
+        self.door.open_building_door.assert_not_awaited()
+
+    async def test_a_ring_said_to_the_model_at_its_home_alone(self):
+        """Plain « ouvre la porte » is the building's just after a ring: the context message says it, then only."""
+        from voice_server import _RANG
+
+        def context(messages: list) -> str:
+            return next(m["content"] for m in messages[1:] if m["content"].startswith("Date et heure actuelles"))
+
+        self.door.rang.return_value = True
+        self.server.new_request()
+        self.assertIn(_RANG, context(await self.ask("ouvre la porte")))
+        self.server.site = self.charras  # the ring is Paris's: at Charras, « ouvre la porte » is Charras's
+        self.server.new_request()
+        self.assertNotIn(_RANG, context(await self.ask("ouvre la porte")))
+        self.server.site = self.paris
+        self.door.rang.reset_mock()
+        self.server.new_request()  # about no door: HA's history not read, 40 to 60 ms saved
+        self.assertNotIn(_RANG, context(await self.ask("quelle heure est-il ?")))
+        self.door.rang.assert_not_awaited()
+        self.door.rang.return_value = False
+        self.server.new_request()
+        messages = await self.ask("ouvre la porte")
+        self.assertNotIn(_RANG, context(messages))
+        self.assertNotIn("sonner", messages[0]["content"])  # the system prompt never changes with a ring
 
 
 # ---------------------------------------------------------------------------
@@ -1782,7 +1998,7 @@ class TestAppWords(unittest.TestCase):
         said = set(re.findall(r"(\w+): \[", re.search(r"\nconst TOOLS = \{(.*?)\n\};", html, re.S)[1]))
         every = get_tool_definitions(
             make_client(), MagicMock(), music=True, homes=("paris", "charras"), locks=True, heating=["Auto"],
-            alarm=["absence"], vacuum=True, vacuum_schedules=True,
+            alarm=["absence"], vacuum=True, vacuum_schedules=True, building_door=True,
         )  # fmt: skip
         self.assertEqual({t["name"] for t in every} - said, {"end_conversation"})  # never shown
 
