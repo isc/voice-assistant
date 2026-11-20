@@ -1312,13 +1312,14 @@ $('menu-btn').addEventListener('click', async () => {
   try {
     const h = await (await fetch('health')).json();
     const c = h.components;
-    const device = (x) => (x.device === 'cpu' ? 'processeur (lent)' : x.device === 'cuda' ? 'GPU' : x.device || '?');
+    // The STT on the processor is the card full, 5× slower (AD-055); the TTS is there by choice (AD-103)
+    const device = (x, slow = '') => (x.device === 'cpu' ? `processeur${slow}` : x.device === 'cuda' ? 'GPU' : x.device || '?');
     const homes = Object.entries(h.sites).map(([name, s]) => `${cap(name === 'default' ? 'maison' : name)} : ${s.esp ? 'satellite connecté' : 'pas de satellite'}${s.ha ? '' : ', Home Assistant injoignable'}`);
     box.innerHTML = [
       `<b>Serveur ${h.status === 'ok' ? 'en forme' : 'dégradé'}</b>`,
       ...homes.map(esc),
       `Modèle : ${esc(c.llm.model || c.llm.mode)}`,
-      `Voix : STT sur ${device(c.stt)}, TTS sur ${device(c.tts)}`,
+      `Voix : STT sur ${device(c.stt, ' (lent)')}, TTS sur ${device(c.tts)}`,
     ].join('<br>');
   } catch {
     box.textContent = 'État du serveur indisponible';
