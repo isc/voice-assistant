@@ -3704,6 +3704,7 @@ class TestLLMLoop(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_follow_up_warms_nothing(self):
         """The model has just answered: what the follow-up reads is in its cache."""
+        self.server._followup_by[self.server.devices.get(self.server.site.name)] = time.time() + 3
         await self.server.handle_voice_assistant_start(self.server.site, "", 1, None, None)
         self.server.warm_llm.assert_not_called()
 
@@ -4468,6 +4469,16 @@ class TestFollowUp(unittest.IsolatedAsyncioTestCase):
         server._end_recording()
         await server.handle_voice_assistant_start(server.site, "", 1, None, "Okay Nabu")
         self.assertFalse(server.is_followup)  # the next wake word, not a follow-up
+
+    async def test_a_start_with_no_wake_word_and_no_reply_before_is_a_request(self):
+        """The Voice PE's button starts a run without a wake word: on 2026-11-19 at 18:25:02, five hours after the
+        last request, « Tu peux fermer les volets de la chambre des enfants » was taken for a follow-up."""
+        server = make_server()
+        server.recording_task = None
+        server.devices[server.site.name] = MagicMock()
+        await server.handle_voice_assistant_start(server.site, "", 1, None, None)
+        self.assertFalse(server.is_followup)
+        server.warm_llm.assert_called_once()
 
 
 class TestReplyStream(unittest.IsolatedAsyncioTestCase):

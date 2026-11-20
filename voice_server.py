@@ -487,7 +487,7 @@ class VoiceAssistantServer:
         self.calendar_client = None
 
         # Continuous conversation
-        self.is_followup = False  # True when pipeline was started without wake word
+        self.is_followup = False  # True when the run started right after a reply that asked for a follow-up
         # Satellite client -> until when its next START is the follow-up a reply asked for
         self._followup_by: dict[APIClient, float] = {}
 
@@ -915,9 +915,10 @@ class VoiceAssistantServer:
         if site.ha_client:
             self._in_background(self._lower_speakers(site))
 
-        # ESPHome 2026.6 sends the last wake word again on a follow-up's START (2025.6 cleared it)
+        # ESPHome 2026.6 sends the last wake word again on a follow-up's START (2025.6 cleared it), and none on
+        # a press of the Voice PE's button: a follow-up is the START right after a reply that asked for one
         followup_by = self._followup_by.pop(self.devices.get(site.name), 0)
-        self.is_followup = wake_word_phrase is None or time.time() < followup_by
+        self.is_followup = time.time() < followup_by
         # Only overwrite conversation_id for new conversations (wake word detected).
         # Follow-ups keep the server-assigned ID so exchanges group correctly.
         if not self.is_followup:
