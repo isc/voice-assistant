@@ -1290,7 +1290,7 @@ This document tracks all architecture and technology decisions made for this pro
   - The references alone: 853/860. The model called `play_radio(room: Sonos)` for « la sous-douce » 6 times of 10, then said the Sonos was offline and offered the Google Home, which the old check refused.
   - With « telle que dite »: 844/860. « Sous-douce » 10/10, but « Ouvre la porte du bas » 0/10 and « Non, celle d'en bas » 6/10: `open_building_door(home: charras)` from Paris, a home no one named.
   - With « seulement si » too, as shipped: 850/860 under the old check, 859/860 under the corrected one (« sous-douce » 1/10 → 10/10, AD-084's « basculer le son sur la sonos » 9/10). The corrected check passes 10/10 on `main` and on this change, and still refuses « la Google Home ou la Sonos ? ».
-  - `test_hard_cases.py`, 10 runs, `main` on the live server: 648/670 (AD-075's setpoint asked in three turns 4/10, AD-077's games room shutter 0/10, AD-078's « il ne se rouvre pas » 4/10).
+  - `test_hard_cases.py`, 10 runs on the live server, `main` then this change deployed: 648/670 → 650/670. AD-078's « il ne se rouvre pas » 4/10 → 9/10, AD-077's games room shutter 0/10 → 2/10, AD-075's setpoint asked in three turns 4/10 → 3/10, AD-080's « Merci, bonne journée » 10/10 → 6/10 (its `end_conversation` left out, a turn the nightly lists as unstable: 1/3 some nights on the same code).
 - **Rejected**:
   - Gemini's way, the model searching the tools: one more model round on the voice path, and a 12B calling a tool it has not loaded.
   - The shared explanations in the system prompt instead: it already says how to pass `room`, and a description beside its parameter is what the model was measured following.
