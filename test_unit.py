@@ -62,7 +62,7 @@ from recordings import Recordings
 from review.collect import NOISE, interactions
 from review.nightly import UNSTABLE, compare, failure, new_turns, scores_of
 from sites import load_sites, site_at_address
-from vad import FRAME_BYTES, SpeechEnd
+from vad import FRAME_BYTES, SpeechEnd, level, quiet_speech
 from web_ui import (
     KEY_COOKIE, access_control, cross_site_guard, from_this_machine, handle_review_open, is_trusted_client, setup_routes
 )
@@ -170,6 +170,9 @@ def make_server(env=None):
     server._played_at = {}
     server._playing = set()
     server._followup_by = {}
+    server.device_restart_keys = {}
+    server._satellite_restarted = {}
+    server.audio_channel_1, server.quiet_mic = bytearray(), None
     server.is_recording = False
     server._pipeline_running = False
     server._pending_service_calls = set()
@@ -5041,6 +5044,104 @@ class TestAskedAgain(unittest.IsolatedAsyncioTestCase):
         await server.process_voice_pipeline(MagicMock(), bytes(4096))
         self.assertTrue(server.conversation.is_request("Verrouille la porte d'entrée.", follow_up=True))
         self.assertEqual(server.conversation.language, "fr")
+
+
+class LoudnessVAD:
+    """Silero as a level meter: a frame is speech when its RMS reaches 500."""
+
+    def __init__(self, _rate):
+        pass
+
+    @staticmethod
+    def process(frame) -> float:
+        return 0.9 if sum(x * x for x in frame) / len(frame) >= (500 / 32768) ** 2 else 0.1
+
+
+def tone(rms: float, seconds: float) -> bytes:
+    """A 440 Hz tone at that RMS, 16 kHz 16-bit mono."""
+    t = np.arange(int(16000 * seconds)) / 16000
+    return (np.sin(2 * np.pi * 440 * t) * rms * np.sqrt(2)).astype(np.int16).tobytes()
+
+
+class TestQuietMicrophone(unittest.IsolatedAsyncioTestCase):
+    """A satellite's microphone stuck low (AD-113): on 2026-11-20 two requests at a tenth of their usual level,
+    which Parakeet wrote right, got the red LED; a restart of the satellite gave its level back."""
+
+    def setUp(self):
+        patcher = patch("vad.SileroVAD", LoudnessVAD)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_wake_sound_is_left_out_of_the_level(self):
+        self.assertEqual(level(tone(20000, 0.5) + tone(80, 2)), 80)
+        self.assertEqual(level(tone(20000, 0.4)), 0)
+
+    def test_speech_too_quiet_for_the_vad_is_heard_amplified(self):
+        speech = SpeechEnd()
+        recording = tone(20, 1.5) + tone(80, 2) + tone(20, 4.5)  # the room, the request
+        speech.read(recording)
+        self.assertFalse(speech.heard)
+        self.assertEqual(quiet_speech(recording), 80)
+
+    def test_a_quiet_room_is_no_speech(self):
+        self.assertIsNone(quiet_speech(tone(20, 8)))  # 200 amplified: under the VAD's 500
+
+    def test_a_recording_as_loud_as_a_request_is_not_amplified(self):
+        """The room after a false wake, at 345 or more: the VAD's verdict stands."""
+        self.assertIsNone(quiet_speech(tone(300, 8)))
+
+    async def test_the_request_is_answered_and_the_satellite_restarted(self):
+        server = satellite_server(self, "Tu peux fermer la porte de l'appart.")
+        server.speech = SpeechEnd()
+        server.process_with_llm = AsyncMock(return_value="C'est fait.")
+        server.text_to_speech = AsyncMock(return_value={"heard": 0.3, "play": 1.0})
+        server._restart_satellite = AsyncMock()
+        server.is_recording, server.audio_buffer = True, bytearray(tone(20, 0.5) + tone(80, 3) + tone(20, 4.5))
+        server.audio_channel_1 = bytearray(tone(1000, 8))
+        api = MagicMock()
+        await server.stop_recording(api, "no speech")
+        events = [c.args[0] for c in api.send_voice_assistant_event.call_args_list]
+        self.assertEqual(events[0], VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END)  # thinking, not red
+        server.stt.transcribe.assert_awaited_once()
+        server._restart_satellite.assert_called_once_with(server.site)
+        entry = server.exchange_log.entries[-1]
+        self.assertEqual(entry["response"], "C'est fait.")
+        details = json.loads(server.recordings.path(entry["audio"]).with_suffix(".json").read_text())
+        self.assertEqual(details["quiet_mic"], 80)
+        with wave.open(str(server.recordings.path(entry["audio"]).with_suffix(".ch1.wav"))) as channel_1:
+            self.assertEqual(channel_1.getnframes(), 8 * 16000)
+
+    async def test_a_follow_up_is_not_amplified(self):
+        """After a reply, the satellite hears the room: quiet, it ends the conversation as before."""
+        server = satellite_server(self, "", follow_up=True)
+        server.speech = SpeechEnd()
+        server._restart_satellite = AsyncMock()
+        server.is_recording, server.audio_buffer = True, bytearray(tone(80, 5))
+        await server.stop_recording(MagicMock(), "no speech")
+        server.stt.transcribe.assert_not_awaited()
+        server._restart_satellite.assert_not_awaited()
+
+    async def test_the_restart_waits_for_the_satellite_to_be_idle(self):
+        server = make_server()
+        api = MagicMock()
+        server.devices[server.site.name], server.device_restart_keys[server.site.name] = api, 7
+        server._playing.add(server.site.name)  # its reply, or music
+        with patch("voice_server._SATELLITE_IDLE_POLL", 0.01):
+            restart = asyncio.create_task(server._restart_satellite(server.site))
+            await asyncio.sleep(0.05)
+            api.button_command.assert_not_called()
+            server._playing.clear()
+            await restart
+        api.button_command.assert_called_once_with(7)
+
+    async def test_once_an_hour_at_most(self):
+        """A cover over the microphone is no state a restart clears."""
+        server = make_server()
+        api = MagicMock()
+        server.devices[server.site.name], server.device_restart_keys[server.site.name] = api, 7
+        await server._restart_satellite(server.site)
+        await server._restart_satellite(server.site)
+        api.button_command.assert_called_once_with(7)
 
 
 class TestTimers(unittest.IsolatedAsyncioTestCase):

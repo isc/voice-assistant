@@ -43,11 +43,11 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 | `spotify.py` | Spotify: go-librespot API, Web API search, and the MP3 stream of go-librespot's PCM FIFO served at `/spotify/stream.mp3` |
 | `images.py` | Pictures for the web app or a screen: Wikipedia article's lead image, else an Openverse photo; the phone or the screen loads the URL itself |
 | `photos.py` | The family's photos from Immich (AD-112): found by what they show (smart search), who (named faces), where (Immich's own place names, OpenStreetMap translating) and when (a period as said, read here); served to a screen under `/tts/photos/` by a token for an hour, and the slideshow that shows them there |
-| `recordings.py` | Each voice request kept as WAV + JSON (transcript, reply, tool calls, timings) for 90 days, root-only |
+| `recordings.py` | Each voice request kept as WAV + JSON (transcript, reply, tool calls, timings) for 90 days, root-only; a satellite's, its wake word's channel beside it (`….ch1.wav`, AD-113) |
 | `web_ui.py` | Web app routes: the phone as a satellite (`/api/listen`, a WebSocket), typed requests, shortcuts run again without the LLM (`/api/redo`, AD-065) and offered unless already in effect by HA's state (`/api/in-effect`, AD-066), a door unlocked or an alarm disarmed by a tap on the button its request shows (`/api/confirm`, AD-068, AD-083), the family's photos (`/api/photos/`, AD-112), timers (which are the asking browser's) and music, push subscriptions (`/api/push`, AD-070), the satellite made to say a text, from this machine only (`/api/say`, AD-104), exchange log with persistence (`exchanges.json`) |
 | `static/index.html` | The web app, a PWA: voice and typed requests, this phone's conversation (AD-060) with the pictures and photos it asked for (AD-069, AD-112) and the buttons that unlock or disarm (AD-068, AD-083), timers (a chime when its own reach 0, AD-070) and music now, shortcuts, the history and technical details on demand |
 | `static/sw.js` | The PWA's service worker: the shell offline, and a timer's push shown as a notification (AD-070) |
-| `vad.py` | End of speech by Silero VAD, for the satellite's recordings and the phone's; a burst under 4 frames is no speech (AD-092) |
+| `vad.py` | End of speech by Silero VAD, for the satellite's recordings and the phone's; a burst under 4 frames is no speech (AD-092); after a wake word, speech too quiet for it, heard amplified (AD-113) |
 | `language.py` | A transcript's language when fastText's `lid.176` (in `lid/`, CC-BY-SA, `lid/NOTICE.md`) is sure of it: a follow-up in another than its conversation's is no request (AD-093) |
 | `requirements-linux.txt` / `requirements-mac.txt` | Base deps (`requirements.txt`) plus the STT backend: onnx-asr (server) or parakeet-mlx (Mac) |
 | `run.sh` | Mac dev launcher: sources `.env`, reads secrets from the macOS Keychain, starts llama-server unless a cloud key is set |
@@ -61,7 +61,7 @@ Phone (web app) ─┴→ audio stream → voice_server.py / web_ui.py
 ## Pipeline flow (voice)
 
 1. ESP detects wake word → sends audio stream
-2. Silero VAD detects end of speech (31 frames / ~1s silence); a burst under 4 frames is no speech (AD-092)
+2. Silero VAD detects end of speech (31 frames / ~1s silence); a burst under 4 frames is no speech (AD-092). After a wake word, 8 s it found silent but quieter than any request (the satellite's microphone stuck low) are heard again amplified: speech there is a request, and the satellite restarts once idle, once an hour at most (AD-113)
 3. STT: Parakeet transcribes audio to French text; speech after a wake word it writes as nothing gets « Je n'ai pas compris, tu peux répéter ? » and a follow-up, without the LLM (AD-094)
 4. LLM: sends a static system prompt (instructions, family, entity list) + tool definitions + conversation history + a short context message (date/time, timers, music, a ring at the building door) + the transcript
 5. If tool_calls → execute each, loop back to LLM with results + tools (up to 3 rounds) until text response

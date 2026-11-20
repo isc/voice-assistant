@@ -35,8 +35,9 @@ class Recordings:
                 logger.warning(f"Recording off, {directory} unusable: {e}")
                 self.days = 0
 
-    def save(self, audio: bytes) -> Optional[str]:
-        """Write a request's 16 kHz 16-bit mono audio; returns its path under the directory, None when off."""
+    def save(self, audio: bytes, channel_1: bytes = b"") -> Optional[str]:
+        """Write a request's 16 kHz 16-bit mono audio; returns its path under the directory, None when off.
+        A satellite's other microphone channel, its wake word's, goes beside it as `….ch1.wav` (AD-113)."""
         if not self.days:
             return None
         now = datetime.now()
@@ -44,11 +45,9 @@ class Recordings:
         # A recording that fails must never fail the request
         try:
             self.path(recording).parent.mkdir(exist_ok=True)
-            with wave.open(str(self.path(recording)), "wb") as wav:
-                wav.setnchannels(1)
-                wav.setsampwidth(2)
-                wav.setframerate(16000)
-                wav.writeframes(audio)
+            _write(self.path(recording), audio)
+            if channel_1:
+                _write(self.path(recording).with_suffix(".ch1.wav"), channel_1)
         except OSError as e:
             logger.warning(f"Recording not saved: {e}")
             return None
@@ -78,3 +77,11 @@ class Recordings:
             if day.is_dir() and day.name < oldest:
                 shutil.rmtree(day)
                 logger.info(f"Recordings of {day.name} deleted ({self.days}-day retention)")
+
+
+def _write(path: Path, audio: bytes) -> None:
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(audio)

@@ -29,6 +29,7 @@ import aiohttp
 from aioesphomeapi import (
     APIClient,
     APIConnectionError,
+    ButtonInfo,
     MediaPlayerCommand,
     MediaPlayerEntityState,
     MediaPlayerInfo,
@@ -67,7 +68,7 @@ from recordings import Recordings
 from sites import Conversation, Site, load_sites, site_at_address
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected, SpotifySearchError
 from timer import Timer
-from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
+from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd, quiet_speech
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ _HA_REFRESH_SECONDS = 300
 _GPU_RETRY_SECONDS = 60
 # How often Ollama is asked whether it still has the model: gone after a restart of charras or of Ollama (AD-101)
 _LLM_CHECK_SECONDS = 60
+# A satellite whose microphone stuck low restarted at most this often, once idle, as checked this often (AD-113)
+_SATELLITE_RESTART_EVERY = 3600
+_SATELLITE_IDLE_POLL = 5
 # A tool result kept in history this long at most (a weather or calendar answer runs to 1 kB)
 _HISTORY_RESULT_CHARS = 300
 # While a request is heard, the HA speakers playing are turned down to this share of their volume
@@ -479,6 +483,8 @@ class VoiceAssistantServer:
 
         # Voice pipeline state
         self.audio_buffer = bytearray()
+        self.audio_channel_1 = bytearray()  # the satellite's other microphone channel, its wake word's (AD-113)
+        self.quiet_mic: Optional[int] = None  # the level of speech too quiet for the VAD (AD-113)
         self.is_recording = False
         self.recording_task = None
         self.last_audio_time = 0
@@ -508,6 +514,9 @@ class VoiceAssistantServer:
         # moment a reply is heard (the Voice PE says PLAYING for a voice assistant's announcement, AD-104)
         self._played_at: Dict[str, float] = {}
         self._playing: set[str] = set()
+        # Site name -> its satellite's Restart button, and when the server last pressed it (AD-113)
+        self.device_restart_keys: Dict[str, int] = {}
+        self._satellite_restarted: Dict[str, float] = {}
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
@@ -552,9 +561,14 @@ class VoiceAssistantServer:
         """This site's satellite, when connected."""
         return self.devices.get(self.site.name)
 
+    @property
+    def _voice_busy(self) -> bool:
+        """A satellite's request being heard or answered."""
+        return self.is_recording or self._pipeline_running
+
     def claim_voice(self, site: Site) -> bool:
         """A site's satellite starts a request; refused while another site's conversation holds the voice state."""
-        if site is not self._voice_site and (self.is_recording or self._pipeline_running):
+        if site is not self._voice_site and self._voice_busy:
             logger.warning(f"Site {site.label} refused: a conversation is running at {self._voice_site.label}")
             return False
         self._voice_site = self.site = site
@@ -661,7 +675,7 @@ class VoiceAssistantServer:
         between requests, until it is back on it (AD-055)."""
         while onnx_gpu.lost_cuda(self.stt):
             await asyncio.sleep(_GPU_RETRY_SECONDS)
-            if not (self.is_recording or self._pipeline_running):
+            if not self._voice_busy:
                 await self.stt.retry_gpu()
 
     async def init_calendar_client(self) -> bool:
@@ -853,6 +867,8 @@ class VoiceAssistantServer:
         except Exception as e:
             logger.warning(f"Site {site.label}: could not list ESP entities: {e}")
             return
+        if restart := next((e for e in entities if isinstance(e, ButtonInfo) and e.object_id == "restart"), None):
+            self.device_restart_keys[site.name] = restart.key
         media_players = [e for e in entities if isinstance(e, MediaPlayerInfo)]
         if not media_players:
             logger.info(f"Site {site.label}: ESP has no media_player entity — radio playback via HA only")
@@ -936,7 +952,7 @@ class VoiceAssistantServer:
         if self.recording_task and not self.recording_task.done():
             self.recording_task.cancel()
 
-        self.audio_buffer = bytearray()
+        self.audio_buffer, self.audio_channel_1, self.quiet_mic = bytearray(), bytearray(), None
         self.is_recording = True
         self.speech = SpeechEnd()  # a fresh VAD for each recording
         # In follow-up mode, skip initial audio to avoid picking up TTS echo
@@ -1007,8 +1023,15 @@ class VoiceAssistantServer:
         logger.info(f"Recording stopped ({reason}): {len(audio_data)} bytes")
 
         try:
+            # Speech too quiet for the VAD after a wake word: the satellite's microphone stuck low, which its
+            # restart gives back (AD-113)
+            if not (self.is_followup or self.speech.heard):
+                self.quiet_mic = await asyncio.to_thread(quiet_speech, audio_data)
+                if self.quiet_mic is not None:
+                    logger.warning(f"Speech heard only amplified, the satellite's microphone at {self.quiet_mic}")
+                    self._in_background(self._restart_satellite(self.site), drained=False)
             # No "thinking" if nobody spoke: the ESP would ignore the RUN_END that follows (AD-036)
-            if self.speech.heard:
+            if self.speech.heard or self.quiet_mic is not None:
                 api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
                 logger.info("STT_VAD_END sent - LEDs orange (thinking)")
 
@@ -1084,10 +1107,11 @@ class VoiceAssistantServer:
         if (key := self.device_media_keys.get(self.site.name)) is not None:
             api.media_player_command(key, command=MediaPlayerCommand.STOP, announcement=True)
 
-    async def handle_voice_assistant_audio(self, site: Site, audio_bytes: bytes, _data2: bytes | None = None):
+    async def handle_voice_assistant_audio(self, site: Site, audio_bytes: bytes, data2: bytes | None = None):
         """Handle audio received from a site's ESP with VAD detection.
 
-        aioesphomeapi 45+ passes a second buffer (data2); a single mic stream is enough here."""
+        The Voice PE sends a second channel (data2), the one its wake word hears, which the VAD and Parakeet
+        do not: it is kept beside the recording, to tell how it fares when the first one sticks low (AD-113)."""
         if self.is_recording and site is self._voice_site:
             self.site = site  # the pipeline may run from this task, once the VAD hears the end
             # Skip early audio in follow-up mode to avoid TTS echo
@@ -1095,6 +1119,7 @@ class VoiceAssistantServer:
                 return
 
             self.audio_buffer.extend(audio_bytes)
+            self.audio_channel_1.extend(data2 or b"")
             self.last_audio_time = time.time()
 
             await self.analyze_audio_vad()
@@ -1116,6 +1141,7 @@ class VoiceAssistantServer:
         logger.info(f"Starting full voice pipeline ({self.site.label})")
         self.new_request()
         self._pipeline_running = True
+        heard = self.speech.heard or self.quiet_mic is not None
         timings = {}
         # What became of the request, for the exchange log and beside its recording
         entry = {
@@ -1123,15 +1149,17 @@ class VoiceAssistantServer:
             "transcript": "",
             "response": None,
             "timings": timings,
-            "audio": self.recordings.save(audio_bytes),
+            "audio": self.recordings.save(audio_bytes, self.audio_channel_1),
             "wake_word": not self.is_followup,
             "vad_speech": self.speech.heard,
         }
+        if self.quiet_mic is not None:
+            entry["quiet_mic"] = self.quiet_mic
 
         try:
             # 1. STT, skipped if the VAD heard no speech (AD-036)
             t0 = time.time()
-            if self.speech.heard:
+            if heard:
                 transcript = await self.stt.transcribe(audio_bytes)
             else:
                 logger.info("STT skipped: the VAD heard no speech")
@@ -1144,7 +1172,7 @@ class VoiceAssistantServer:
                     # Normal: nothing asked during follow-up, end conversation quietly
                     logger.info(f"No {'request' if transcript else 'speech'} during follow-up - ending conversation")
                     api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
-                elif self.speech.heard:
+                elif heard:
                     # Speech, written as nothing: a red light alone left « Verrouille la porte d'entrée. » undone
                     # (AD-094). The request said again is the conversation's, its language too (AD-093)
                     self.conversation.language = None
@@ -1213,6 +1241,30 @@ class VoiceAssistantServer:
                     audio=entry["audio"],
                     site=entry["site"],
                 )
+
+    async def _restart_satellite(self, site: Site) -> None:
+        """Restart the satellite whose microphone stuck low, once it is idle: its reboot resets its audio chip, which
+        gave the microphone back on 2026-11-20 (AD-113). At most once an hour: what holds a microphone low may be
+        no state of the chip (a cover over it). A timer it showed still rings, its countdown no longer lit."""
+        if (key := self.device_restart_keys.get(site.name)) is None:
+            return
+        if time.time() < self._satellite_restarted.get(site.name, 0) + _SATELLITE_RESTART_EVERY:
+            logger.warning(f"Site {site.label}: satellite restarted less than an hour ago, not again")
+            return
+        self._satellite_restarted[site.name] = time.time()
+        while (api := self.devices.get(site.name)) and self._satellite_busy(site, api):
+            await asyncio.sleep(_SATELLITE_IDLE_POLL)
+        if api:
+            logger.warning(f"Site {site.label}: restarting the satellite, its microphone too quiet")
+            api.button_command(key)
+
+    def _satellite_busy(self, site: Site, api: APIClient) -> bool:
+        """The satellite plays a reply or music, listens for the follow-up a reply asked for, or has a request."""
+        return (
+            site.name in self._playing
+            or time.time() < self._followup_by.get(api, 0)
+            or (self._voice_site is site and self._voice_busy)
+        )
 
     def _unanswered(self, transcript: str, follow_up: bool) -> Optional[str]:
         """What the log says of a transcript that gets no answer, or None for a request: nothing heard, or a
@@ -2738,7 +2790,7 @@ class VoiceAssistantServer:
         while True:
             # First after a minute: Ollama starting beside this server at boot, the calendar's tools connected
             await asyncio.sleep(_LLM_CHECK_SECONDS)
-            if not (self.is_recording or self._pipeline_running) and await ollama_has(url, LLM_MODEL) is False:
+            if not self._voice_busy and await ollama_has(url, LLM_MODEL) is False:
                 logger.info("LLM no longer loaded in Ollama: loading it")
                 await self._warm_up()
                 self._keep_llm_loaded()

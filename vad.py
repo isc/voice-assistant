@@ -2,7 +2,9 @@
 
 import array
 import logging
+from typing import Optional
 
+import numpy as np
 from silero_vad_lite import SileroVAD
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,31 @@ _SPEECH = 0.5  # a frame scored above it is speech
 # shortest request heard (« Stop. ») 6 (AD-092)
 _MIN_SPEECH_FRAMES = 4
 _SILENCE_FRAMES = 31  # ~1 s of silence after speech ends the request
+# A satellite's microphone stuck low (AD-113): a recording after a wake word whose loudest half-seconds stay under
+# this level, the VAD hearing speech in it once amplified so, is a request the VAD missed for its level alone.
+# 2026-11-20 at 12:53 and 12:54 in Paris, two requests at 54 and 88 that Parakeet wrote right; every request
+# heard since 2026-10-11 at 431 or more, the room after a false wake at 345 or more
+_QUIET_LEVEL = 200
+_QUIET_GAIN = 10
+
+
+def level(recording: bytes) -> int:
+    """How loud a 16 kHz 16-bit mono recording is: the 90th percentile of its half-seconds' RMS, the first
+    left out (the satellite's wake sound, which its own microphone hears)."""
+    samples = np.frombuffer(recording, np.int16)[8000:].astype(np.float32)
+    halves = samples[: len(samples) // 8000 * 8000].reshape(-1, 8000)
+    return round(float(np.percentile(np.sqrt((halves**2).mean(axis=1)), 90))) if len(halves) else 0
+
+
+def quiet_speech(recording: bytes) -> Optional[int]:
+    """The level of a recording the VAD found silent, when it is speech after all: quieter than any request heard,
+    and speech to the VAD amplified (AD-113). None otherwise."""
+    if (loudness := level(recording)) >= _QUIET_LEVEL:
+        return None
+    amplified = np.clip(np.frombuffer(recording, np.int16).astype(np.int32) * _QUIET_GAIN, -32768, 32767)
+    speech = SpeechEnd()
+    speech.read(amplified.astype(np.int16).tobytes())
+    return loudness if speech.heard else None
 
 
 class SpeechEnd:
