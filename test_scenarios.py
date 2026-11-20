@@ -231,6 +231,29 @@ def empty_calendar():
     return client
 
 
+def ScenarioPhotos():
+    """The family's photos (AD-112): every place has some, the children's faces are named, and each search finds new
+    ones, so that « d'autres » finds others."""
+    from test_unit import FakeImmich, asset
+
+    class Photos(FakeImmich):
+        def __init__(self):
+            super().__init__()
+            self.people = [{"id": "p-zoe", "name": "Zoé"}, {"id": "p-charlie", "name": "Charlie"}]
+            self.found = 0
+
+        async def _places(self, session, place):
+            return [{"city": place}]
+
+        async def _call(self, session, path, body=None, **params):
+            if path.startswith("/api/search/"):
+                self.found += 6
+                self.smart = self.drawn = [asset(f"a{n}", f"2025-07-{n % 28 + 1:02}", "Sarzeau") for n in range(self.found - 6, self.found)]
+            return await super()._call(session, path, body, **params)
+
+    return Photos()
+
+
 def build_server(snapshot: dict, site: str):
     """A server with the snapshot's homes, each behind its FakeHA, serving `site`."""
     import ha_client
@@ -257,6 +280,8 @@ def build_server(snapshot: dict, site: str):
     server.site = server._voice_site = server.site_named(site)
     server.calendar_client = empty_calendar()
     server.spotify = FakeSpotify()
+    with contextlib.suppress(ImportError):  # code before AD-112, as « before » runs this file on main's (CLAUDE.md, Tests)
+        server.immich = ScenarioPhotos()
     server._keep_llm_loaded = lambda: None
     return server
 
@@ -493,6 +518,36 @@ def ringing(ended: float = 0, satellite: bool = False):
             from_satellite(server)
 
     return change
+
+
+def photos(expect: str, cond=lambda args: True):
+    """show_photos called with arguments as `cond` wants, its own photos, no picture from the web (AD-112)."""
+
+    def check(t):
+        shown = [c["args"] for c in t.calls if c["function"] == "show_photos"]
+        web = any(c["function"] == "show_image" for c in t.calls)
+        return bool(shown) and not web and any(cond(args) for args in shown), f"show_photos {expect}"
+
+    return check
+
+
+def photo_arg(args: dict, key: str) -> str:
+    from ha_client import fold
+
+    value = args.get(key) or ""
+    return fold(" ".join(value) if isinstance(value, list) else str(value))
+
+
+def web_image(t):
+    names = [c["function"] for c in t.calls]
+    return "show_image" in names and "show_photos" not in names, "show_image, no show_photos"
+
+
+def slideshow(action: str):
+    return lambda t: (
+        any(c["function"] == "slideshow" and c["args"].get("action") == action for c in t.calls),
+        f"slideshow {action}",
+    )
 
 
 def from_satellite(server):
@@ -820,6 +875,34 @@ SCENARIOS = [
     # Paris's ring is not Charras's: « ouvre la porte » there is Charras's door
     ("AD-111 from Charras, ouvre la porte while Paris rings", "charras", {}, [
         ("Ouvre la porte.", offers_flat_door, ringing()),
+    ]),
+    # The family's photos, from Immich (AD-112): who, where, when, what, and the web's pictures still show_image's
+    ("AD-112 des photos de Zoé", "paris", {}, [
+        ("Montre-moi des photos de Zoé.", photos("of Zoé, no description", lambda a: "zoe" in photo_arg(a, "people")
+                                                 and "zoe" not in photo_arg(a, "query")), {}),
+        ("Montre-m'en d'autres.", photos("of Zoé again", lambda a: "zoe" in photo_arg(a, "people")), {}),
+    ]),
+    ("AD-112 les vacances en Bretagne l'été dernier", "paris", {}, [
+        ("Montre-moi les photos des vacances en Bretagne l'été dernier.", photos(
+            "in Bretagne, « l'été dernier »", lambda a: "bretagne" in photo_arg(a, "place")
+            and "ete dernier" in photo_arg(a, "when")), {}),
+    ]),
+    ("AD-112 Noël 2024", "charras", {}, [
+        # Or 2024's photos most like Christmas, as gemma asked 10 times of 10
+        ("Tu peux me montrer nos photos de Noël 2024 ?", photos("« Noël 2024 », or « Noël » in 2024", lambda a: "noel 2024" in photo_arg(a, "when")
+                                                                or "noel" in photo_arg(a, "query") and "2024" in photo_arg(a, "when")), {}),
+    ]),
+    ("AD-112 Charlie à la plage", "paris", {}, [
+        ("Montre-moi Charlie à la plage.", photos("of Charlie, « plage »", lambda a: "charlie" in photo_arg(a, "people")
+                                                  and "plage" in photo_arg(a, "query") and "charlie" not in photo_arg(a, "query")), {}),
+    ]),
+    ("AD-112 the Eiffel Tower is the web's", "paris", {}, [("Montre-moi la tour Eiffel.", web_image, {})]),
+    ("AD-112 a slideshow on the screen", "paris", {}, [
+        ("Montre-moi des photos de la plage.", photos("of « plage » on the screen", lambda a: "plage" in photo_arg(a, "query")),
+         from_satellite),
+        ("Suivante.", slideshow("next"), from_satellite),
+        ("Reviens à la précédente.", slideshow("previous"), from_satellite),
+        ("Arrête.", slideshow("stop"), from_satellite),
     ]),
 ]  # fmt: skip
 

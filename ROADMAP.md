@@ -45,7 +45,7 @@ The request's language is already known: `language.py` (fastText, AD-093) gives 
 ### Our own Cast receiver
 The Nest Hub runs Google's Default Media Receiver today: it plays one URL and shows the label it was given at launch, nothing more. A receiver of our own is a web page the Nest Hub shows full screen, holding a connection to the server, which tells it what to show after each request, with no reload in between:
 - the music playing, title and cover updated at each track: the Default Media Receiver shows new metadata only by loading the stream again, a cut at each track (AD-057);
-- `show_image`'s pictures, generated pictures and Immich slideshows below, run by the page instead of casting one picture at a time;
+- `show_image`'s pictures, generated pictures and the photo slideshows (AD-112), run by the page instead of casting one picture at a time;
 - later: timers counting down, the week's weather, the day's calendar, a shop's hours and map, the last reply's text.
 
 First version: the music playing and `show_image`, the two uses of the Default Media Receiver today, to try the limits before going further. Needed: a Google Cast developer account (US$5, the family's Google account) for an app ID; the Nest Hub registered by its serial number while the app is unpublished; the page served over HTTPS; HA starts the app by its ID. To find out:
@@ -57,8 +57,8 @@ First version: the music playing and `show_image`, the two uses of the Default M
 ### Generated pictures
 "Dessine-moi un dragon" → generate the picture locally and show it on the Nest Hub, next to `show_image` (AD-038). charras already has `stable-diffusion.cpp` with Z-Image-Turbo q8 in `/opt/sd/` (~22 s per 1024² image; exact command in home-infra `charras/trellis/beast.sh`). No longer blocked by VRAM: since 2026-10-25 it runs on the second card (home-infra `charras/SETUP.md` §23), with gemma resident on the first; a whole `beast` run took 4 min 36 s, `sd-cli` at 7.2 GB on the bottom card. That card also takes the house's long jobs (ACE-Step ~8–9 GB, ddmr's OCR up to 11 GB), so a picture asked while one runs must wait or say so. Unlike web pictures, the result is a local file, so it must be served over HTTP, beside `/tts/`, which the Paris relay forwards.
 
-### Family photos from Immich
-"Montre-moi des photos de Zoé", "les vacances en Bretagne l'été dernier", "Charlie à la plage" → find them in Immich and show them on the Nest Hub as a slideshow. Immich on charras (v2.7.5, port 2283) already has smart search (CLIP), facial recognition and reverse geocoding enabled, so: people for names, place and date for trips, smart search for descriptions. The Default Media Receiver shows one picture at a time, so a slideshow means casting every few seconds, or our own receiver (above), with "suivante" and "arrête". Immich needs an API key and the Paris Nest cannot reach the charras LAN, so the server fetches each preview and serves it under `/tts/`. Prerequisites on the family's side: migrate the photos, name the face clusters.
+### The family's photos, further
+`show_photos` (AD-112) finds them by description, face, place and period. Still to come: the names of the face clusters in Immich, on the family's side (until then « des photos de Zoé » says her face has no name); Immich's albums by name and its favourites (« mes photos préférées »); its videos, which a Nest Hub plays.
 
 ## Media
 

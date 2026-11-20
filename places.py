@@ -237,3 +237,18 @@ async def address_of(query: str, home: Optional[dict] = None) -> Optional[str]:
             town = " ".join(filter(None, (props.get("postcode"), props.get("city"))))
             return ", ".join(filter(None, (props["name"], _street(props), town)))
     return None
+
+
+async def osm_place(name: str) -> Optional[dict]:
+    """OpenStreetMap's place for a name said in French, as Nominatim gives it: its names in every language
+    (`namedetails`), its bounds (`boundingbox`). The family's photos find a place by it (AD-112)."""
+    params = {"q": name, "format": "jsonv2", "namedetails": 1, "limit": 1, "accept-language": "fr"}
+    try:
+        async with aiohttp.ClientSession(headers=_HEADERS, timeout=aiohttp.ClientTimeout(total=3)) as session:
+            async with session.get("https://nominatim.openstreetmap.org/search", params=params) as r:
+                r.raise_for_status()
+                found = await r.json()
+    except _NETWORK_ERRORS as e:
+        logger.warning(f"Nominatim, for {name!r}: {e!r}")
+        return None
+    return found[0] if found else None

@@ -53,6 +53,8 @@ from ha_client import (
     without_home,
 )
 from images import Picture, is_about
+import photos
+from photos import Immich, Photo, Slideshow, period, summary
 import llm
 from llm import claims_completed_action, get_tool_definitions
 from places import week
@@ -177,6 +179,7 @@ def make_server(env=None):
     server._background_tasks = set()
     server._offers = {}
     server.recording_task = None
+    server.immich = None
     server.warm_llm = MagicMock()  # no LLM to warm; deleted for the real one
     return server
 
@@ -2398,6 +2401,336 @@ class TestShowImage(unittest.IsolatedAsyncioTestCase):
         _, result = await self.show({"query": "tour Eiffel"}, browser=None)
         self.assertEqual(result, "Aucun écran ici")
         self.find.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Tests: the family's photos from Immich (AD-112)
+# ---------------------------------------------------------------------------
+
+
+def asset(asset_id: str, taken: str, city: str = "") -> dict:
+    return {"id": asset_id, "localDateTime": f"{taken}T10:00:00.000Z", "exifInfo": {"city": city or None}}
+
+
+MARKERS = [
+    {"id": "a1", "lat": 47.5, "lon": -2.8, "city": "Sarzeau", "state": "Brittany", "country": "France"},
+    {"id": "a2", "lat": 48.6, "lon": -2.8, "city": "Binic", "state": "Brittany", "country": "France"},
+    {"id": "a3", "lat": 52.4, "lon": 4.9, "city": "Amsterdam", "state": "North Holland", "country": "The Netherlands"},
+    {"id": "a4", "lat": 45.51, "lon": 6.68, "city": "Belle-Plagne", "state": "Auvergne-Rhône-Alpes", "country": "France"},
+    {"id": "a5", "lat": 45.55, "lon": 6.65, "city": "Aime", "state": "Auvergne-Rhône-Alpes", "country": "France"},
+    {"id": "a6", "lat": 44.2, "lon": -1.2, "city": "Mimizan", "state": "New Aquitaine", "country": "France"},
+    {"id": "a7", "lat": 48.86, "lon": 2.35, "city": "Paris", "state": "Île-de-France", "country": "France"},
+    {"id": "a8", "lat": 48.86, "lon": 2.38, "city": "Paris 11 Popincourt", "state": "Île-de-France", "country": "France"},
+]
+
+
+class FakeImmich(Immich):
+    """Immich's answers, its requests kept: smart search finds `smart`, random search `drawn`."""
+
+    def __init__(self):
+        super().__init__("http://immich", "key")
+        self.requests = []
+        self.people = [{"id": "p-zoe", "name": "Zoé"}, {"id": "p-zoe-m", "name": "Zoé Martin"}, {"id": "p-x", "name": ""}]
+        self.smart = [asset("s1", "2020-08-05", "Sarzeau"), asset("s2", "2013-07-30", "Binic")]
+        self.drawn = [asset("r1", "2023-07-23", "Mimizan")]
+
+    async def _call(self, session, path, body=None, **params):
+        self.requests.append((path, body))
+        if path == "/api/map/markers":
+            return MARKERS
+        if path == "/api/people":
+            return {"people": self.people}
+        if path == "/api/search/smart":
+            return {"assets": {"items": self.smart}}
+        return self.drawn
+
+
+class TestPhotos(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.immich = FakeImmich()
+        patcher = patch("photos.osm_place", AsyncMock(return_value=None))
+        self.nominatim = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def searched(self) -> list[dict]:
+        return [body for path, body in self.immich.requests if path.startswith("/api/search/")]
+
+    def test_periods(self):
+        """As said, on 20 November 2026: the model put « l'été dernier » in 2025, whatever its tool said."""
+        today = date(2026, 11, 20)
+        for said, first, last in [
+            ("l'été dernier", "2026-06-21", "2026-09-22"),
+            ("l'été 2024", "2024-06-21", "2024-09-22"),
+            ("l'été de l'année dernière", "2025-06-21", "2025-09-22"),
+            ("Noël dernier", "2025-12-20", "2026-01-03"),
+            ("Noël 2024", "2024-12-20", "2025-01-03"),
+            ("l'hiver 2024", "2023-12-21", "2024-03-19"),  # its ski holidays, in February
+            ("l'hiver dernier", "2025-12-21", "2026-03-19"),
+            ("Pâques 2025", "2025-04-18", "2025-04-21"),
+            ("en 2019", "2019-01-01", "2019-12-31"),
+            ("de 2018 à 2020", "2018-01-01", "2020-12-31"),
+            ("il y a deux ans", "2024-01-01", "2024-12-31"),
+            ("juillet 2023", "2023-07-01", "2023-07-31"),
+            ("en décembre", "2025-12-01", "2025-12-31"),  # the latest begun
+            ("août dernier", "2026-08-01", "2026-08-31"),
+            ("le 1er mai 2025", "2025-05-01", "2025-05-01"),
+            ("le mois dernier", "2026-10-01", "2026-10-31"),
+            ("la semaine dernière", "2026-11-09", "2026-11-15"),
+            ("hier", "2026-11-19", "2026-11-19"),
+            ("le week-end dernier", "2026-11-14", "2026-11-15"),
+            ("les années 90", "1990-01-01", "1999-12-31"),
+            ("les grandes vacances il y a douze ans", "2014-07-01", "2014-08-31"),
+            ("la Toussaint", "2026-10-18", "2026-11-03"),
+        ]:
+            self.assertEqual(period(said, today), (date.fromisoformat(first), date.fromisoformat(last)), said)
+        for said in ("les vacances", "le 31 février 2024"):
+            self.assertIsNone(period(said, today), said)
+
+    def test_summary(self):
+        at = lambda d, city="": Photo("x", datetime.fromisoformat(d), city)
+        self.assertEqual(summary([at("2020-08-05", "Sarzeau")]), "prises le 5 août 2020, à Sarzeau")
+        self.assertEqual(summary([at("2020-08-05"), at("2020-08-09")]), "prises en août 2020")
+        self.assertEqual(summary([at("2013-07-30", "Binic"), at("2020-08-05", "Sarzeau")]), "prises de 2013 à 2020, à Binic, Sarzeau")
+
+    async def test_what_they_show_by_smart_search_in_the_order_taken(self):
+        found = await self.immich.find(query="plage", when="de 2013 à 2020")
+        self.assertEqual([p.id for p in found], ["s2", "s1"])
+        self.assertEqual(found[0].caption, "30 juillet 2013 · Binic")
+        [body] = self.searched()
+        self.assertEqual((body["query"], body["language"], body["type"]), ("plage", "fr", "IMAGE"))
+        # Until the end of its last day
+        self.assertEqual((body["takenAfter"], body["takenBefore"]), ("2013-01-01T00:00:00.000Z", "2021-01-01T00:00:00.000Z"))
+
+    async def test_a_period_not_understood(self):
+        result = await self.immich.find(when="les vacances")
+        self.assertTrue(result.startswith("Aucune photo : période non comprise, « les vacances »"), result)
+        self.assertEqual(self.searched(), [])
+
+    async def test_no_description_draws_at_random(self):
+        found = await self.immich.find(place="Mimizan")
+        self.assertEqual([p.id for p in found], ["r1"])
+        self.assertEqual(self.searched(), [{"type": "IMAGE", "withExif": True, "city": "Mimizan", "size": photos.COUNT}])
+        self.nominatim.assert_not_awaited()  # Immich's own name
+
+    async def test_others_than_those_shown(self):
+        found = await self.immich.find(query="plage", exclude={"s1"})
+        self.assertEqual([p.id for p in found], ["s2"])
+        self.assertEqual(self.searched()[0]["size"], photos.COUNT + 1)
+
+    async def test_people_by_name(self):
+        await self.immich.find(people=["Zoé"])
+        self.assertEqual(self.searched()[0]["personIds"], ["p-zoe"])  # not Zoé Martin
+        await self.immich.find(people=["zoe martin"])
+        self.assertEqual(self.searched()[1]["personIds"], ["p-zoe-m"])
+
+    async def test_a_face_with_no_name(self):
+        result = await self.immich.find(people=["Zoé", "Charlie"])
+        self.assertEqual(result, "Aucune personne nommée Charlie dans les photos : son visage n'y a pas de nom")
+        self.assertEqual(self.searched(), [])
+
+    async def places(self, place: str, osm: dict | None = None) -> list[dict]:
+        self.nominatim.return_value = osm
+        return await self.immich._places(None, place)
+
+    async def test_a_region_as_immich_names_it(self):
+        osm = {"namedetails": {"name": "Bretagne", "name:en": "Brittany", "name:br": "Breizh"}, "boundingbox": ["46", "49", "-5", "-1"]}
+        self.assertEqual(await self.places("Bretagne", osm), [{"state": "Brittany"}])
+
+    async def test_a_name_held_in_immichs(self):
+        osm = {"namedetails": {"name": "Nederland", "name:en": "Netherlands"}, "boundingbox": ["-90", "90", "-180", "180"]}
+        self.assertEqual(await self.places("Pays-Bas", osm), [{"country": "The Netherlands"}])
+
+    async def test_a_resort_by_the_cities_within_it(self):
+        osm = {"namedetails": {"name": "Paradiski"}, "boundingbox": ["45.4", "45.6", "6.6", "6.8"]}
+        self.assertCountEqual(await self.places("Paradiski", osm), [{"city": "Aime"}, {"city": "Belle-Plagne"}])
+
+    async def test_a_name_immich_holds(self):
+        self.assertEqual(await self.places("La Plagne"), [{"city": "Belle-Plagne"}])
+        self.assertCountEqual(await self.places("Paris"), [{"city": "Paris"}, {"city": "Paris 11 Popincourt"}])
+        self.nominatim.assert_not_awaited()
+
+    async def test_a_large_place_immich_does_not_name(self):
+        osm = {"namedetails": {"name": "Occitanie"}, "boundingbox": ["42", "45", "-1", "5"]}
+        self.assertEqual(await self.places("Occitanie", osm), [])
+        self.assertEqual(await self.immich.find(place="Occitanie"), "Aucune photo prise à Occitanie")
+
+    async def test_without_openstreetmap(self):
+        self.assertEqual(await self.places("Tataouine"), [])
+
+    async def test_immich_down(self):
+        self.immich._call = AsyncMock(side_effect=aiohttp.ClientConnectionError())
+        self.assertEqual(await self.immich.find(query="plage"), "Erreur : la photothèque ne répond pas")
+
+    async def test_tokens(self):
+        token = self.immich.token("s1")
+        self.assertEqual(self.immich.asset_of(token), "s1")
+        self.assertIsNone(self.immich.asset_of("guessed"))
+        with patch("photos.time.monotonic", return_value=time.monotonic() + photos.TOKEN_SECONDS + 1):
+            self.assertIsNone(self.immich.asset_of(token))
+
+    def test_the_key_goes_to_immich_alone(self):
+        self.assertNotIn("x-api-key", {k.lower() for k in photos._HEADERS})
+
+
+class TestSlideshow(unittest.IsolatedAsyncioTestCase):
+    PHOTOS = [Photo(str(i), datetime(2020, 1, 1 + i), "") for i in range(3)]
+
+    def setUp(self):
+        self.shown, self.ended = [], asyncio.Event()
+
+    def start(self, seconds: float, taken_at: str = "") -> Slideshow:
+        async def show(photo, shown):
+            if photo.id == taken_at:
+                return None  # the screen shows something else
+            self.shown.append(photo.id)
+            return f"url-{photo.id}"
+
+        async def end():
+            self.ended.set()
+
+        patcher = patch("photos.SECONDS", seconds)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return Slideshow("media_player.screen", self.PHOTOS, show, end)
+
+    async def test_each_in_turn_then_the_screen_let_go(self):
+        show = self.start(0.01)
+        await asyncio.wait_for(self.ended.wait(), 1)
+        self.assertEqual(self.shown, ["0", "1", "2"])
+        await asyncio.sleep(0)
+        self.assertFalse(show.running)
+
+    async def test_next_previous_and_a_pause(self):
+        show = self.start(60)
+        await asyncio.sleep(0)
+        self.assertTrue(show.move(1))
+        await asyncio.sleep(0.01)
+        self.assertTrue(show.move(-1))
+        await asyncio.sleep(0.01)
+        self.assertFalse(show.move(-1))
+        show.pause(True)
+        await asyncio.sleep(0.01)
+        show.pause(False)
+        await asyncio.sleep(0.01)
+        self.assertEqual(self.shown, ["0", "1", "0"])  # not shown again on resuming
+        show.stop()
+        await asyncio.sleep(0)
+        self.assertFalse(show.running)
+        self.assertFalse(self.ended.is_set())
+
+    async def test_a_screen_given_something_else_is_left_to_it(self):
+        show = self.start(0.01, taken_at="1")
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.shown, ["0"])
+        self.assertFalse(show.running)
+        self.assertFalse(self.ended.is_set())  # not stopped: what plays there now plays on
+
+
+class TestShowPhotos(unittest.IsolatedAsyncioTestCase):
+    """Asked from the app, the photos show there; from the satellite or naming the screen, a slideshow there."""
+
+    def setUp(self):
+        self.client = make_client()
+        self.client.entities["media_player.google_home"] = {
+            "friendly_name": "Google Home", "domain": "media_player", "state": "idle",
+            "attributes": {}, "area_id": "living_room", "area_name": "Living Room",
+        }  # fmt: skip
+        self.client.screens = ["media_player.google_home"]
+        self.client.call_service = AsyncMock(return_value="ok")
+        self.server = make_server()
+        self.server.ha_client = self.client
+        self.server.site.http_base_url = "http://192.168.1.189:8889/tts/"
+        self.server.immich = FakeImmich()
+        self.server.calendar_client = self.server.spotify = None
+        self.server._keep_llm_loaded = lambda: None
+        patcher = patch("photos.SECONDS", 60)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        if show := self.server.site.slideshow:
+            show.stop()
+
+    async def run_call(self, function: str, args: dict, browser: str | None = "phone42") -> tuple[dict, str]:
+        self.server.new_request(browser)
+        call = {"function": function, "args": args}
+        return call, await self.server.execute_function(function, args, call)
+
+    def casts(self) -> list[tuple[str, dict]]:
+        return [(c.args[2], c.kwargs) for c in self.client.call_service.call_args_list if c.args[1] == "play_media"]
+
+    def test_offered_with_immich_alone(self):
+        self.assertIn("show_photos", {t["name"] for t in self.server._tools()})
+        self.server.immich = None
+        self.assertNotIn("show_photos", {t["name"] for t in self.server._tools()})
+
+    async def test_the_app_shows_them_itself(self):
+        call, result = await self.run_call("show_photos", {"query": "plage"})
+        self.assertEqual(result, "2 photos affichées dans l'application, prises de 2013 à 2020, à Binic, Sarzeau")
+        self.assertEqual(call["photos"][0], {"url": "api/photos/s2", "caption": "30 juillet 2013 · Binic"})
+        self.assertEqual(self.casts(), [])
+        # « d'autres »: none of those
+        _, result = await self.run_call("show_photos", {"query": "plage"})
+        self.assertEqual(result, "Aucune photo trouvée")
+
+    async def test_the_satellite_starts_a_slideshow_on_the_screen(self):
+        call, result = await self.run_call("show_photos", {"query": "plage"}, browser=None)
+        self.assertTrue(result.startswith("Diaporama de 2 photos sur Google Home"), result)
+        self.assertIn("photos", call)
+        await asyncio.sleep(0)
+        [(screen, cast)] = self.casts()
+        self.assertEqual(screen, "media_player.google_home")
+        # Under /tts/, which the Paris relay forwards, by a token that names its photo
+        token = re.fullmatch(r"http://192\.168\.1\.189:8889/tts/photos/([\w-]+)\.jpg", cast["media_content_id"])[1]
+        self.assertEqual(self.server.immich.asset_of(token), "s2")
+        self.assertEqual(cast["extra"], {"metadata": {"metadataType": 4, "title": "30 juillet 2013 · Binic"}})
+
+        # « Hey Google » took the screen: nothing more cast there
+        self.client.get_entity_state = AsyncMock(return_value={"attributes": {"media_content_id": "http://youtube"}})
+        self.assertIsNone(await self.server._cast_photo(self.server.site, screen, self.server.site.slideshow.photos[1], cast["media_content_id"]))
+        self.client.get_entity_state = AsyncMock(return_value={"attributes": {"media_content_id": cast["media_content_id"]}})
+        _, result = await self.run_call("slideshow", {"action": "next"}, browser=None)
+        self.assertEqual(result, "Photo 2 sur 2 : 5 août 2020 · Sarzeau")
+        _, result = await self.run_call("slideshow", {"action": "next"}, browser=None)
+        self.assertEqual(result, "Aucune photo après celle-ci")
+        _, result = await self.run_call("slideshow", {"action": "stop"}, browser=None)
+        self.assertEqual(result, "Diaporama arrêté")
+        self.assertIsNone(self.server.site.slideshow)
+        self.assertEqual(self.client.call_service.call_args.args[:3], ("media_player", "media_stop", "media_player.google_home"))
+        _, result = await self.run_call("slideshow", {"action": "next"}, browser=None)
+        self.assertEqual(result, "Aucun diaporama en cours")
+
+    async def test_said_in_the_context(self):
+        await self.run_call("show_photos", {}, browser=None)
+        self.server.new_request(None)
+        with patch("llm.chat_completion", AsyncMock(return_value={"role": "assistant", "content": "Laquelle ?"})) as chat:
+            await self.server.process_with_llm(None, "suivante")
+        [context] = [m["content"] for m in chat.await_args.args[3] if m["content"].startswith("Date et heure")]
+        self.assertIn("Diaporama de photos en cours sur Google Home : photo 1 sur 1.", context)
+
+    async def test_something_else_on_the_screen_ends_it(self):
+        await self.run_call("show_photos", {"query": "plage"}, browser=None)
+        show = self.server.site.slideshow
+        await self.server._media_play_url(("ha", "media_player.google_home"), "http://radio/fip.mp3")
+        await asyncio.sleep(0)
+        self.assertFalse(show.running)
+        self.assertIsNone(self.server.site.slideshow)
+
+    async def test_no_screen_at_the_satellites_home(self):
+        self.client.screens = []
+        _, result = await self.run_call("show_photos", {"query": "plage"}, browser=None)
+        self.assertEqual(result, "Aucun écran ici")
+        self.assertEqual(self.server.immich.requests, [])
+
+    async def test_served_by_token_on_the_lan_by_id_in_the_app(self):
+        immich = self.server.immich
+        immich.response = AsyncMock(return_value=web.Response(body=b"jpeg", content_type="image/jpeg"))
+        app = web.Application()
+        app.router.add_get(r"/tts/photos/{token:[\w-]+}.jpg", self.server._serve_photo)
+        async with TestClient(TestServer(app)) as http:
+            self.assertEqual((await http.get(f"/tts/photos/{immich.token('s1')}.jpg")).status, 200)
+            self.assertEqual((await http.get("/tts/photos/guessed.jpg")).status, 404)
+        immich.response.assert_awaited_once_with("s1")
 
 
 # ---------------------------------------------------------------------------

@@ -78,10 +78,17 @@ class Site:
     last_media_target: Optional[tuple[str, str]] = None
     # The radio last started here: its speaker, station and URL, for « passe le son sur la Sonos » (AD-063)
     radio: Optional[tuple[tuple[str, str], str, str]] = None
+    slideshow: Optional[Any] = None  # photos.Slideshow, the family's photos on its screen (AD-112)
 
     @property
     def label(self) -> str:
         return self.name or "default"
+
+    def end_slideshow(self, screen: str) -> None:
+        """Its slideshow ended, if on that screen: something else is played there, or it is stopped (AD-112)."""
+        if self.slideshow and self.slideshow.screen == screen:
+            self.slideshow.stop()
+            self.slideshow = None
 
     def conversation_of(self, client: Optional[str]) -> Conversation:
         """The conversation of whoever asks: a browser of the web app by its id, else the satellite (AD-061)."""

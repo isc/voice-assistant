@@ -21,6 +21,7 @@ from yarl import URL
 
 import onnx_gpu
 from ha_client import LOCAL_CONFIG, quieted
+from photos import SIZES
 from sites import Site, site_at_address
 from spotify import CONTROLS
 from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
@@ -592,6 +593,14 @@ def setup_routes(app, server):
             raise web.HTTPNotFound()
         return web.FileResponse(path)
 
+    async def handle_photo(request):
+        """A photo of the family's that show_photos found (AD-112), as the app shows it: Immich's preview, or its
+        thumbnail."""
+        size = request.query.get("size", "preview")
+        if not server.immich or size not in SIZES:
+            raise web.HTTPNotFound()
+        return await server.immich.response(request.match_info["asset"], size)
+
     async def handle_health(request):
         """Health check: status of STT, TTS, LLM, HA, and ESP.
 
@@ -669,6 +678,7 @@ def setup_routes(app, server):
     app.router.add_get("/api/listen", handle_listen)
     # The patterns keep the path inside the recordings folder
     app.router.add_get(r"/recordings/{recording:[\d-]+/[\d_]+\.wav}", handle_recording)
+    app.router.add_get(r"/api/photos/{asset:[0-9a-f-]{36}}", handle_photo)
     app.router.add_post("/api/send", handle_web_send)
     app.router.add_post("/api/redo", handle_redo)
     app.router.add_post("/api/confirm", handle_confirm)

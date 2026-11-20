@@ -60,6 +60,7 @@ from ha_client import (
     vacuum_map,
 )
 from images import find_image
+from photos import Immich, Slideshow, summary
 from places import address_of, find_place
 from push import Push
 from recordings import Recordings
@@ -79,6 +80,9 @@ except locale.Error:
 LLM_URL = os.environ.get("LLM_URL", "http://localhost:8080/v1/chat/completions")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
 LLM_MODEL = os.environ.get("LLM_MODEL", "")  # empty = llama-server's only model
+# The family's photos (AD-112): a read-only key of Immich's; without one, no photos
+IMMICH_URL = os.environ.get("IMMICH_URL", "http://localhost:2283")
+IMMICH_API_KEY = os.environ.get("IMMICH_API_KEY", "")
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8888"))
 # Devices re-read from Home Assistant this often (and a Home Assistant that was down, retried)
 _HA_REFRESH_SECONDS = 300
@@ -211,7 +215,7 @@ _NOTHING_DONE = re.compile(
 _REDOABLE = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_temperature", "lock",
     "arm_alarm", "set_heating", "play_radio", "play_music", "move_media", "stop_media", "set_volume",
-    "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image", "vacuum",
+    "set_timer", "set_alarm", "cancel_timer", "change_volume", "music_control", "show_image", "show_photos", "vacuum",
     "open_building_door",
 }  # fmt: skip
 
@@ -485,6 +489,7 @@ class VoiceAssistantServer:
 
         # Google Calendar client
         self.calendar_client = None
+        self.immich = Immich(IMMICH_URL, IMMICH_API_KEY) if IMMICH_API_KEY else None
 
         # Continuous conversation
         self.is_followup = False  # True when the run started right after a reply that asked for a follow-up
@@ -742,6 +747,8 @@ class VoiceAssistantServer:
         app = web.Application()
         setup_routes(app, self)
         app.router.add_get("/tts/stream/{name}", self.tts.handle_stream)
+        if self.immich:
+            app.router.add_get(r"/tts/photos/{token:[\w-]+}.jpg", self._serve_photo)
         # No listing: the LAN may fetch a reply by its URL, not browse every one
         app.router.add_static("/tts/", self.tts_dir)
         if self.spotify:
@@ -1447,6 +1454,10 @@ class VoiceAssistantServer:
             return await self._move_media(arguments.get("room"))
         if function_name == "show_image":
             return await self._show_image(arguments.get("query", ""), arguments.get("room"), call)
+        if function_name == "show_photos":
+            return await self._show_photos(arguments, call)
+        if function_name == "slideshow":
+            return await self._slideshow(arguments.get("action", ""))
 
         # Sent to the home named with its own arguments, where it names that home: it is not read elsewhere
         named = self._home_named(arguments) if function_name in self._ANY_HOME else None
@@ -1842,6 +1853,8 @@ class VoiceAssistantServer:
                 return result  # HA refused: not « Lecture arrêtée », the music going on
             if self.site.radio and self.site.radio[0] == target:
                 self.site.radio = None
+            if target[0] == "ha":
+                self.site.end_slideshow(target[1])  # « arrête » on the screen
             return "Lecture arrêtée"
 
         if function_name == "set_volume":
@@ -2100,16 +2113,23 @@ class VoiceAssistantServer:
             self._in_background(self._media_command(previous_target, stop, ha_service="media_stop", site=previous_site))
         return True
 
+    def _take_over(self, target: tuple[str, str]) -> None:
+        """A speaker or screen of this site given something new: off the Spotify stream (the stream, once it joins,
+        back), its radio and its slideshow done (play_radio sets the radio again)."""
+        if self._spotify_here == target:
+            self._spotify_at = None
+        if self.site.radio and self.site.radio[0] == target:
+            self.site.radio = None
+        if target[0] == "ha":
+            self.site.end_slideshow(target[1])
+
     async def _media_play_url(
         self, target: tuple[str, str], url: str, content_type: str = "music", metadata: Optional[dict] = None
     ) -> None:
         """Start playback of an arbitrary media URL on the target speaker (or show it, for a picture).
 
         metadata: Cast's media metadata, what a screen shows (HA's cast integration passes it on)."""
-        if self._spotify_here == target:
-            self._spotify_at = None  # a radio or a picture takes it off the stream (the stream, once it joins, back)
-        if self.site.radio and self.site.radio[0] == target:
-            self.site.radio = None  # the same: play_radio sets it again
+        self._take_over(target)
         kind, ident = target
         if kind == "esp":
             api = self.devices.get(ident)
@@ -2165,18 +2185,25 @@ class VoiceAssistantServer:
 
     # === SCREEN ===
 
+    async def _screen(self, room: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+        """Where a picture shows: the web app that asks (None), the home's screen when the request names one or
+        comes from the satellite (AD-069); or why it cannot, the screen and that reason."""
+        if not room and self._client:
+            return None, None
+        # One screen per home (AD-038): whatever room the request names it by (« l'écran du salon » is Paris's,
+        # in its « Living Room »; Charras's is in none), the home's
+        if not self.ha_client or not self.ha_client.screens:
+            return None, "Aucun écran ici"
+        if not (screens := await self.ha_client.reachable(self.ha_client.screens)):
+            return None, self.ha_client.offline_reply(self.ha_client.screens)
+        return screens[0], None
+
     async def _show_image(self, query: str, room: Optional[str], call: dict) -> str:
         """Find a picture on the web: shown in the web app that asks, cast to a screen when the request
         names one or comes from the satellite (AD-069). The picture goes in the call's log entry either way."""
-        screen = None
-        if room or not self._client:
-            # One screen per home (AD-038): whatever room the request names it by (« l'écran du salon » is Paris's,
-            # in its « Living Room »; Charras's is in none), the home's
-            if not self.ha_client or not self.ha_client.screens:
-                return "Aucun écran ici"
-            if not (screens := await self.ha_client.reachable(self.ha_client.screens)):
-                return self.ha_client.offline_reply(self.ha_client.screens)
-            screen = screens[0]
+        screen, refusal = await self._screen(room)
+        if refusal:
+            return refusal
         picture = await find_image(query, exclude=self.conversation.shown_images)
         if not picture:
             return f"Aucune image trouvée pour {query}"
@@ -2192,6 +2219,73 @@ class VoiceAssistantServer:
             return f"Image affichée dans l'application : {shown}"
         await self._media_play_url(("ha", screen), picture.url, picture.content_type)
         return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {shown}"
+
+    async def _show_photos(self, arguments: dict, call: dict) -> str:
+        """The family's photos from Immich, in the web app that asks, else on the home's screen as a slideshow, as a
+        picture of show_image's (AD-112). The photos go in the call's log entry either way; « d'autres » finds
+        others."""
+        screen, refusal = await self._screen(arguments.get("room"))
+        if refusal:
+            return refusal
+        people = arguments.get("people") or []
+        photos = await self.immich.find(
+            query=arguments.get("query") or "",
+            people=[people] if isinstance(people, str) else people,
+            place=arguments.get("place") or "",
+            when=arguments.get("when") or "",
+            exclude=self.conversation.shown_images,
+        )
+        if isinstance(photos, str):
+            return photos
+        self.conversation.shown_images.update(photo.id for photo in photos)
+        # The app asks api/photos/<id>?size=thumbnail for the strip
+        call["photos"] = [{"url": f"api/photos/{photo.id}", "caption": photo.caption} for photo in photos]
+        if not screen:
+            return f"{len(photos)} photos affichées dans l'application, {summary(photos)}"
+        self._take_over(("ha", screen))
+        site = self.site
+        stop = partial(self._media_command, ("ha", screen), MediaPlayerCommand.STOP, "media_stop", site)
+        site.slideshow = Slideshow(screen, photos, partial(self._cast_photo, site, screen), stop)
+        return f"Diaporama de {len(photos)} photos sur {self._speaker_name(('ha', screen))}, {summary(photos)}"
+
+    async def _cast_photo(self, site: Site, screen: str, photo, shown: Optional[str]) -> Optional[str]:
+        """A photo of a slideshow on its screen, by a URL its LAN may fetch for an hour, with its date and place; the
+        URL. None, and nothing cast, when the screen no longer shows the slideshow's last (`shown`): it was given
+        something else, by « Hey Google » or a phone, which HA's state tells."""
+        if shown and (state := await site.ha_client.get_entity_state(screen, timeout=2)):
+            if state.get("attributes", {}).get("media_content_id") not in (shown, None):
+                logger.info(f"Slideshow: {screen} shows something else, left to it")
+                return None
+        url = urljoin(site.http_base_url, f"photos/{self.immich.token(photo.id)}.jpg")
+        metadata = {"metadataType": 4, "title": photo.caption}  # Cast's PhotoMediaMetadata
+        await site.ha_client.call_service(
+            "media_player", "play_media", screen,
+            media_content_id=url, media_content_type="image/jpeg", extra={"metadata": metadata},
+        )  # fmt: skip
+        return url
+
+    async def _slideshow(self, action: str) -> str:
+        """The slideshow on this home's screen: the next photo, the previous one, a pause, or its end."""
+        show = self.site.slideshow
+        if not show or not show.running:
+            return "Aucun diaporama en cours"
+        if action == "stop":
+            self.site.end_slideshow(show.screen)
+            await self._media_command(("ha", show.screen), MediaPlayerCommand.STOP, ha_service="media_stop")
+            return "Diaporama arrêté"
+        if action in ("pause", "resume"):
+            show.pause(action == "pause")
+            return "Diaporama en pause" if show.paused else "Diaporama repris"
+        step = -1 if action == "previous" else 1
+        if not show.move(step):
+            return f"Aucune photo {'avant' if step < 0 else 'après'} celle-ci"
+        return f"Photo {show.index + 1} sur {len(show.photos)} : {show.photos[show.index].caption}"
+
+    async def _serve_photo(self, request: web.Request) -> web.Response:
+        """A photo a slideshow gave its screen, by its token."""
+        if not (asset_id := self.immich.asset_of(request.match_info["token"])):
+            raise web.HTTPNotFound()
+        return await self.immich.response(asset_id)
 
     # === TIMER EVENTS ===
 
@@ -2295,6 +2389,13 @@ class VoiceAssistantServer:
         if rang:
             logger.info("A ring at the building door: « ouvre la porte » is that one")
             context.append(_RANG)
+        if (show := self.site.slideshow) and show.running:
+            where = self._speaker_name(("ha", show.screen))
+            paused = " (en pause)" if show.paused else ""
+            context.append(
+                f"Diaporama de photos en cours sur {where} : photo {show.index + 1} sur {len(show.photos)}{paused}. "
+                "Suivante, précédente, pause, reprendre ou arrêter : slideshow."
+            )
 
         tools = self._tools()
         # Only these run: a name the model made up (« unlock ») or a tool this house lacks does not
@@ -2564,6 +2665,7 @@ class VoiceAssistantServer:
             vacuum_rooms=vacuum_rooms,
             vacuum_schedules=schedules,
             building_door=any(client.building_door for client in clients),
+            photos=self.immich is not None,
         )
 
     def _continue(self, conversation) -> None:

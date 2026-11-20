@@ -97,6 +97,9 @@
   .pic a { display: block; }
   .pic img { display: block; max-width: 100%; max-height: 55vh; border-radius: 16px; border: 1px solid var(--line); background: var(--surface-2); }
   .pic figcaption { margin: 4px 6px 0; font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }
+  .photos { display: flex; gap: 6px; max-width: 100%; margin: 8px 2px 0; padding-bottom: 4px; overflow-x: auto; scroll-snap-type: x proximity; }
+  .photo { flex: none; scroll-snap-align: start; }
+  .photo img { display: block; height: 120px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface-2); }
   .confirm { display: inline-flex; align-items: center; gap: 10px; min-height: 48px; margin: 8px 2px 0; padding: 8px 20px 8px 16px; border-radius: 24px; background: var(--accent); color: var(--on-accent); font-size: 16px; font-weight: 600; text-align: left; line-height: 1.25; }
   .confirm small { display: block; font-size: 13px; font-weight: 400; opacity: .85; }
   .confirm:active { background: var(--accent-2); }
@@ -369,12 +372,13 @@ const TOOLS = {
   query_calendar: ['Agenda', 'cal'], create_event: ['Nouvel événement', 'cal'], update_event: ['Événement modifié', 'cal'],
   play_music: ['Spotify', 'note'], music_control: ['Spotify', 'note'], play_radio: ['Radio', 'radio'],
   stop_media: ['Stop', 'vol'], move_media: ['Son passé sur', 'vol'], set_volume: ['Volume', 'vol'], change_volume: ['Volume', 'vol'],
-  show_image: ['Image', 'image'], vacuum: ['Aspirateur', 'vacuum'],
+  show_image: ['Image', 'image'], show_photos: ['Photos', 'image'], slideshow: ['Diaporama', 'image'], vacuum: ['Aspirateur', 'vacuum'],
   vacuum_schedule: ['Programmation aspirateur', 'vacuum'],
 };
 const toolOf = (name) => TOOLS[name] || [name, 'tool'];
 const ACTIONS = {
   pause: 'pause', resume: 'reprise', next: 'suivant', previous: 'précédent', current: 'en cours', up: 'plus fort', down: 'moins fort',
+  stop: 'arrêt',  // the slideshow's (AD-112)
   start: 'démarrage', return_to_base: 'retour à la base',  // the vacuum's (AD-106)
   show: 'lecture', add: 'ajout', change: 'changement', remove: 'suppression', enable: 'activation', disable: 'désactivation',  // its schedules' (AD-108)
 };
@@ -395,6 +399,8 @@ function callText(tc) {
     // By the raw value: asName would make « return_to_base » a name first
     ACTIONS[tc.args?.action] || ACTIONS[tc.args?.direction], a.mode, pct(a.level), pct(a.position), pct(a.brightness),
     a.temperature != null && a.temperature + ' °C',
+    // The family's photos: who, where, when (AD-112)
+    Array.isArray(a.people) && a.people.join(', '), a.place, a.when,
   ].filter((t) => t && String(t).toLowerCase() !== verb.toLowerCase());
   return [verb, ...target].join(' · ');
 }
@@ -468,7 +474,9 @@ function botMsg(e) {
   const calls = (e.tool_calls || []).filter((tc) => tc.function !== 'end_conversation');
   const acts = calls.length ? `<div class="acts">${calls.map(describeCall).join('')}</div>` : '';
   // A picture show_image found: here, where the request came from the app, and on a screen if it named one (AD-069)
-  const pics = calls.filter((tc) => tc.image && !gone.has(tc.image.url)).map(({image: p}) => `<figure class="pic"><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(p.url)}" alt="${esc(p.caption)}" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a><figcaption>${esc(p.caption)}</figcaption></figure>`).join('');
+  const pics = calls.filter((tc) => tc.image && !gone.has(tc.image.url)).map(({image: p}) => `<figure class="pic"><a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(p.url)}" alt="${esc(p.caption)}" loading="lazy" decoding="async" referrerpolicy="no-referrer"></a><figcaption>${esc(p.caption)}</figcaption></figure>`).join('')
+    // The family's photos show_photos found, a strip of thumbnails, each opening its larger one (AD-112)
+    + calls.filter((tc) => tc.photos).map(({photos}) => `<div class="photos">${photos.map((p) => ({...p, thumb: p.url + '?size=thumbnail'})).filter((p) => !gone.has(p.thumb)).map((p) => `<a class="photo" href="${esc(p.url)}" target="_blank" rel="noopener noreferrer"><img src="${esc(p.thumb)}" alt="${esc(p.caption)}" title="${esc(p.caption)}" loading="lazy" decoding="async"></a>`).join('')}</div>`).join('');
   const confirms = offers(e).map(({function: f, confirm: c}) => `<button class="confirm" data-confirm="${esc(c.id)}" data-label="${esc(`${c.action} · ${c.target}`)}">${icon(toolOf(f)[1])}<span>${esc(c.action)}<small>${esc(c.target)}</small></span></button>`).join('');
   return `<div class="msg bot">${bubble}${pics}${acts}${confirms}${debug ? fmtDebug(e) : ''}</div>`;
 }
@@ -507,7 +515,7 @@ thread.addEventListener('load', (e) => { if (e.target.tagName === 'IMG') follow(
 thread.addEventListener('error', (e) => {
   if (e.target.tagName !== 'IMG') return;
   gone.add(e.target.getAttribute('src'));
-  e.target.closest('.pic')?.remove();
+  e.target.closest('.pic, .photo')?.remove();
 }, true);
 
 // The page shows this browser's conversation while it goes on, the history on demand. A conversation

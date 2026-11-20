@@ -48,7 +48,7 @@ ACTIONS = {
     "turn_on", "turn_off", "open_cover", "close_cover", "set_cover_position", "set_heating", "lock", "unlock",
     "arm_alarm", "disarm_alarm", "vacuum", "open_building_door",
     "play_radio", "play_music", "move_media", "music_control", "change_volume", "set_volume", "stop_media",
-    "set_timer", "set_alarm", "cancel_timer", "create_event", "update_event", "show_image",
+    "set_timer", "set_alarm", "cancel_timer", "create_event", "update_event", "show_image", "show_photos", "slideshow",
 }  # fmt: skip
 ENGLISH = re.compile(r"\b(the|you|i'm|i am|sorry|what|are|doing|have|nothing)\b", re.I)
 

@@ -84,6 +84,7 @@ def get_tool_definitions(
     vacuum_rooms=(),
     vacuum_schedules=False,
     building_door=False,
+    photos=False,
 ) -> list:
     """Return LLM tool definitions. `homes`: the homes' names, which the door, heating, alarm and vacuum tools,
     get_state and get_sensor may name when there are several (AD-068, AD-071, AD-083, AD-106); `locks`: whether
@@ -91,7 +92,7 @@ def get_tool_definitions(
     the modes the homes' alarms can be armed in, if some home has one (AD-083); `vacuum`: whether some home has a
     robot vacuum (AD-106); `vacuum_rooms`: the rooms it knows, if it can clean some only (AD-107);
     `vacuum_schedules`: whether its weekly schedules can be changed from here (AD-108); `building_door`: whether
-    some home has a building's street door to open (AD-111)."""
+    some home has a building's street door to open (AD-111); `photos`: whether the family's photos are (AD-112)."""
     # Weather is always available (no HA dependency)
     weather_tool = {
         "name": "get_weather",
@@ -453,6 +454,7 @@ def get_tool_definitions(
             "(ex: « montre-moi la tour Eiffel », « à quoi ressemble un okapi ? », "
             "« montre-moi un chat roux »). Pour une autre image du même sujet "
             "(« une autre »), rappeler avec la même requête."
+            + (" « Des photos de … », nos photos : show_photos." if photos else "")
         ),
         "parameters": {
             "type": "object",
@@ -486,7 +488,41 @@ def get_tool_definitions(
         },
     }
 
-    standalone_tools = [weather_tool, place_tool, *timer_tools, *calendar_tools, *media_tools, image_tool]
+    # The family's photos from Immich, on the screen as a slideshow, which slideshow drives (AD-112). Short: each
+    # request's prompt reaches 7.2K tokens of the model's 8K, and the first wording took 482 more
+    photo_tools = [
+        {
+            "name": "show_photos",
+            "description": (
+                "Montrer nos photos de famille : « des photos de … » (« des photos de Zoé », « les vacances en "
+                "Bretagne l'été dernier », « Charlie à la plage »). « D'autres » : rappeler pareil."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Ce qu'on y voit, sans personne, lieu ni date (« plage »)",
+                    },
+                    "people": {"type": "array", "items": {"type": "string"}, "description": "Prénoms"},
+                    "place": {"type": "string", "description": "Ville, région ou pays, tel que dit"},
+                    "when": {"type": "string", "description": "Période, telle que dite (« l'été dernier »)"},
+                    "room": {"type": "string", "description": "Seulement si la demande nomme l'écran"},
+                },
+                "required": [],
+            },
+        },
+        {
+            "name": "slideshow",
+            "description": "Le diaporama de photos en cours",
+            "parameters": {
+                "type": "object",
+                "properties": {"action": {"type": "string", "enum": ["next", "previous", "pause", "resume", "stop"]}},
+                "required": ["action"],
+            },
+        },
+    ] if photos else []
+    standalone_tools = [weather_tool, place_tool, *timer_tools, *calendar_tools, *media_tools, image_tool, *photo_tools]
     if not ha_client:
         return standalone_tools
 
