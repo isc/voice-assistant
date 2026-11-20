@@ -70,6 +70,14 @@ A single go-librespot is a single queue. Different music in two rooms needs a se
 
 ## Memory and context
 
+### Tools picked per request
+The tools are ~85 % of every prompt, and each new one takes from the model's 8K window (AD-109, AD-115). Google's Gemini « Tool Retrieval » (preview, 2026-11-19) has the model search the tools' schemas when it needs them, one more model round: too slow and too risky on the voice path of a 12B. The server could pick them instead, before the model, at no model cost. Measured offline on 2026-11-20 over the journal's real requests with calls since 2026-10-10 (1,240, 282 distinct texts), the tools as of AD-115:
+- The home's own tools always given (on, off, covers, state, sensors, end: 20 % of the tools' characters), the families nearest the request by a CPU embedding of it (media, calendar, timers, pictures, doors, alarm, heating, vacuum, weather and places), and the families of the conversation's last two requests (within 3 minutes). With the 2 nearest families, 99.1 % of requests had every tool they called (MiniLM-L12, 15 ms a request), 99.3 % (mpnet-base, ~60 ms), 99.0 % (e5-large); 39 % of the tools' characters, ~3K tokens fewer. With 3 families, 99.3 to 99.5 % at 48 %.
+- Tool by tool instead of by family, the home's tools given and the 8 nearest others: 98.7 % (MiniLM-L12) at 43 %. With only `end_conversation` given and the 8 nearest: 92 % (MiniLM-L12) to 97 % (e5-large), the home's own tools missed.
+- What was missed: media requests (« le prélude numéro deux sur la sonos », a move to the Sonos in a long sentence).
+- Untried: what the model does with fewer tools, which needs the scenarios run with the selector in front. The cache: Ollama's gemma4 renderer writes the system prompt, then the tools in their order (`model/renderers/gemma4.go`, Ollama 0.40.7); with the home's tools first and the families in a fixed order, a request of another family re-reads from that family on (~1 to 2K tokens, 0.5 to 1 s), and the warm-up while a request is spoken (AD-073) can only guess the conversation's families.
+- Method: the journal's `LLM input:` lines and the `calls [...]` of the `LLM:` lines that follow, dry runs and tests left out; each tool embedded as its name, description and parameters' descriptions.
+
 ### Long-term memory
 Beyond the 5-exchange window (expires after 10 minutes), the assistant could keep facts across conversations. Start with explicit memory: "souviens-toi que la piscine ferme le 15 septembre" calls a tool that appends the fact to a file injected into the system prompt, like the family profile, and "oublie que…" removes it. Predictable, no embedding model, nothing remembered behind the family's back. Automatic extraction or retrieval over past conversations (RAG) only if the facts file outgrows the prompt.
 

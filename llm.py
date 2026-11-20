@@ -293,15 +293,9 @@ def get_tool_definitions(
         ]
 
     # Media tools: work without HA (default to the current ESP speaker).
-    # With HA, the `room` parameter can route to other media_players.
-    media_room_param = {
-        "type": "string",
-        "description": (
-            "Pièce ou enceinte où jouer le média (ex: « salon », « Google Home »), parmi les "
-            "« médias » de la liste des appareils. À omettre pour l'enceinte de l'appareil vocal "
-            "(« ici », ou aucune pièce dite)."
-        ),
-    }
+    # With HA, the `room` parameter can route to other media_players. Said in full once, by the first of them;
+    # the others refer to it: each repeat cost ~50 tokens of a prompt near the model's 8K (AD-115)
+    media_room_param = {"type": "string", "description": "Enceinte ou pièce telle que dite, comme pour play_radio"}
     media_tools = [
         {
             "name": "play_radio",
@@ -319,7 +313,14 @@ def get_tool_definitions(
                         "type": "string",
                         "description": "Nom de la station (ex: france inter, fip, rtl, nrj)",
                     },
-                    "room": media_room_param,
+                    "room": {
+                        "type": "string",
+                        "description": (
+                            "Pièce ou enceinte où jouer le média, telle que dite (ex: « salon », « Google Home »), "
+                            "parmi les « médias » de la liste des appareils. À omettre pour l'enceinte de l'appareil "
+                            "vocal (« ici », ou aucune pièce dite)."
+                        ),
+                    },
                 },
                 "required": ["station"],
             },
@@ -333,7 +334,7 @@ def get_tool_definitions(
             ),
             "parameters": {
                 "type": "object",
-                "properties": {"room": {**media_room_param, "description": "Enceinte ou pièce où passer le son"}},
+                "properties": {"room": {"type": "string", "description": "Enceinte ou pièce où passer le son"}},
                 "required": ["room"],
             },
         },
@@ -526,34 +527,25 @@ def get_tool_definitions(
     if not ha_client:
         return standalone_tools
 
-    room_param = {
-        "type": "string",
-        "description": "Pièce ou groupe (ex: chambre Charlie, salon, enfants, partout)",
-    }
-    # « Nom exact » made gemma list every shutter by name: 9 calls (5.3 s) for « ouvre tous les volets »
-    cover_entity_param = {
-        "type": "string",
-        "description": (
-            "Nom exact d'un volet, d'une fenêtre ou d'une moustiquaire ; ou « volets » / « fenêtres » / "
-            "« moustiquaires » avec room pour tous ceux d'une pièce, d'un groupe ou de partout, en un seul appel"
-        ),
+    # The parameters several tools share are said in full by the first that takes each (turn_on, open_cover,
+    # get_state) and referred to by the others (AD-115)
+    room_param = {"type": "string", "description": "Pièce ou groupe"}
+    cover_params = {
+        "entity": {"type": "string", "description": "Comme pour open_cover"},
+        "room": room_param,
     }
 
-    # Another home, named in the request: its door from this one, its heating, its state (AD-068, AD-071)
-    elsewhere = {}
-    if len(homes) > 1:
-        elsewhere["home"] = {
-            "type": "string",
-            "enum": list(homes),
-            "description": (
-                "La maison, seulement si la demande en nomme une (« la porte de Charras », « à Paris »). Ses "
-                "appareils ne sont pas dans la liste : entity tel que la demande le dit (« porte », « chauffage »)"
-            ),
-        }
-    # The same, short, for the tools that name no device (AD-109)
-    home = {}
-    if elsewhere:
-        home["home"] = {**elsewhere["home"], "description": "La maison, si la demande en nomme une (« à Paris »)"}
+    def home_param(said: str) -> dict:
+        """Another home, named in the request (AD-068, AD-071); « seulement si »: told « si », the model named one
+        unasked (AD-115)."""
+        if len(homes) < 2:
+            return {}
+        description = f"La maison, seulement si la demande en nomme une{said}"
+        return {"home": {"type": "string", "enum": list(homes), "description": description}}
+
+    # Its door from this one, its heating; `home` for the tools that name no device (AD-109)
+    elsewhere = home_param(", comme pour get_state")
+    home = home_param(" (« à Paris »)")
 
     # No lock, no tool. Unlocking only proposes: a tap in the web app confirms, and the satellite refuses (AD-068)
     lock_tools = []
@@ -626,7 +618,7 @@ def get_tool_definitions(
                             "enum": list(alarm),
                             "description": " ; ".join(f"{mode} : {_ALARM_MODE_WORDS[mode]}" for mode in alarm),
                         },
-                        **elsewhere,
+                        **home,
                     },
                     "required": ["mode"],
                 },
@@ -638,7 +630,7 @@ def get_tool_definitions(
                     "Ne désarme rien tout de suite : le résultat dit si une confirmation est demandée dans "
                     "l'application ou si c'est refusé. Répète-le sans dire que l'alarme est désarmée."
                 ),
-                "parameters": {"type": "object", "properties": {**elsewhere}, "required": []},
+                "parameters": {"type": "object", "properties": {**home}, "required": []},
             },
         ]
 
@@ -757,7 +749,10 @@ def get_tool_definitions(
                 "type": "object",
                 "properties": {
                     "entity": {"type": "string", "description": "Nom de l'appareil"},
-                    "room": room_param,
+                    "room": {
+                        "type": "string",
+                        "description": "Pièce ou groupe (ex: chambre Charlie, salon, enfants, partout)",
+                    },
                     "brightness": {
                         "type": "integer",
                         "description": "Luminosité 0-100, seulement pour les lumières",
@@ -787,7 +782,15 @@ def get_tool_definitions(
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": cover_entity_param,
+                    # « Nom exact » made gemma list every shutter by name: 9 calls (5.3 s) for « ouvre tous les volets »
+                    "entity": {
+                        "type": "string",
+                        "description": (
+                            "Nom exact d'un volet, d'une fenêtre ou d'une moustiquaire ; ou « volets » / "
+                            "« fenêtres » / « moustiquaires » avec room pour tous ceux d'une pièce, d'un groupe ou de "
+                            "partout, en un seul appel"
+                        ),
+                    },
                     "room": room_param,
                 },
                 "required": ["entity"],
@@ -801,10 +804,7 @@ def get_tool_definitions(
             ),
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "entity": cover_entity_param,
-                    "room": room_param,
-                },
+                "properties": cover_params,
                 "required": ["entity"],
             },
         },
@@ -818,8 +818,7 @@ def get_tool_definitions(
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": cover_entity_param,
-                    "room": room_param,
+                    **cover_params,
                     "position": {
                         "type": "integer",
                         "description": "Position du volet en pourcentage (0 = fermé, 100 = ouvert)",
@@ -855,7 +854,10 @@ def get_tool_definitions(
                 "properties": {
                     "entity": {"type": "string", "description": "Nom de l'appareil"},
                     "room": room_param,
-                    **elsewhere,
+                    **home_param(
+                        " (« la porte de Charras », « à Paris »). Ses appareils ne sont pas dans la liste : entity tel "
+                        "que la demande le dit (« porte », « chauffage »)"
+                    ),
                 },
                 "required": ["entity"],
             },
@@ -881,7 +883,7 @@ def get_tool_definitions(
                             "la recherche renvoie tous les capteurs correspondants."
                         ),
                     },
-                    **elsewhere,
+                    **home,
                 },
                 "required": ["query"],
             },

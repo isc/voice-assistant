@@ -1134,6 +1134,22 @@ class TestUnlockAndOtherHome(unittest.IsolatedAsyncioTestCase):
         one_home = get_tool_definitions(self.charras.ha_client, locks=True)
         self.assertNotIn("home", next(t for t in one_home if t["name"] == "lock")["parameters"]["properties"])
 
+    def test_a_parameter_said_as_another_tools_is_in_that_tool(self):
+        """« comme pour X » points to a tool given before it, which says that parameter in full (AD-115)."""
+        every = get_tool_definitions(
+            self.paris.ha_client, calendar_client=object(), music=True, homes=["paris", "charras"], locks=True,
+            heating=["Auto"], alarm=["absence"], vacuum=True, vacuum_rooms=["cuisine"], vacuum_schedules=True,
+            building_door=True, photos=True,
+        )
+        for tools in (every, self.server._tools()):
+            seen = {}
+            for tool in tools:
+                for name, param in tool["parameters"]["properties"].items():
+                    if said := re.search(r"comme pour (\w+)", param.get("description", "")):
+                        self.assertIn(name, seen.get(said.group(1), {}), f"{tool['name']}.{name}")
+                        self.assertNotIn("comme pour", seen[said.group(1)][name].get("description", ""))
+                seen[tool["name"]] = tool["parameters"]["properties"]
+
 
 # ---------------------------------------------------------------------------
 # Tests: an alarm, armed by voice, disarmed only by a tap in the web app (AD-083)

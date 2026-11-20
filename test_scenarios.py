@@ -723,7 +723,10 @@ SCENARIOS = [
         ("Mets le son sur la boule de l'homme.", plays_on("media_player.google_home"), {}),
     ]),
     ("AD-095 sous-douce, the Sonos offline", "paris", {**PARIS_SPEAKERS, **SONOS_PARIS_OFF}, [
-        ("Tu peux mettre France Inter sur la sous-douce ?", offers_one_that_answers("google", "living", "salon", unlike="sonos"), {}),
+        # « Sous-douce » was the Sonos, misheard: a reply may say it is offline, not offer it (AD-115)
+        ("Tu peux mettre France Inter sur la sous-douce ?", offers_one_that_answers(
+            "google", "living", "salon",
+            unlike=r"sonos(?! (?:n['’]est pas|ne repond pas|est (?:hors ligne|indisponible|injoignable)|semble))"), {}),
     ]),
     # Two terrace lights, « Lumière terrasse séjour » and « … parents », in an area of the outside: the model
     # sent « Lumière terrasse », and the first of the two names holding it was the one turned off (2026-11-08). The

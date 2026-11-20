@@ -1274,3 +1274,25 @@ This document tracks all architecture and technology decisions made for this pro
   - A page loaded before this change cannot know: it needs one more reload, by hand or when Android drops it.
   - `app_photos` matches the search exactly: the same people in another order, or « Emily » for « Emilie », search again.
   - `show_image` still leaves out a picture the app showed, so « mets-la sur l'écran » after « montre-moi la tour Eiffel » casts another one.
+
+## 2026-11-20: The tools' shared parameters said once
+
+### AD-115: A parameter several tools share is said in full by one, the others refer to it
+- **Context**: Ivan asked whether Google's Gemini « Tool Retrieval » (2026-11-19) applied here: the model keeps only the tools' names and first sentences, and loads a tool's schema when it needs it. The tools are ~88 % of every prompt (22,955 characters at Paris against 2,394 for the system prompt and its devices); real prompts since 2026-11-13 reached 7,332 tokens of the model's 8,192, prompt and reply together. The API is Gemini's, and one more model round per request is too slow for the voice path; its idea, on our side, is two changes. This one is the first: 4,485 characters of the tools were parameter descriptions repeated word for word (`home` 7 times, the media `room` 6, `room` 9, the covers' `entity` 3). The second, the server picking the tools per request, is measured in `ROADMAP.md` (« Tools picked per request »).
+- **Decision**:
+  - Each shared parameter is said in full by the first tool that takes it, and referred to by the others: the media `room` by `play_radio` (« … comme pour play_radio »), `room`'s examples by `turn_on`, the covers' `entity` by `open_cover`, `home` with its sentence about `entity` by `get_state` (`lock`, `unlock`, `set_heating`: « comme pour get_state »). `get_sensor`, `arm_alarm` and `disarm_alarm`, which name no device, take the short `home` of AD-109.
+  - Two words added where the scenarios showed the model guessing: the media `room` « telle que dite » (the server resolves a name heard wrong, AD-095), and every `home` « seulement si la demande en nomme une ».
+  - A unit test checks that each « comme pour X » names a tool given before it, which says that parameter in full.
+  - The scenario « AD-095 sous-douce, the Sonos offline » refused the word « Sonos » even in a reply saying it is offline, which AD-112 had noted. « Sous-douce » was the Sonos, misheard (AD-074), and AD-095 forbids offering an offline speaker, not naming it: the check now refuses « Sonos » unless the reply says it does not answer.
+- **Measured**: tools 22,955 → 20,838 characters. `test_scenarios.py`, every scenario, 10 runs, `main` then each wording:
+  - Prompt tokens, median of every request's first round: 6,977 → 6,416 (−561, −8 %); of every round 7,019 → 6,458, the largest 7,561 → 7,005.
+  - `main`: 858/860 turns (AD-102's « t'as pas éteint la lumière de la table à manger » 8/10).
+  - The references alone: 853/860. The model called `play_radio(room: Sonos)` for « la sous-douce » 6 times of 10, then said the Sonos was offline and offered the Google Home, which the old check refused.
+  - With « telle que dite »: 844/860. « Sous-douce » 10/10, but « Ouvre la porte du bas » 0/10 and « Non, celle d'en bas » 6/10: `open_building_door(home: charras)` from Paris, a home no one named.
+  - With « seulement si » too, as shipped: 850/860 under the old check, 859/860 under the corrected one (« sous-douce » 1/10 → 10/10, AD-084's « basculer le son sur la sonos » 9/10). The corrected check passes 10/10 on `main` and on this change, and still refuses « la Google Home ou la Sonos ? ».
+  - `test_hard_cases.py`, 10 runs, `main` on the live server: 648/670 (AD-075's setpoint asked in three turns 4/10, AD-077's games room shutter 0/10, AD-078's « il ne se rouvre pas » 4/10).
+- **Rejected**:
+  - Gemini's way, the model searching the tools: one more model round on the voice path, and a 12B calling a tool it has not loaded.
+  - The shared explanations in the system prompt instead: it already says how to pass `room`, and a description beside its parameter is what the model was measured following.
+  - Shortening more: « sous-douce » and « la porte du bas » flipped with a few words each, elsewhere in the tools. Each try costs 11 minutes of the card the family talks to.
+- **Trade-off**: ~560 tokens back, less than the 1,100 the repeats weighed: one copy of each stays, and the references cost a few words. A tool read alone says less (`set_volume`'s `room` sends to `play_radio`'s). Two turns flipping with wording elsewhere in the tools says the model's choices there are fragile: the next tool added can flip them again, which the nightly scenarios would show.
