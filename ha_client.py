@@ -619,7 +619,7 @@ class HAClient:
     def get_entity_list_for_prompt(self) -> str:
         """Return entity names grouped by room for the system prompt."""
         by_area: dict[str, dict[str, list[str]]] = {}
-        for info in self.entities.values():
+        for entity_id, info in self.entities.items():
             # A switch HA puts in no room is a setting more than a plug (Charras's 56 alarm-zone
             # switches, ~600 tokens; the Paris Sonos's loudness): still reachable by its name
             if info["domain"] == "switch" and not info["area_name"]:
@@ -642,6 +642,10 @@ class HAClient:
                 domain_label = {"fenetre": "fenêtres", "moustiquaire": "moustiquaires"}.get(
                     cover_kind(info), domain_label
                 )
+            # And the screen apart from the speakers: Paris's Nest Hub is « Google Home », which the model said had
+            # none (AD-114)
+            if entity_id in self.screens:
+                domain_label = "écran"
             by_area.setdefault(area, {}).setdefault(domain_label, []).append(info["friendly_name"])
 
         parts = []

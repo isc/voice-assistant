@@ -31,6 +31,8 @@ class Conversation:
     id: Optional[int] = None
     last_time: float = 0
     shown_images: set = field(default_factory=set)  # pictures not to show twice
+    # The last photos the web app showed, and their search: « affiche-les sur l'écran » casts those (AD-114)
+    app_photos: Optional[tuple[dict, list]] = None
     events: list = field(default_factory=list)  # ids of the calendar events it made: « ce rendez-vous » (AD-072)
     # That of its last request after a wake word: a follow-up in another isn't one (AD-093). None when that request
     # came out of Parakeet as nothing: the one asked again sets it (AD-094)

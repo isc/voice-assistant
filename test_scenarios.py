@@ -239,7 +239,7 @@ def ScenarioPhotos():
     class Photos(FakeImmich):
         def __init__(self):
             super().__init__()
-            self.people = [{"id": "p-zoe", "name": "Zoé"}, {"id": "p-charlie", "name": "Charlie"}]
+            self.people = [{"id": f"p-{n}", "name": name} for n, name in enumerate(("Zoé", "Charlie", "Gisèle", "Émilie", "Emily"))]
             self.found = 0
 
         async def _places(self, session, place):
@@ -536,6 +536,21 @@ def photo_arg(args: dict, key: str) -> str:
 
     value = args.get(key) or ""
     return fold(" ".join(value) if isinstance(value, list) else str(value))
+
+
+def not_said(check, pattern: str):
+    """`check`, and the reply, folded, without `pattern`."""
+
+    def both(t):
+        ok, what = check(t)
+        return ok and not re.search(pattern, t.said), f"{what}, not « {pattern} » said"
+
+    return both
+
+
+def slideshow_started(t):
+    started = [c for c in t.calls if c["function"] == "show_photos" and str(c.get("result", "")).startswith("Diaporama")]
+    return bool(started), "a slideshow on the screen"
 
 
 def web_image(t):
@@ -903,6 +918,15 @@ SCENARIOS = [
         ("Suivante.", slideshow("next"), from_satellite),
         ("Reviens à la précédente.", slideshow("previous"), from_satellite),
         ("Arrête.", slideshow("stop"), from_satellite),
+    ]),
+    # From the app: said shown « sur l'écran », then « que sur l'écran principal de la maison », and never cast to the
+    # Google Home asked, « qui n'a pas d'écran » (AD-114)
+    ("AD-114 the app's photos, then on the Google Home", "paris", {}, [
+        ("Est-ce que tu saurais me trouver une photo sur laquelle il y a Gisèle, Zoé et Emily ?", not_said(
+            photos("of the three, in the app", lambda a: all(n in photo_arg(a, "people") for n in ("gisele", "zoe", "emil"))
+                   and not a.get("room")), r"\bles affiche sur l'ecran|ecran (?:de la maison|principal)"), {}),
+        ("Et là tu les affiches sur quel écran ?", says(r"telephone|application", unlike=r"ecran principal"), {}),
+        ("Affiche-les sur le Google Home de Paris.", slideshow_started, {}),
     ]),
 ]  # fmt: skip
 

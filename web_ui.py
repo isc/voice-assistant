@@ -2,6 +2,8 @@
 
 import asyncio
 import contextlib
+import functools
+import hashlib
 import hmac
 import html
 import ipaddress
@@ -29,6 +31,19 @@ from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+
+@functools.lru_cache(maxsize=1)
+def _page(mtime_ns: int) -> tuple[str, str]:
+    text = (STATIC_DIR / "index.html").read_text()
+    version = hashlib.sha256(text.encode()).hexdigest()[:12]
+    return text.replace("__APP_VERSION__", version), version
+
+
+def page() -> tuple[str, str]:
+    """The web app's page, its version written in, and that version: a hash of index.html. A page shown since before
+    a deploy sees in /api/state that it is stale and reloads (AD-114)."""
+    return _page((STATIC_DIR / "index.html").stat().st_mtime_ns)
 # Tailscale's address range: the web UI is reached through it, while :8888 also answers on the LAN
 _TAILNET = ipaddress.ip_network("100.64.0.0/10")
 # What speakers fetch, from the LAN or through the Paris relay: TTS replies and the Spotify stream
@@ -380,7 +395,7 @@ def setup_routes(app, server):
         )
 
     async def handle_web_ui(request):
-        return web.Response(text=(STATIC_DIR / "index.html").read_text(), content_type="text/html")
+        return web.Response(text=page()[0], content_type="text/html")
 
     async def handle_manifest(request):
         return web.Response(
@@ -506,8 +521,8 @@ def setup_routes(app, server):
         return ws
 
     async def handle_state(request):
-        """What runs now at the page's home: the timers this browser sees, saying which it set; and Spotify,
-        wherever it plays (one for every home)."""
+        """What runs now at the page's home: the timers this browser sees, saying which it set; Spotify, wherever
+        it plays (one for every home); and the page's version (AD-114)."""
         await use_site(request, dict(request.query))
         client = _client(request.query)
         timers = [
@@ -520,7 +535,7 @@ def setup_routes(app, server):
             }
             for timer in server.timer_manager.get_timers(client)
         ]
-        return web.json_response({"timers": timers, "music": await server.music_now()})
+        return web.json_response({"timers": timers, "music": await server.music_now(), "app": page()[1]})
 
     async def handle_cancel_timer(request):
         """The app's ✕ on a timer: {"id": …, "site": …}."""

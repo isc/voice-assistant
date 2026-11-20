@@ -2377,7 +2377,8 @@ class TestShowImage(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_app_shows_it_itself(self):
         call, result = await self.show({"query": "tour Eiffel"})
-        self.assertTrue(result.startswith("Image affichée dans l'application : l'image de l'article Wikipédia"))
+        self.assertTrue(result.startswith("Image affichée sur l'écran de ce téléphone, dans l'application (celui de la "
+                                          "maison seulement si on le nomme) : l'image de l'article Wikipédia"), result)
         self.assertEqual(call["image"], {"url": self.PICTURE.url, "caption": "Tour Eiffel"})
         self.assertEqual(self.cast(), [])
 
@@ -2447,6 +2448,9 @@ class FakeImmich(Immich):
             return {"assets": {"items": self.smart}}
         return self.drawn
 
+    def searched(self) -> list[dict]:
+        return [body for path, body in self.requests if path.startswith("/api/search/")]
+
 
 class TestPhotos(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -2454,9 +2458,6 @@ class TestPhotos(unittest.IsolatedAsyncioTestCase):
         patcher = patch("photos.osm_place", AsyncMock(return_value=None))
         self.nominatim = patcher.start()
         self.addCleanup(patcher.stop)
-
-    def searched(self) -> list[dict]:
-        return [body for path, body in self.immich.requests if path.startswith("/api/search/")]
 
     def test_periods(self):
         """As said, on 20 November 2026: the model put « l'été dernier » in 2025, whatever its tool said."""
@@ -2499,7 +2500,7 @@ class TestPhotos(unittest.IsolatedAsyncioTestCase):
         found = await self.immich.find(query="plage", when="de 2013 à 2020")
         self.assertEqual([p.id for p in found], ["s2", "s1"])
         self.assertEqual(found[0].caption, "30 juillet 2013 · Binic")
-        [body] = self.searched()
+        [body] = self.immich.searched()
         self.assertEqual((body["query"], body["language"], body["type"]), ("plage", "fr", "IMAGE"))
         # Until the end of its last day
         self.assertEqual((body["takenAfter"], body["takenBefore"]), ("2013-01-01T00:00:00.000Z", "2021-01-01T00:00:00.000Z"))
@@ -2507,29 +2508,29 @@ class TestPhotos(unittest.IsolatedAsyncioTestCase):
     async def test_a_period_not_understood(self):
         result = await self.immich.find(when="les vacances")
         self.assertTrue(result.startswith("Aucune photo : période non comprise, « les vacances »"), result)
-        self.assertEqual(self.searched(), [])
+        self.assertEqual(self.immich.searched(), [])
 
     async def test_no_description_draws_at_random(self):
         found = await self.immich.find(place="Mimizan")
         self.assertEqual([p.id for p in found], ["r1"])
-        self.assertEqual(self.searched(), [{"type": "IMAGE", "withExif": True, "city": "Mimizan", "size": photos.COUNT}])
+        self.assertEqual(self.immich.searched(), [{"type": "IMAGE", "withExif": True, "city": "Mimizan", "size": photos.COUNT}])
         self.nominatim.assert_not_awaited()  # Immich's own name
 
     async def test_others_than_those_shown(self):
         found = await self.immich.find(query="plage", exclude={"s1"})
         self.assertEqual([p.id for p in found], ["s2"])
-        self.assertEqual(self.searched()[0]["size"], photos.COUNT + 1)
+        self.assertEqual(self.immich.searched()[0]["size"], photos.COUNT + 1)
 
     async def test_people_by_name(self):
         await self.immich.find(people=["Zoé"])
-        self.assertEqual(self.searched()[0]["personIds"], ["p-zoe"])  # not Zoé Martin
+        self.assertEqual(self.immich.searched()[0]["personIds"], ["p-zoe"])  # not Zoé Martin
         await self.immich.find(people=["zoe martin"])
-        self.assertEqual(self.searched()[1]["personIds"], ["p-zoe-m"])
+        self.assertEqual(self.immich.searched()[1]["personIds"], ["p-zoe-m"])
 
     async def test_a_face_with_no_name(self):
         result = await self.immich.find(people=["Zoé", "Charlie"])
         self.assertEqual(result, "Aucune personne nommée Charlie dans les photos : son visage n'y a pas de nom")
-        self.assertEqual(self.searched(), [])
+        self.assertEqual(self.immich.searched(), [])
 
     async def places(self, place: str, osm: dict | None = None) -> list[dict]:
         self.nominatim.return_value = osm
@@ -2669,12 +2670,40 @@ class TestShowPhotos(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_app_shows_them_itself(self):
         call, result = await self.run_call("show_photos", {"query": "plage"})
-        self.assertEqual(result, "2 photos affichées dans l'application, prises de 2013 à 2020, à Binic, Sarzeau")
+        # Where they are, and the screen that shows them when named (AD-114)
+        self.assertEqual(result, "2 photos prises de 2013 à 2020, à Binic, Sarzeau, affichées sur l'écran de ce téléphone, "
+                                 "dans l'application (celui de la maison seulement si on le nomme)")
         self.assertEqual(call["photos"][0], {"url": "api/photos/s2", "caption": "30 juillet 2013 · Binic"})
         self.assertEqual(self.casts(), [])
         # « d'autres »: none of those
         _, result = await self.run_call("show_photos", {"query": "plage"})
         self.assertEqual(result, "Aucune photo trouvée")
+
+    def test_the_prompt_names_the_screen(self):
+        """Paris's Nest Hub is « Google Home », which the model said had no screen (AD-114)."""
+        self.assertIn("écran: Google Home", self.client.get_entity_list_for_prompt())
+
+    async def screen_after_app(self, again: dict) -> tuple[dict, str]:
+        """« Affiche-les sur le Google Home » after the app showed the beach's photos: its call and result."""
+        await self.run_call("show_photos", {"query": "plage"})
+        return await self.run_call("show_photos", {**again, "room": "Google Home"})
+
+    async def test_the_app_shows_go_to_the_screen_by_the_same_search(self):
+        """Those the app shows, not others (AD-114); then « d'autres » there: others, as ever."""
+        call, result = await self.screen_after_app({"query": "plage"})
+        self.assertTrue(result.startswith("Diaporama de 2 photos sur Google Home"), result)
+        self.assertEqual(call["photos"][0]["url"], "api/photos/s2")
+        _, result = await self.run_call("show_photos", {"query": "plage", "room": "Google Home"})
+        self.assertEqual(result, "Aucune photo trouvée")
+
+    async def test_the_app_shows_go_to_the_screen_by_no_search(self):
+        call, result = await self.screen_after_app({})
+        self.assertTrue(result.startswith("Diaporama de 2 photos sur Google Home"), result)
+        self.assertEqual(call["photos"][0]["url"], "api/photos/s2")
+
+    async def test_another_search_on_the_screen_is_searched(self):
+        await self.screen_after_app({"query": "neige"})
+        self.assertEqual([body["query"] for body in self.server.immich.searched()], ["plage", "neige"])
 
     async def test_the_satellite_starts_a_slideshow_on_the_screen(self):
         call, result = await self.run_call("show_photos", {"query": "plage"}, browser=None)
@@ -5442,6 +5471,13 @@ class TestTimersOnThePhoneRoutes(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([t["mine"] for t in (await response.json())["timers"]], [True, False, True])
         response = await self.client.get("/api/state?site=paris")
         self.assertEqual([t["mine"] for t in (await response.json())["timers"]], [False, False])
+
+    async def test_a_page_knows_when_it_is_stale(self):
+        """The page carries its version, which /api/state gives: one shown since before a deploy reloads (AD-114)."""
+        page = await (await self.client.get("/")).text()
+        version = (await (await self.client.get("/api/state?site=paris")).json())["app"]
+        self.assertRegex(version, r"^[0-9a-f]{12}$")
+        self.assertIn(f"const APP_VERSION = '{version}';", page)
 
     async def test_subscribed_and_unsubscribed(self):
         response = await self.client.get("/api/push")

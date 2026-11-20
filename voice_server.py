@@ -96,6 +96,10 @@ _SATELLITE_RESTART_EVERY = 3600
 _SATELLITE_IDLE_POLL = 5
 # A tool result kept in history this long at most (a weather or calendar answer runs to 1 kB)
 _HISTORY_RESULT_CHARS = 300
+# Where a picture asked from the web app shows, and that the screen shows it only when named: the model said the
+# photos were on « l'écran », that only « l'écran principal de la maison » could show them, and never cast them to
+# the Google Home asked (AD-114)
+IN_APP = "sur l'écran de ce téléphone, dans l'application (celui de la maison seulement si on le nomme)"
 # While a request is heard, the HA speakers playing are turned down to this share of their volume
 _DUCKED_SHARE = 0.2
 # A spoken request the LLM still answers after this long hears « Un petit instant. » (AD-079): 6 % of the
@@ -2268,7 +2272,7 @@ class VoiceAssistantServer:
             # monde » over a photo titled « Nepal (11) - 26Sep10, Bardia (Nepal) », a field
             shown = f"une photo trouvée par mots-clés, titrée « {picture.caption} »"
         if not screen:
-            return f"Image affichée dans l'application : {shown}"
+            return f"Image affichée {IN_APP} : {shown}"
         await self._media_play_url(("ha", screen), picture.url, picture.content_type)
         return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {shown}"
 
@@ -2279,21 +2283,25 @@ class VoiceAssistantServer:
         screen, refusal = await self._screen(arguments.get("room"))
         if refusal:
             return refusal
-        people = arguments.get("people") or []
-        photos = await self.immich.find(
-            query=arguments.get("query") or "",
-            people=[people] if isinstance(people, str) else people,
-            place=arguments.get("place") or "",
-            when=arguments.get("when") or "",
-            exclude=self.conversation.shown_images,
-        )
-        if isinstance(photos, str):
-            return photos
-        self.conversation.shown_images.update(photo.id for photo in photos)
+        conversation = self.conversation
+        search = {key: arguments[key] for key in ("query", "people", "place", "when") if arguments.get(key)}
+        if isinstance(search.get("people"), str):
+            search["people"] = [search["people"]]
+        if screen and (shown := conversation.app_photos) and search in ({}, shown[0]):
+            # « Affiche-les sur le Google Home »: those the app shows, not others (AD-114)
+            photos = shown[1]
+        else:
+            photos = await self.immich.find(
+                **{"query": "", "people": [], "place": "", "when": "", **search}, exclude=conversation.shown_images
+            )
+            if isinstance(photos, str):
+                return photos
+            conversation.shown_images.update(photo.id for photo in photos)
+        conversation.app_photos = None if screen else (search, photos)
         # The app asks api/photos/<id>?size=thumbnail for the strip
         call["photos"] = [{"url": f"api/photos/{photo.id}", "caption": photo.caption} for photo in photos]
         if not screen:
-            return f"{len(photos)} photos affichées dans l'application, {summary(photos)}"
+            return f"{len(photos)} photos {summary(photos)}, affichées {IN_APP}"
         self._take_over(("ha", screen))
         site = self.site
         stop = partial(self._media_command, ("ha", screen), MediaPlayerCommand.STOP, "media_stop", site)
@@ -2732,6 +2740,7 @@ class VoiceAssistantServer:
         if not conversation.id:
             conversation.id = int(now)
             conversation.shown_images.clear()
+            conversation.app_photos = None
             conversation.events.clear()
 
     async def _run_call(self, tc_entry: dict) -> str:

@@ -298,6 +298,8 @@ const store = {
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const icon = (name, cls = '') => `<svg class="i ${cls}"><use href="#i-${name}"/></svg>`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// This page's version, written in by the server: a page shown since before a deploy reloads (AD-114)
+const APP_VERSION = '__APP_VERSION__';
 // Only after a tap: Chrome refuses it before, with a console error
 const vibrate = (ms) => { if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.(ms); };
 
@@ -1219,7 +1221,20 @@ async function refreshLive() {
     const now = Date.now();
     live = {timers: state.timers.map((t) => ({...t, end: now + t.seconds_left * 1000})), music: state.music};
     renderLive();
+    if (state.app && state.app !== APP_VERSION) reloadWhenIdle(state.app);
   } catch {}
+}
+
+// A page kept open on a phone runs the code it loaded, days ago maybe: the photos asked from it at 15 h never
+// showed, its code from 7 h knowing none (AD-114). Reloaded once nothing is under way, nor typed, and once per
+// version: a page the network does not give again stays as it is
+function reloadWhenIdle(version) {
+  if (document.hidden || dock.dataset.voice !== 'idle' || voice.session || pending.length || cmd.value) return;
+  try {
+    if (sessionStorage.getItem('va.reloaded') === version) return;
+    sessionStorage.setItem('va.reloaded', version);
+  } catch { return; }
+  location.reload();
 }
 
 function countdown(ms) {

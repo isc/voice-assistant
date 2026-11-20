@@ -1249,3 +1249,28 @@ This document tracks all architecture and technology decisions made for this pro
 - **Measured**: the 200 wake-word recordings of 2026-10-11 to 2026-11-20 replayed through `SpeechEnd` and `quiet_speech`: 4 silent. Today's two are requests (54, 88). The room after a false wake (345) is not, nor « Oh » (AD-092's burst, at 5,625).
 - **Rejected**: the wake sound's level as a gauge: from 118 to 27,000 among requests answered well (the satellite's volume, the echo canceller). Amplifying every recording before the VAD: the room after a false wake (345 to 2,032) would become requests (AD-036). Restarting the satellite on a schedule: music cut, for a fault seen once. Channel 1 for the request: nothing yet says it stays sound when channel 0 does not.
 - **Trade-off**: the threshold rests on one satellite's two failures. A request between 200 and 430 that the VAD misses still gets the red LED. A false wake in a quiet room whose noise the amplified VAD takes for speech becomes a request, and restarts the satellite. A rescued request waits the whole 8 s: the VAD never hears it end. A restart loses a timer's countdown on the ring, which still rings (ESPHome takes a FINISHED for a timer it does not know).
+
+## 2026-11-20: Photos unseen on the phone
+
+### AD-114: A page kept open reloads after a deploy; a picture shown in the app is said shown there, the screen listed apart
+- **Context**: 2026-11-20 at 15:06, from the phone: « trouve-moi une photo avec Gisèle, Zoé et Emily ». Immich found 4, the call carried them, and the phone showed none: it never asked `/api/photos/`. Its page dated from 7:06, three hours before AD-112's deploy, and its code knew no `photos`. Android keeps an installed app's page in memory, and the service worker, network-first, only serves a page that is loaded again. The model then said « Je les affiche sur l'écran », though the result said « affichées dans l'application ». It said it could show them « que sur l'écran de la maison », then « l'écran principal », and that the Google Home « n'a pas d'écran ». Paris's Nest Hub is « Google Home » in HA, listed among the « médias ». It never cast them, even when asked: six turns, nothing shown anywhere.
+- **Decision**:
+  - The page carries its version, a hash of `index.html` (`web_ui.page()`, cached by its mtime). `/api/state`, polled every 3 s, gives the server's (`app`). A page that differs reloads, once per version (sessionStorage), when nothing is under way: no voice turn, no request pending, nothing typed, the page shown.
+  - A picture or photos shown in the app are said to be « sur l'écran de ce téléphone, dans l'application (celui de la maison seulement si on le nomme) » (`IN_APP`).
+  - The home's screen is listed apart in the prompt's devices: « écran: Google Home », not among the « médias ». That is a few tokens in the static prompt.
+  - A `show_photos` call naming the screen, with the search the app's last photos came from or none, casts those photos (`Conversation.app_photos`). Otherwise it would cast others, which can be none: searches leave out what the conversation has shown, and without a `query` Immich draws photos at random.
+- **Measured**: the conversation became a scenario (« AD-114 the app's photos, then on the Google Home »), 10 runs.
+  - On main: 5/10, 0/10, 10/10. The first reply said « Je les affiche sur l'écran », and « sur quel écran ? » got « l'écran de la maison » 10 times out of 10.
+  - With this change: 10/10, 10/10, 10/10.
+  - With « sur ce téléphone, dans l'application, pas sur l'écran sauf si on le nomme », the model answered « Je ne les ai pas encore affichées » 10 times out of 10. « L'écran de ce téléphone » answers « quel écran ? ».
+  - Unchanged at 10/10 for each turn: AD-112's photo scenarios and the music scenarios that name a screen or the Google Home (AD-084, AD-087, AD-090, AD-095). The hard case AD-063 (« Mets France Inter sur la Google Home ») was 10/10 on main.
+  - In Chromium, a page told of a newer version kept what was being typed, then reloaded once the field was empty.
+- **Rejected**:
+  - The service worker alone: it cannot reload a page already open, and it updates only when `sw.js` changes.
+  - Leaving out photos already shown only on the same destination, instead of `app_photos`: without a `query` the search draws at random, so it would cast other photos.
+  - Naming the screen in each result instead of in the device list: one place says it once, cached.
+- **Trade-off**:
+  - A deploy that changes `index.html` reloads every open app once it is idle. Someone reading the history loses their scroll.
+  - A page loaded before this change cannot know: it needs one more reload, by hand or when Android drops it.
+  - `app_photos` matches the search exactly: the same people in another order, or « Emily » for « Emilie », search again.
+  - `show_image` still leaves out a picture the app showed, so « mets-la sur l'écran » after « montre-moi la tour Eiffel » casts another one.
