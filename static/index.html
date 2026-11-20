@@ -58,7 +58,7 @@
 
   /* What runs now: timers, music */
   #live { display: flex; gap: 8px; overflow-x: auto; padding: 2px 16px 10px; scrollbar-width: none; }
-  #live::-webkit-scrollbar { display: none; }
+  #live::-webkit-scrollbar, #viewer-track::-webkit-scrollbar { display: none; }
   #live:empty { display: none; }
   .card { flex: none; display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 6px 0 12px; border-radius: 16px; background: var(--surface); box-shadow: var(--shadow); border: 1px solid var(--line); max-width: 86vw; }
   .card .what { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
@@ -182,6 +182,17 @@
   /* Settings */
   dialog { border: 0; padding: 0; width: min(680px, 100%); max-width: 100%; margin: auto auto 0; border-radius: 22px 22px 0 0; background: var(--surface); color: var(--text); padding-bottom: env(safe-area-inset-bottom); }
   dialog::backdrop { background: rgb(0 0 0 / .35); }
+  /* A strip's photos full screen, swiped through like a phone's gallery */
+  #viewer { width: 100%; height: 100dvh; max-height: none; margin: 0; border-radius: 0; padding: 0; background: #000; color: #fff; overflow: hidden; }
+  #viewer-track { display: flex; height: 100%; overflow-x: auto; scroll-snap-type: x mandatory; overscroll-behavior: contain; scrollbar-width: none; }
+  #viewer-track img { flex: none; width: 100%; height: 100%; object-fit: contain; scroll-snap-align: center; scroll-snap-stop: always; }
+  #viewer .bar { position: absolute; inset: auto 0 0; display: flex; justify-content: space-between; gap: 12px; padding: 28px 16px calc(14px + env(safe-area-inset-bottom)); font-size: 14px; background: linear-gradient(transparent, rgb(0 0 0 / .6)); pointer-events: none; }
+  #viewer .icon-btn { position: absolute; width: 44px; height: 44px; background: rgb(0 0 0 / .45); color: #fff; }
+  #viewer-close { top: calc(10px + env(safe-area-inset-top)); right: 10px; }
+  #viewer [data-step] { top: calc(50% - 22px); }
+  #viewer [data-step="-1"] { left: 10px; }
+  #viewer [data-step="1"] { right: 10px; transform: scaleX(-1); }
+  @media (hover: none) { #viewer [data-step] { display: none; } }
   dialog h2 { font-size: 17px; margin: 0; padding: 18px 20px 6px; }
   .row { display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 20px; text-align: left; }
   .row > span { flex: 1; display: flex; flex-direction: column; }
@@ -285,6 +296,14 @@
     <div id="health">…</div>
     <button class="done" value="close">Fermer</button>
   </form>
+</dialog>
+
+<dialog id="viewer" aria-label="Photos">
+  <div id="viewer-track"></div>
+  <div class="bar"><span id="viewer-caption"></span><span id="viewer-count"></span></div>
+  <button type="button" class="icon-btn" data-step="-1" aria-label="Photo précédente"><svg class="i"><use href="#i-back"/></svg></button>
+  <button type="button" class="icon-btn" data-step="1" aria-label="Photo suivante"><svg class="i"><use href="#i-back"/></svg></button>
+  <button type="button" class="icon-btn" id="viewer-close" aria-label="Fermer"><svg class="i"><use href="#i-x"/></svg></button>
 </dialog>
 
 <script>
@@ -598,7 +617,11 @@ $('back').addEventListener('click', () => {
   if (history.state?.history) history.back();
   else { history.replaceState(null, '', location.pathname); showView('now'); }
 });
-addEventListener('popstate', () => showView(location.hash === '#historique' ? 'history' : 'now'));
+addEventListener('popstate', () => {
+  if (viewer.open) return viewer.close();
+  const next = location.hash === '#historique' ? 'history' : 'now';
+  if (next !== view) showView(next);  // not on leaving the viewer's entry: the thread would scroll to its end
+});
 
 // The log, unchanged most of the time (a 304); true when it changed
 let changedAt = 0;
@@ -645,6 +668,12 @@ thread.addEventListener('click', (e) => {
   if (offer) confirmOffer(offer);
   const example = e.target.closest('[data-example]');
   if (example) { cmd.value = example.dataset.example; composerChanged(); cmd.focus(); }
+  const photo = e.target.closest('.photo');
+  if (photo) {
+    e.preventDefault();
+    const strip = [...photo.parentElement.children];
+    openViewer(strip, strip.indexOf(photo));
+  }
 });
 // A button of the thread leaves the field focused: its blur brought the mic back, which moved the button away
 // between press and release, and the click was lost (« Déverrouiller » right after a typed request)
@@ -674,6 +703,30 @@ async function sendText(text) {
   }
   await settle(p);
 }
+
+// ---------------------------------------------------------------- Photos, full screen
+// A thumbnail opened its photo alone, in a window of the installed app with no way out: the strip's photos
+// full screen instead, swiped through, closed by ✕, Escape or the phone's back. A history entry takes the back,
+// which Chrome may also give the dialog itself: closing, however done, leaves that entry
+const viewer = $('viewer'), track = $('viewer-track');
+function openViewer(links, index) {
+  track.innerHTML = links.map((a) => `<img src="${esc(a.getAttribute('href'))}" alt="${esc(a.firstChild.alt)}" loading="lazy" decoding="async">`).join('');
+  viewer.showModal();
+  track.scrollLeft = index * track.clientWidth;
+  caption();
+  history.pushState({viewer: true}, '');
+}
+function caption() {
+  const i = Math.round(track.scrollLeft / track.clientWidth), n = track.children.length;
+  $('viewer-caption').textContent = track.children[i]?.alt || '';
+  $('viewer-count').textContent = n > 1 ? `${i + 1} / ${n}` : '';
+}
+const step = (n) => track.scrollBy({left: n * track.clientWidth, behavior: 'smooth'});
+track.addEventListener('scroll', caption, {passive: true});
+$('viewer-close').addEventListener('click', () => viewer.close());
+viewer.addEventListener('close', () => { track.replaceChildren(); if (history.state?.viewer) history.back(); });
+viewer.addEventListener('click', (e) => { const b = e.target.closest('[data-step]'); if (b) step(Number(b.dataset.step)); });
+viewer.addEventListener('keydown', (e) => { const n = {ArrowLeft: -1, ArrowRight: 1}[e.key]; if (n) step(n); });
 
 // ---------------------------------------------------------------- Shortcuts
 // What this phone does often, at about this time of day, one tap to do again (AD-065). Learnt from the
@@ -1229,7 +1282,7 @@ async function refreshLive() {
 // showed, its code from 7 h knowing none (AD-114). Reloaded once nothing is under way, nor typed, and once per
 // version: a page the network does not give again stays as it is
 function reloadWhenIdle(version) {
-  if (document.hidden || dock.dataset.voice !== 'idle' || voice.session || pending.length || cmd.value) return;
+  if (document.hidden || dock.dataset.voice !== 'idle' || voice.session || pending.length || cmd.value || document.querySelector('dialog[open]')) return;
   try {
     if (sessionStorage.getItem('va.reloaded') === version) return;
     sessionStorage.setItem('va.reloaded', version);
