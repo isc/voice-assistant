@@ -95,6 +95,8 @@ _LLM_CHECK_SECONDS = 60
 # A satellite whose microphone stuck low restarted at most this often, once idle, as checked this often (AD-113)
 _SATELLITE_RESTART_EVERY = 3600
 _SATELLITE_IDLE_POLL = 5
+# A RUN_END sooner than this after STT_VAD_END the ESP ignores, and stays thinking (AD-036)
+_THINKING_SETTLES = 0.1
 # A tool result kept in history this long at most (a weather or calendar answer runs to 1 kB)
 _HISTORY_RESULT_CHARS = 300
 # Where a picture asked from the web app shows, and that the screen shows it only when named: the model said the
@@ -536,6 +538,7 @@ class VoiceAssistantServer:
         # Site name -> its satellite's Restart button, and when the server last pressed it (AD-113)
         self.device_restart_keys: Dict[str, int] = {}
         self._satellite_restarted: Dict[str, float] = {}
+        self._thinking_since = 0.0  # when the satellite was last sent STT_VAD_END (monotonic)
         # Spotify through go-librespot (None when it is not running here)
         self.spotify: Optional[Spotify] = None
         self._spotify_task: Optional[asyncio.Task] = None
@@ -1049,10 +1052,6 @@ class VoiceAssistantServer:
                 if self.quiet_mic is not None:
                     logger.warning(f"Speech heard only amplified, the satellite's microphone at {self.quiet_mic}")
                     self._in_background(self._restart_satellite(self.site), drained=False)
-            # No "thinking" if nobody spoke: the ESP would ignore the RUN_END that follows (AD-036)
-            if self.speech.heard or self.quiet_mic is not None:
-                api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
-                logger.info("STT_VAD_END sent - LEDs orange (thinking)")
 
             if audio_data:
                 await self.process_voice_pipeline(api, audio_data)
@@ -1214,6 +1213,11 @@ class VoiceAssistantServer:
                     await self.send_error_to_device(api, "STT failed")
                 return
 
+            # "Thinking" for a request alone: the ESP ignores a RUN_END that follows STT_VAD_END within a few ms and
+            # stays thinking, LEDs blinking (AD-036). Speech that gets no answer ends while it still listens.
+            api.send_voice_assistant_event(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, {})
+            self._thinking_since = time.monotonic()
+            logger.info("STT_VAD_END sent - LEDs orange (thinking)")
             api.send_voice_assistant_event(
                 VoiceAssistantEventType.VOICE_ASSISTANT_STT_END,
                 {"text": transcript},
@@ -3127,6 +3131,8 @@ class VoiceAssistantServer:
     async def send_error_to_device(self, api: APIClient, error_message: str):
         """Send an error event and end the pipeline."""
         logger.error(f"Sending error to ESP: {error_message}")
+        # An LLM down fails within ms of the "thinking" (AD-036)
+        await asyncio.sleep(self._thinking_since + _THINKING_SETTLES - time.monotonic())
         try:
             api.send_voice_assistant_event(
                 VoiceAssistantEventType.VOICE_ASSISTANT_ERROR,

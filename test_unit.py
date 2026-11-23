@@ -172,6 +172,7 @@ def make_server(env=None):
     server._followup_by = {}
     server.device_restart_keys = {}
     server._satellite_restarted = {}
+    server._thinking_since = 0.0
     server.audio_channel_1, server.quiet_mic = bytearray(), None
     server.is_recording = False
     server._pipeline_running = False
@@ -5225,6 +5226,33 @@ class TestFollowUpLanguage(unittest.IsolatedAsyncioTestCase):
         server.process_with_llm.assert_not_awaited()
         api.send_voice_assistant_event.assert_called_once_with(VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END, {})
         self.assertEqual(server.exchange_log.entries[-1]["response"], "[Autre langue]")
+
+    async def test_speech_that_gets_no_answer_leaves_the_satellite_idle(self):
+        """The follow-up « We're not. », transcribed at the end of speech (AD-116), got STT_VAD_END and RUN_END 1 ms
+        later, which the ESP ignored: thinking, LEDs blinking, until restarted (2026-11-23). No STT_VAD_END for
+        speech that gets no answer, nor for speech written as nothing, asked again at once (AD-094)."""
+        for transcript, follow_up in (("We're not.", True), ("", False)):
+            with self.subTest(transcript, follow_up=follow_up):
+                server = satellite_server(self, "", follow_up=follow_up)
+                server.speech.transcribed = (transcript, 0.05)
+                server.is_recording, server.audio_buffer = True, bytearray(4096)
+                api = MagicMock()
+                await server.stop_recording(api, "VAD silence")
+                events = [c.args[0] for c in api.send_voice_assistant_event.call_args_list]
+                self.assertNotIn(VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END, events)
+
+    async def test_an_llm_down_leaves_the_satellite_idle(self):
+        """Ollama refusing the connection fails within ms: its RUN_END waits until the ESP can take it (AD-036)."""
+        server = satellite_server(self, "")
+        server.speech.transcribed = ("Allume la cuisine.", 0.05)
+        server.process_with_llm = AsyncMock(return_value=None)
+        server.is_recording, server.audio_buffer = True, bytearray(4096)
+        sent = {}
+        api = MagicMock()
+        api.send_voice_assistant_event.side_effect = lambda event, _: sent.setdefault(event, time.monotonic())
+        await server.stop_recording(api, "VAD silence")
+        thinking = sent[VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END]
+        self.assertGreaterEqual(sent[VoiceAssistantEventType.VOICE_ASSISTANT_RUN_END] - thinking, 0.1)
 
 
 class TestAskedAgain(unittest.IsolatedAsyncioTestCase):
