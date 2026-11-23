@@ -47,6 +47,7 @@ from ha_client import (
     HOME_DEVICES,
     LOCAL_CONFIG,
     VACUUM_ACTIONS,
+    ToolResult,
     about_a_door,
     alarm_mode,
     asks_every_room,
@@ -98,8 +99,16 @@ _SATELLITE_IDLE_POLL = 5
 _HISTORY_RESULT_CHARS = 300
 # Where a picture asked from the web app shows, and that the screen shows it only when named: the model said the
 # photos were on « l'écran », that only « l'écran principal de la maison » could show them, and never cast them to
-# the Google Home asked (AD-114)
-IN_APP = "sur l'écran de ce téléphone, dans l'application (celui de la maison seulement si on le nomme)"
+# the Google Home asked (AD-114). That last part is the model's alone (AD-120)
+_ONLY_NAMED = " (celui de la maison seulement si on le nomme)"
+IN_APP = f"sur l'écran de ce téléphone, dans l'application{_ONLY_NAMED}"
+
+
+def _in_app(text: str) -> ToolResult:
+    """A result saying where IN_APP the app shows a picture, the screen's reminder the model's alone (AD-120)."""
+    return ToolResult(text, text.replace(_ONLY_NAMED, ""))
+
+
 # While a request is heard, the HA speakers playing are turned down to this share of their volume
 _DUCKED_SHARE = 0.2
 # A spoken request the LLM still answers after this long hears « Un petit instant. » (AD-079): 6 % of the
@@ -284,6 +293,12 @@ def _shortcut_calls(calls, offered: set) -> bool:
             for call in calls
         )
     )
+
+
+def _results_said(results) -> str:
+    """Calls' results as the reply where no model put them into words (a shortcut, a tap, the model silent): without
+    the words that were the model's alone (AD-120)."""
+    return ". ".join(getattr(result, "shown", result) for result in results if result)
 
 
 def _mark_outcome(tc_entry: dict, result: str) -> None:
@@ -1535,7 +1550,7 @@ class VoiceAssistantServer:
             home, there = named
             if home is not self.site:
                 result = await self._at(home, self.execute_function(function_name, arguments, call))
-                return f"{result} ({home.name.capitalize()})"
+                return result + f" ({home.name.capitalize()})"  # a ToolResult's `+` keeps what the app shows
             arguments = there
 
         if not self.ha_client:
@@ -1870,8 +1885,10 @@ class VoiceAssistantServer:
         if not names:
             return refusal
         # Else the music went to the living room's speaker, 2 of 10 replays, the request saying « la Sonos »; and
-        # without « propose-en une par son nom », « sur une autre enceinte ? » named none, 7 of 10 (AD-086)
-        return f"{refusal}. Enceintes qui répondent : {', '.join(names)}. Ne lance rien sur une autre sans demander : propose-en une par son nom"
+        # without « propose-en une par son nom », « sur une autre enceinte ? » named none, 7 of 10 (AD-086). The
+        # model's alone: a shortcut shows which answer (AD-120)
+        said = f"{refusal}. Enceintes qui répondent : {', '.join(names)}"
+        return ToolResult(f"{said}. Ne lance rien sur une autre sans demander : propose-en une par son nom", said)
 
     def _after_media_change(self, target: Optional[tuple[str, str]]) -> None:
         """Remember the speaker for volume follow-ups; no follow-up listening (an open mic would
@@ -2286,7 +2303,7 @@ class VoiceAssistantServer:
             # monde » over a photo titled « Nepal (11) - 26Sep10, Bardia (Nepal) », a field
             shown = f"une photo trouvée par mots-clés, titrée « {picture.caption} »"
         if not screen:
-            return f"Image affichée {IN_APP} : {shown}"
+            return _in_app(f"Image affichée {IN_APP} : {shown}")
         await self._media_play_url(("ha", screen), picture.url, picture.content_type)
         return f"Image affichée sur {self.ha_client.entities[screen]['friendly_name']} : {shown}"
 
@@ -2315,7 +2332,7 @@ class VoiceAssistantServer:
         # The app asks api/photos/<id>?size=thumbnail for the strip
         call["photos"] = [{"url": f"api/photos/{photo.id}", "caption": photo.caption} for photo in photos]
         if not screen:
-            return f"{len(photos)} photos {summary(photos)}, affichées {IN_APP}"
+            return _in_app(f"{len(photos)} photos {summary(photos)}, affichées {IN_APP}")
         self._take_over(("ha", screen))
         site = self.site
         stop = partial(self._media_command, ("ha", screen), MediaPlayerCommand.STOP, "media_stop", site)
@@ -2620,8 +2637,8 @@ class VoiceAssistantServer:
                 tools=tools,
             )
             if not message:
-                # Fallback: join raw results if follow-up call fails
-                response = ". ".join(tc.get("result", "") for tc in self._last_tool_calls if tc.get("result"))
+                # Fallback: the results said if the follow-up call fails
+                response = _results_said(tc.get("result") for tc in self._last_tool_calls)
                 save_to_history(response)
                 return response
 
@@ -2633,7 +2650,7 @@ class VoiceAssistantServer:
             # LLM returned text after tool execution
             response = (message.get("content") or "").strip()
             if not response:
-                response = ". ".join(tc.get("result", "") for tc in self._last_tool_calls if tc.get("result"))
+                response = _results_said(tc.get("result") for tc in self._last_tool_calls)
             save_to_history(response)
             return response
 
@@ -2910,10 +2927,11 @@ class VoiceAssistantServer:
         self, source: str, label: str, tool_calls: list, results: list[str], timings: Optional[dict] = None
     ) -> dict:
         """A request of the web app that ran without the model (a shortcut, a tap on « Déverrouiller »…): logged
-        as the browser's request, worded as its button, its calls' results as the reply. Returns that reply."""
+        as the browser's request, worded as its button, its calls' results as the reply, without the words that
+        were the model's alone (AD-120). Returns that reply."""
         for tc_entry, result in zip(tool_calls, results):
             _mark_outcome(tc_entry, result)
-        response = ". ".join(results)
+        response = _results_said(results)
         self.exchange_log.add(
             self._source(source),
             label,

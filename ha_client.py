@@ -55,6 +55,25 @@ except (FileNotFoundError, PermissionError):  # root's on the server: the nightl
     LOCAL_CONFIG = {}
 
 
+class ToolResult(str):
+    """A tool's result some words of which are for the model alone (how to word it, what not to say): the model
+    reads it whole; where no model speaks (a shortcut, a tap on « Déverrouiller », the model silent), the reply is
+    `shown`, those words left out (AD-120). A str, it goes wherever a result goes; `+` keeps both, an f-string not."""
+
+    shown: str
+
+    def __new__(cls, text: str, shown: str):
+        result = super().__new__(cls, text)
+        result.shown = shown
+        return result
+
+    def __add__(self, other: str) -> "ToolResult":
+        return ToolResult(str(self) + other, self.shown + other)
+
+    def __getnewargs__(self) -> tuple[str, str]:  # copy and pickle make one again, not a plain str
+        return str(self), self.shown
+
+
 def fold(text: str) -> str:
     """Lowercase, accents stripped."""
     return "".join(c for c in unicodedata.normalize("NFD", text.lower()) if unicodedata.category(c) != "Mn")
@@ -336,10 +355,14 @@ SCHEDULE_SERVICE = "roomba_schedule"
 # moment of the last minute. Paris's Comelit board turns it off 30 s after a ring, and opens at once within 60 s of
 # one, else switches the panel's camera on first, 4 s (home-infra paris/README.md)
 RING_SECONDS = 60
-# A building door's button pressed: what the model is told, as nothing tells whether the door opened (AD-111)
-BUILDING_DOOR_OPENED = (
+# A building door's button pressed: what the model is told, as nothing tells whether the door opened (AD-111); its
+# last sentence, without which 10 replies of 60 said it unlocked, is the model's alone (AD-120)
+_BUILDING_DOOR_SENT = (
     "Ordre d'ouverture envoyé à la porte de l'immeuble : elle se débloquera dans quelques secondes, il faudra la "
-    "pousser. Dis que l'ordre est envoyé, pas qu'elle est ouverte ou déverrouillée"
+    "pousser"
+)
+BUILDING_DOOR_OPENED = ToolResult(
+    f"{_BUILDING_DOOR_SENT}. Dis que l'ordre est envoyé, pas qu'elle est ouverte ou déverrouillée", _BUILDING_DOOR_SENT
 )
 
 

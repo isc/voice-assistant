@@ -230,6 +230,22 @@ def make_client() -> HAClient:
 # ---------------------------------------------------------------------------
 
 
+class TestToolResult(unittest.TestCase):
+    """A result some words of which are the model's alone: a str to the model, its other words to the app (AD-120)."""
+
+    def test_read_whole_shown_without(self):
+        from ha_client import ToolResult
+
+        result = ToolResult("Fait. Ne dis pas X", "Fait")
+        self.assertEqual(result, "Fait. Ne dis pas X")
+        added = result + " (Paris)"
+        self.assertEqual((added, added.shown), ("Fait. Ne dis pas X (Paris)", "Fait (Paris)"))
+        # Where a result goes: the log's JSON, the history's copies and cuts
+        self.assertEqual(json.loads(json.dumps({"result": result})), {"result": "Fait. Ne dis pas X"})
+        self.assertEqual(copy.deepcopy(result).shown, "Fait")
+        self.assertEqual(result[:4], "Fait")
+
+
 class TestNormalize(unittest.TestCase):
     def test_lowercase_and_accents(self):
         self.assertEqual(normalize("Étagère"), "etagere")
@@ -1395,6 +1411,13 @@ def history_answer(*states: str, status: int = 200) -> MagicMock:
     return session
 
 
+# What the web app shows of the building door opened where no model spoke (AD-120)
+DOOR_SENT = (
+    "Ordre d'ouverture envoyé à la porte de l'immeuble : elle se débloquera dans quelques secondes, il faudra la "
+    "pousser"
+)
+
+
 class TestBuildingDoor(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.client = make_client()
@@ -1440,9 +1463,14 @@ class TestBuildingDoor(unittest.IsolatedAsyncioTestCase):
         self.client._post_service = AsyncMock(return_value=(200, None))
         result = await self.client.open_building_door()
         self.client._post_service.assert_awaited_once_with("button", "press", {"entity_id": DOOR_BUTTON})
-        self.assertTrue(result.startswith("Ordre d'ouverture envoyé à la porte de l'immeuble"), result)
-        # Without it, 10 replies of 60 said it « déverrouillée » (AD-111)
-        self.assertIn("pas qu'elle est ouverte ou déverrouillée", result)
+        # The words AD-111 measured, the model's to the letter: without the last sentence, 10 replies of 60 said it
+        # « déverrouillée »; the web app, which shows the result where no model spoke, shows what was done (AD-120)
+        self.assertEqual(
+            result,
+            "Ordre d'ouverture envoyé à la porte de l'immeuble : elle se débloquera dans quelques secondes, il faudra "
+            "la pousser. Dis que l'ordre est envoyé, pas qu'elle est ouverte ou déverrouillée",
+        )
+        self.assertEqual(result.shown, DOOR_SENT)
         self.assertIsNone(_NOTHING_DONE.search(result))  # the app does not show it failed
 
     async def test_not_pressed_offline_nor_said_done_on_failure(self):
@@ -1499,8 +1527,12 @@ class TestBuildingDoorFromTheServer(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         from ha_client import BUILDING_DOOR_OPENED
+        from web_ui import ExchangeLog
 
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
         server = self.server = make_server({"SITES": "paris,charras"})
+        server.exchange_log = ExchangeLog(Path(tmp.name) / "exchanges.json")
         server.spotify, server.calendar_client = None, None
         server._keep_llm_loaded = lambda: None
         self.paris, self.charras = server.sites
@@ -1551,6 +1583,21 @@ class TestBuildingDoorFromTheServer(unittest.IsolatedAsyncioTestCase):
         self.door.building_door = None
         self.assertNotIn("open_building_door", {t["name"] for t in self.server._tools()})
 
+    async def test_a_shortcut_shows_what_was_done_not_the_models_words(self):
+        """On 2026-11-22 and 23 the shortcut « Porte de l'immeuble » showed « … Dis que l'ordre est envoyé, pas
+        qu'elle est ouverte ou déverrouillée », its result as is: no model spoke (AD-120)."""
+        from ha_client import BUILDING_DOOR_OPENED
+
+        for site, args, said in ((self.paris, {}, ""), (self.charras, {"home": "paris"}, " (Paris)")):
+            self.server.site = site
+            self.server.new_request("phone42")
+            await self.server.redo([{"function": "open_building_door", "args": args}], "Porte de l'immeuble")
+            entry = self.server.exchange_log.entries[-1]
+            self.assertEqual(entry["response"], DOOR_SENT + said)
+            self.assertEqual(entry["tool_calls"][0]["result"], BUILDING_DOOR_OPENED + said)  # as the model reads it
+            self.assertTrue(entry["tool_calls"][0]["redo"])
+        self.assertEqual(self.door.open_building_door.await_count, 2)
+
     async def test_a_shortcut_never_in_effect(self):
         from voice_server import _redoable
 
@@ -1564,6 +1611,14 @@ class TestBuildingDoorFromTheServer(unittest.IsolatedAsyncioTestCase):
         with patch("llm.chat_completion", AsyncMock(side_effect=replies)) as completion:
             await self.server.process_with_llm(None, text, dry_run=dry_run)
         return completion.await_args_list[0].args[3]
+
+    async def test_the_model_silent_its_words_left_out(self):
+        """The model's reply empty after the call: the results are said, as a shortcut's (AD-120)."""
+        call = {"id": "c1", "function": {"name": "open_building_door", "arguments": "{}"}}
+        replies = [{"role": "assistant", "content": "", "tool_calls": [call]}, {"role": "assistant", "content": ""}]
+        self.server.new_request()
+        with patch("llm.chat_completion", AsyncMock(side_effect=replies)):
+            self.assertEqual(await self.server.process_with_llm(None, "ouvre la porte de l'immeuble"), DOOR_SENT)
 
     async def test_a_dry_run_presses_nothing(self):
         self.server.new_request()
@@ -2395,6 +2450,9 @@ class TestShowImage(unittest.IsolatedAsyncioTestCase):
         call, result = await self.show({"query": "tour Eiffel"})
         self.assertTrue(result.startswith("Image affichée sur l'écran de ce téléphone, dans l'application (celui de la "
                                           "maison seulement si on le nomme) : l'image de l'article Wikipédia"), result)
+        # A shortcut shows it without the model's reminder (AD-120)
+        self.assertTrue(result.shown.startswith("Image affichée sur l'écran de ce téléphone, dans l'application : "
+                                                "l'image de l'article Wikipédia"), result.shown)
         self.assertEqual(call["image"], {"url": self.PICTURE.url, "caption": "Tour Eiffel"})
         self.assertEqual(self.cast(), [])
 
@@ -2689,6 +2747,8 @@ class TestShowPhotos(unittest.IsolatedAsyncioTestCase):
         # Where they are, and the screen that shows them when named (AD-114)
         self.assertEqual(result, "2 photos prises de 2013 à 2020, à Binic, Sarzeau, affichées sur l'écran de ce téléphone, "
                                  "dans l'application (celui de la maison seulement si on le nomme)")
+        self.assertEqual(result.shown, "2 photos prises de 2013 à 2020, à Binic, Sarzeau, affichées sur l'écran de ce "
+                                       "téléphone, dans l'application")  # what a shortcut shows (AD-120)
         self.assertEqual(call["photos"][0], {"url": "api/photos/s2", "caption": "30 juillet 2013 · Binic"})
         self.assertEqual(self.casts(), [])
         # « d'autres »: none of those
@@ -4739,6 +4799,9 @@ class TestOfflineDevices(SpeakersAtHome, unittest.IsolatedAsyncioTestCase):
             "Ne lance rien sur une autre sans demander : propose-en une par son nom"
         )
         self.assertEqual(result, f"Sonos Paris ne répond pas (hors ligne). {answering}")
+        # A shortcut's reply: which answer, without the model's instruction (AD-120)
+        self.assertEqual(result.shown, "Sonos Paris ne répond pas (hors ligne). Enceintes qui répondent : Google Home "
+                                       "(Living Room)")
         self.client.call_service.assert_not_awaited()
 
     async def test_woken_up_since_the_refresh(self):
