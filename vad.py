@@ -2,7 +2,8 @@
 
 import array
 import logging
-from typing import Optional
+import re
+from typing import Awaitable, Callable, Optional
 
 import numpy as np
 from silero_vad_lite import SileroVAD
@@ -20,6 +21,16 @@ _SPEECH = 0.5  # a frame scored above it is speech
 # shortest request heard (« Stop. ») 6 (AD-092)
 _MIN_SPEECH_FRAMES = 4
 _SILENCE_FRAMES = 31  # ~1 s of silence after speech ends the request
+# ~3 s when what was said so far stops mid-sentence: a pause to find a name (AD-116)
+_UNFINISHED_SILENCE_FRAMES = 94
+# Words no French sentence ends on. 5 of the 299 transcripts of 2026-10-11 to 2026-11-23 end on one or on « … », all
+# five cut so: « J'ai pas envie de », « Et donc tu vois, il y a un L à la... », « Aucune avant. Mais... », « Je
+# t'explique où il s'agit de », « Alors après peut-être que c'était à cause du ». Not « un » nor « une » (« tu en
+# veux une ? »), nor « son » (« monte le son »), nor « sur », which Parakeet could write for « sûr »
+_DANGLING = frozenset({
+    "de", "d'", "du", "des", "à", "au", "aux", "le", "la", "les", "l'", "et", "ou", "mais", "que", "qu'", "parce",
+    "ce", "cet", "cette", "ces", "mon", "ma", "mes", "ton", "ta", "tes", "sa", "ses", "notre", "votre", "nos", "vos",
+})  # fmt: skip
 # A satellite's microphone stuck low (AD-113): a recording after a wake word whose loudest half-seconds stay under
 # this level, the VAD hearing speech in it once amplified so, is a request the VAD missed for its level alone.
 # 2026-11-20 at 12:53 and 12:54 in Paris, two requests at 54 and 88 that Parakeet wrote right; every request
@@ -47,6 +58,16 @@ def quiet_speech(recording: bytes) -> Optional[int]:
     return loudness if speech.heard else None
 
 
+Transcribed = tuple[Optional[str], float]  # a transcript, and the seconds Parakeet took
+
+
+def unfinished(transcript: Optional[str]) -> bool:
+    """Whether a request stops mid-sentence: on « de », « à la… »."""
+    text = (transcript or "").rstrip()
+    words = re.findall(r"[\w'-]+", text.lower())
+    return text.endswith(("...", "…")) or bool(words) and words[-1] in _DANGLING
+
+
 class SpeechEnd:
     """Reads a 16 kHz 16-bit mono recording as it grows: has someone spoken, and stopped?"""
 
@@ -57,7 +78,10 @@ class SpeechEnd:
         self.offset = 0  # bytes of the recording read
         self.speech_frames = 0  # in the burst
         self.silent_frames = 0  # in a row, since the burst's last speech frame
+        self.silence = _SILENCE_FRAMES  # silent frames that end it
         self.ended = False
+        self.transcribed: Optional[Transcribed] = None  # at the end of speech, the request finished (AD-116)
+        self._cut: Optional[Transcribed] = None  # what was said, stopping mid-sentence, until more is said
 
     @property
     def heard(self) -> bool:
@@ -78,13 +102,13 @@ class SpeechEnd:
                 logger.debug(f"VAD error: {e}")
                 continue
             if is_speech:
-                self.silent_frames = 0
+                self.silent_frames, self.silence, self._cut = 0, _SILENCE_FRAMES, None
                 self.speech_frames += 1
                 if self.speech_frames == _MIN_SPEECH_FRAMES:
                     logger.info("Speech detected")
             elif self.speech_frames:
                 self.silent_frames += 1
-                if self.silent_frames >= _SILENCE_FRAMES:
+                if self.silent_frames >= self.silence:
                     if self.heard:
                         logger.info(f"Silence detected after speech ({self.silent_frames} frames)")
                         self.ended = True
@@ -92,3 +116,15 @@ class SpeechEnd:
                         logger.info(f"Too short for speech ({self.speech_frames} frames)")
                         self.speech_frames = self.silent_frames = 0
         return self.ended
+
+    async def finished(self, recording: bytes, transcribe: Callable[[bytes], Awaitable[Optional[Transcribed]]]) -> bool:
+        """At the end of speech, whether the request is: its transcript (`transcribe`, None if that failed) does not
+        stop mid-sentence, or this pause has been listened through already; then kept in `transcribed`. Otherwise
+        read on, ~3 s of silence ending it (AD-116). A pause nobody spoke after is not transcribed again."""
+        transcribed = self._cut or await transcribe(recording)
+        if transcribed and unfinished(transcribed[0]) and self.silence != _UNFINISHED_SILENCE_FRAMES:
+            logger.info(f'Unfinished, listening on: "{transcribed[0]}"')
+            self.silence, self.ended, self._cut = _UNFINISHED_SILENCE_FRAMES, False, transcribed
+            return False
+        self.transcribed = transcribed
+        return True

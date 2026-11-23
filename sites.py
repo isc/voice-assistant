@@ -42,11 +42,12 @@ class Conversation:
         """Whether a transcript is a request: a follow-up in another language than the conversation's is the
         room talking (« C'est bon, il y en a un qui va se laver » came out « De volta lá, você sabe. »). A
         request after a wake word sets that language, French unless fastText is sure of another (AD-093), as does one
-        asked again (AD-094)."""
+        asked again (AD-094). A follow-up in French, the home's, is always one: the music under a wake word came out
+        « That's what you want to do. », and « Chanson suivante. » after it was cut (2026-11-23, AD-119)."""
         language = language_of(transcript)
         if not follow_up or not self.language:
             self.language = language or HOME
-        elif language and language != self.language:
+        elif language and language not in (self.language, HOME):
             logger.info(f"Follow-up in {language}, the conversation in {self.language}: not a request")
             return False
         return True

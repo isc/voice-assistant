@@ -15,7 +15,7 @@ import socket
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 from urllib.parse import quote, urlencode
 
 from aiohttp import WSMsgType, web
@@ -26,7 +26,7 @@ from ha_client import LOCAL_CONFIG, quieted
 from photos import SIZES
 from sites import Site, site_at_address
 from spotify import CONTROLS
-from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd
+from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd, Transcribed
 
 logger = logging.getLogger(__name__)
 
@@ -215,11 +215,14 @@ def _page_path(audio_url: str) -> str:
     return "tts/" + audio_url.rsplit("/", 1)[-1]
 
 
-async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[bytes, bool]]:
+async def _listen(
+    ws: web.WebSocketResponse, follow_up: bool, transcribe: Callable[[bytes], Awaitable[Optional[Transcribed]]]
+) -> Optional[tuple[bytes, bool, Optional[Transcribed]]]:
     """Take the app's audio until speech ends, the page says the user is done (« end »), or time is up, with
-    the satellite's limits. Once the page says « hold » (the mic button held down), only « end » (released)
-    or the 30 s end it: no silence, no wait for speech (AD-062). Returns the recording and whether it holds
-    speech; None if the page went away."""
+    the satellite's limits. Speech that ends mid-sentence is listened to on, as the satellite's (AD-116). Once the
+    page says « hold » (the mic button held down), only « end » (released) or the 30 s end it: no silence, no wait
+    for speech (AD-062). Returns the recording, whether it holds speech, and its transcript as `transcribe` made it
+    at the end of speech (None otherwise); None if the page went away."""
     recording, speech, held = bytearray(), SpeechEnd(), False
     loop = asyncio.get_running_loop()
     start = loop.time()
@@ -234,7 +237,7 @@ async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[
         if message.type == WSMsgType.BINARY:
             heard = speech.heard
             recording.extend(message.data)
-            if speech.read(recording) and not held:
+            if speech.read(recording) and not held and await speech.finished(bytes(recording), transcribe):
                 break
             if speech.heard and not heard:
                 await _send(ws, {"type": "speech"})
@@ -244,7 +247,7 @@ async def _listen(ws: web.WebSocketResponse, follow_up: bool) -> Optional[tuple[
             held = True
         else:
             return None
-    return bytes(recording), speech.heard
+    return bytes(recording), speech.heard, speech.transcribed
 
 
 def _client(params) -> Optional[str]:
@@ -499,12 +502,12 @@ def setup_routes(app, server):
             server.warm_llm()  # while the request is spoken
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        if not (heard := await _listen(ws, follow_up)):
+        if not (listened := await _listen(ws, follow_up, server.transcribe_heard)):
             return ws
         await _send(ws, {"type": "heard"})
         try:
             reply = await server.answer_recording(
-                *heard,
+                *listened,
                 follow_up,
                 lambda transcript: _send(ws, {"type": "transcript", "text": transcript}),
                 lambda audio_url: _send(ws, {"type": "wait", "audio": _page_path(audio_url)}),

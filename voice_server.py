@@ -68,7 +68,7 @@ from recordings import Recordings
 from sites import Conversation, Site, load_sites, site_at_address
 from spotify import CONTROLS, Spotify, SpotifyError, SpotifyNotConnected, SpotifySearchError
 from timer import Timer
-from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd, quiet_speech
+from vad import MAX_SECONDS, WAIT_FOR_FOLLOW_UP, WAIT_FOR_SPEECH, SpeechEnd, Transcribed, quiet_speech
 
 logger = logging.getLogger(__name__)
 
@@ -1134,9 +1134,27 @@ class VoiceAssistantServer:
             logger.debug("Audio received after recording stopped (normal)")
 
     async def analyze_audio_vad(self):
-        """Run the VAD over the recording's new frames; once speech has ended, the request is heard."""
-        if self.speech.read(self.audio_buffer) and self.is_recording and (api := self.device):
+        """Run the VAD over the recording's new frames; once speech has ended, the request is heard, unless what was
+        said so far stops mid-sentence: then listened to on (AD-116)."""
+        speech = self.speech  # this recording's, should another start meanwhile
+        if speech.ended or not speech.read(self.audio_buffer):
+            return  # still speaking, or its end being heard out from an earlier chunk
+        finished = await speech.finished(bytes(self.audio_buffer), self.transcribe_heard)
+        if finished and speech is self.speech and self.is_recording and (api := self.device):
             await self.stop_recording(api, "VAD silence")
+
+    async def timed_stt(self, recording: bytes) -> Transcribed:
+        t0 = time.time()
+        return await self.stt.transcribe(recording), round(time.time() - t0, 2)
+
+    async def transcribe_heard(self, recording: bytes) -> Optional[Transcribed]:
+        """A recording whose end of speech the VAD heard, transcribed: is the request finished? (AD-116). None if
+        Parakeet failed: the pipeline tries again, and logs it with the recording."""
+        try:
+            return await self.timed_stt(recording)
+        except Exception:
+            logger.exception("STT failed at the end of speech")
+            return None
 
     # === MAIN PIPELINE ===
 
@@ -1161,14 +1179,10 @@ class VoiceAssistantServer:
             entry["quiet_mic"] = self.quiet_mic
 
         try:
-            # 1. STT, skipped if the VAD heard no speech (AD-036)
-            t0 = time.time()
-            if heard:
-                transcript = await self.stt.transcribe(audio_bytes)
-            else:
+            # 1. STT, done when the VAD heard the end (AD-116), skipped if it heard no speech (AD-036)
+            if not (transcribed := self.speech.transcribed or (await self.timed_stt(audio_bytes) if heard else None)):
                 logger.info("STT skipped: the VAD heard no speech")
-                transcript = ""
-            timings["stt"] = round(time.time() - t0, 2)
+            transcript, timings["stt"] = transcribed or ("", 0.0)
             entry["transcript"] = transcript
             if unanswered := self._unanswered(transcript, self.is_followup):
                 entry["response"] = unanswered
@@ -2987,23 +3001,23 @@ class VoiceAssistantServer:
         self,
         audio: bytes,
         heard: bool,
+        transcribed: Optional[Transcribed],
         follow_up: bool,
         on_transcript: Callable[[str], Awaitable],
         on_wait: Callable[[str], Awaitable],
     ) -> Optional[dict]:
         """Answer a request the phone heard (AD-059): recorded, transcribed unless the VAD heard no speech
-        (AD-036), told to `on_transcript`, answered, « Un petit instant. » given to `on_wait` if that takes long
-        (AD-079). No audio file: the page plays the reply's speech as it is made (AD-105). None when nothing was
-        said; errors are logged and raised."""
+        (AD-036) or it was at the end of speech (`transcribed`, AD-116), told to `on_transcript`, answered, « Un petit
+        instant. » given to `on_wait` if that takes long (AD-079). No audio file: the page plays the reply's speech as
+        it is made (AD-105). None when nothing was said; errors are logged and raised."""
         timings = {}
         # What became of the request, beside its recording, as for the satellite's
         entry = {"site": self.site.name, "source": self._source("app"), "follow_up": follow_up, "vad_speech": heard}
         entry.update(audio=self.recordings.save(audio), transcript="", timings=timings)
         transcript = ""
         try:
-            t0 = time.time()
-            transcript = entry["transcript"] = (await self.stt.transcribe(audio) if heard else None) or ""
-            timings["stt"] = round(time.time() - t0, 2)
+            transcript, timings["stt"] = transcribed or (await self.timed_stt(audio) if heard else (None, 0.0))
+            transcript = entry["transcript"] = transcript or ""
             unanswered = self._unanswered(transcript, follow_up)
             await on_transcript("" if unanswered else transcript)  # the page ends a follow-up that got nothing
             if not unanswered:

@@ -3029,7 +3029,8 @@ class TestSpotifySearchRanking(unittest.TestCase):
         for query in (
             "mes favoris", "vos titres likés", "mes coups de cœur", "liked", "celui dans mes titres préférés",
             "tous mes titres likés", "mes titres likés en aléatoire", "mes favoris Spotify", "musique likée",
-            "les titres que j'ai likés",
+            "les titres que j'ai likés", "dernières chansons", "dernières chansons likées", "mes derniers likes",
+            "les titres likés les plus récents", "les derniers titres que j'ai likés",
         ):  # fmt: skip
             self.assertIsNone(liked_piece(query), query)
         for query, piece in (
@@ -4263,6 +4264,37 @@ class TestSpotifyFind(unittest.IsolatedAsyncioTestCase):
     async def test_nothing_found_plays_nothing(self):
         self.assertIsNone(await self.spotify().find("Gymnopédie de Satie dans mes favoris", "liked"))
 
+    async def test_the_newest_liked_are_the_collection(self):
+        """« Les dernières chansons que j'ai likées » searched « dernières chansons »: Jean Bertola (2026-11-23).
+        The collection starts with the last track liked."""
+        spotify = self.spotify()
+        for query in ("dernières chansons", "dernières chansons likées"):
+            self.assertEqual((await spotify.find(query, "liked")).uri, self.COLLECTION, query)
+        spotify._search.assert_not_awaited()
+
+    async def test_an_artist_misheard(self):
+        """« Asaf Avidan » came out of Parakeet as « Azaf à Bidan », which Spotify found as Azwan Ibrahim, and as one
+        word as Asaf Avidan (2026-11-23)."""
+
+        def artist(name):
+            return {"name": name, "uri": f"spotify:artist:{name}", "images": []}
+
+        found = {
+            "Azaf à Bidan": [artist(name) for name in ("Azwan Ibrahim", "ibiidris", "Ibn Bashiir", "Ziad Ashraf")],
+            "azafabidan": [artist(name) for name in ("Asaf Avidan", "Azwan Ibrahim", "Azam Ali")],
+            "Daft Punk": [artist("Daft Punk"), artist("Daft Punk (Guy-Manuel de Homem-Christo)")],
+            "daftpunk": [artist("Daft Punk"), artist("Daft Junk")],
+            "Bach": [artist("Johann Sebastian Bach"), artist("Pierre Bachelet")],
+        }
+        spotify = self.spotify()
+        spotify._search.side_effect = lambda query, kind: found.get(query, [])
+        for query, name in (
+            ("Azaf à Bidan", "Asaf Avidan"), ("Daft Punk", "Daft Punk"), ("Bach", "Johann Sebastian Bach"),
+        ):  # fmt: skip
+            self.assertEqual((await spotify.find(query, "artist")).description, name, query)
+        searched = [c.args[0] for c in spotify._search.call_args_list]
+        self.assertEqual(searched, ["Azaf à Bidan", "azafabidan", "Daft Punk", "daftpunk", "Bach"])  # one word: once
+
 
 class TestSpotifyHeard(unittest.IsolatedAsyncioTestCase):
     """go-librespot plays a head start ahead of the speakers (AD-091): at a track's end, it is on the next one."""
@@ -4985,6 +5017,74 @@ class TestVADFrames(unittest.IsolatedAsyncioTestCase):
         speech.read(bytes(FRAME_BYTES * 6))
         self.assertTrue(speech.heard)
 
+    def test_unfinished(self):
+        """The five transcripts of 2026-10-11 to 2026-11-23 that stop mid-sentence, and requests that don't (AD-116)."""
+        from vad import unfinished
+
+        for said in (
+            "J'ai pas envie de", "Et donc tu vois, il y a un L à la...", "Aucune avant. Mais...",
+            "Je t'explique où il s'agit de", "Alors après peut-être que c'était à cause du", "Mets la chanson de…",
+        ):  # fmt: skip
+            self.assertTrue(unfinished(said), said)
+        for said in (
+            "Monte le son.", "Mets-le.", "Tu en veux une ?", "Allume la lumière du salon.", "Qu'est-ce qu'il y a",
+            "Je suis là", "", None,
+        ):  # fmt: skip
+            self.assertFalse(unfinished(said), said)
+
+    async def test_unfinished_speech_ends_after_three_seconds_of_silence(self):
+        """Nothing said after the pause: what was said is the request, not transcribed again."""
+        speech = self.scored([0.9] * 4 + [0.2] * 94)
+        transcribe = AsyncMock(return_value=("Il s'agit de", 0.07))
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 35)))  # a second of silence
+        self.assertFalse(await speech.finished(b"", transcribe))
+        self.assertFalse(speech.read(bytes(FRAME_BYTES * 97)))  # 93 silent frames
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 98)))
+        self.assertTrue(await speech.finished(b"", transcribe))  # this pause listened through
+        self.assertEqual((speech.transcribed, transcribe.await_count), (("Il s'agit de", 0.07), 1))
+
+    async def test_unfinished_speech_said_on_ends_after_a_second_again(self):
+        speech = self.scored([0.9] * 4 + [0.2] * 41 + [0.9] * 4 + [0.2] * 31)
+        transcribe = AsyncMock(side_effect=[("Il s'agit de", 0.07), ("Il s'agit de la", 0.08)])
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 35)))
+        self.assertFalse(await speech.finished(b"", transcribe))
+        self.assertFalse(speech.read(bytes(FRAME_BYTES * 79)))  # 10 more silent, 4 of speech, 30 silent
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 80)))
+        self.assertFalse(await speech.finished(b"", transcribe))  # a new pause: mid-sentence again
+        self.assertIsNone(speech.transcribed)
+
+    async def test_a_finished_request_ends_at_a_second(self):
+        speech = self.scored([0.9] * 4 + [0.2] * 31)
+        self.assertTrue(speech.read(bytes(FRAME_BYTES * 35)))
+        self.assertTrue(await speech.finished(b"", AsyncMock(return_value=("Allume la cuisine.", 0.07))))
+        self.assertEqual(speech.transcribed, ("Allume la cuisine.", 0.07))
+        self.assertTrue(await self.scored([]).finished(b"", AsyncMock(return_value=None)))  # Parakeet failed
+
+    async def test_the_satellite_listens_on_after_unfinished_speech(self):
+        """« Je t'explique, il s'agit de… » was cut after a second of silence, Ivan looking for a name (2026-11-23).
+        Transcribed at each end of speech: the pipeline gets the last transcript, not a third run of Parakeet."""
+        server = make_server()
+        server.is_recording, server.skip_audio_until, server.audio_buffer = True, 0, bytearray()
+        server.devices[server.site.name] = MagicMock()
+        server.speech = self.scored([0.9] * 4 + [0.2] * 41 + [0.9] * 4 + [0.2] * 31)
+        said = ["Je t'explique, il s'agit de", "Je t'explique, il s'agit de Asaf Avidan."]
+        server.stt = MagicMock(transcribe=AsyncMock(side_effect=said))
+        server.stop_recording = AsyncMock()
+        for _ in range(79):
+            await server.handle_voice_assistant_audio(server.site, bytes(FRAME_BYTES))
+        server.stop_recording.assert_not_awaited()
+        await server.handle_voice_assistant_audio(server.site, bytes(FRAME_BYTES))
+        server.stop_recording.assert_awaited_once()
+        self.assertEqual(server.speech.transcribed[0], said[1])
+        self.assertEqual(server.stt.transcribe.await_count, 2)
+
+        server = satellite_server(self, "never asked")
+        server.speech.transcribed = (said[1], 0.07)
+        await server.process_voice_pipeline(MagicMock(), bytes(4096))
+        server.stt.transcribe.assert_not_awaited()
+        server.process_with_llm.assert_awaited_once()
+        self.assertEqual(server.process_with_llm.call_args.args[1], said[1])
+
     async def test_each_recording_gets_a_fresh_vad(self):
         """Silero keeps its state between windows: the previous request's must not carry over."""
         server = make_server()
@@ -5008,7 +5108,7 @@ def satellite_server(test: unittest.TestCase, transcript: str, heard: bool = Tru
     server.stt = MagicMock(transcribe=AsyncMock(return_value=transcript))
     server.process_with_llm = AsyncMock()
     server.text_to_speech = AsyncMock()
-    server.speech = MagicMock(heard=heard)
+    server.speech = MagicMock(heard=heard, transcribed=None)
     server.is_followup = follow_up
     return server
 
@@ -5035,7 +5135,16 @@ class TestFollowUpLanguage(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server.conversation.is_request("Turn off the lights in the living room.", follow_up=False))
         self.assertEqual(server.conversation.language, "en")
         self.assertTrue(server.conversation.is_request("That's all, thank you.", follow_up=True))
-        self.assertFalse(server.conversation.is_request("Ferme les volets dans la chambre de Zoé.", follow_up=True))
+        self.assertTrue(server.conversation.is_request("Ferme les volets dans la chambre de Zoé.", follow_up=True))
+        self.assertFalse(server.conversation.is_request("De volta lá, você sabe.", follow_up=True))
+
+    def test_a_follow_up_in_french_is_always_a_request(self):
+        """Over Asaf Avidan's songs a request came out « That's what you want to do. », and the follow-up « Chanson
+        suivante. » was cut as the room talking (2026-11-23, AD-119). Another language stays cut."""
+        conversation = make_server().conversation
+        conversation.is_request("That's what you want to do.", follow_up=False)
+        self.assertTrue(conversation.is_request("Chanson suivante.", follow_up=True))
+        self.assertFalse(conversation.is_request("De volta lá, você sabe.", follow_up=True))
 
     def test_a_request_of_a_language_unsure_leaves_the_conversation_french(self):
         """On 2026-11-07 a request after the wake word came out « Помалый души. », Russian at 0.67: had it set
@@ -5670,11 +5779,15 @@ class FakeSpeech:
     """Speech heard in the first chunk, ended by the third."""
 
     def __init__(self):
-        self.heard = False
+        self.heard, self.transcribed = False, None
 
     def read(self, recording):
         self.heard = True
         return len(recording) >= 3 * 2048
+
+    async def finished(self, recording, transcribe):
+        self.transcribed = await transcribe(recording)
+        return True
 
 
 class TestWebApp(unittest.IsolatedAsyncioTestCase):
@@ -5783,6 +5896,20 @@ class TestWebApp(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await ws.receive_json(), {"type": "heard"})
             await ws.receive_json()  # the transcript
         self.server.stt.transcribe.assert_awaited_once_with(bytes(5 * 2048))
+
+    async def test_unfinished_speech_is_listened_to_on(self):
+        """As the satellite's (AD-116): « Mets la chanson de… » heard on until the name, transcribed at each end."""
+        scores = [0.9] * 4 + [0.2] * 41 + [0.9] * 4 + [0.2] * 31
+        self.server.stt.transcribe.side_effect = ["Mets la chanson de", "Mets la chanson de Asaf Avidan."]
+        client = await self.client()
+        with patch("web_ui.SpeechEnd", lambda: TestVADFrames.scored(scores)):
+            ws = await client.ws_connect("/api/listen")
+            for _ in range(80):
+                await ws.send_bytes(bytes(FRAME_BYTES))
+            messages = [await ws.receive_json() for _ in range(4)]
+        self.assertEqual(messages[2], {"type": "transcript", "text": "Mets la chanson de Asaf Avidan."})
+        ends = [len(c.args[0]) // FRAME_BYTES for c in self.server.stt.transcribe.await_args_list]
+        self.assertEqual(ends, [35, 80])
 
     async def test_a_follow_up_nobody_spoke_in_ends_quietly(self):
         client = await self.client()

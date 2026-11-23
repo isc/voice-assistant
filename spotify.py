@@ -21,6 +21,7 @@ or German (« do mineur », « C minor », « c-Moll »).
 """
 
 import asyncio
+import difflib
 import functools
 import logging
 import os
@@ -547,9 +548,10 @@ def _score(asked: list[str], keys: set[str], numbers: set[str], item: dict) -> i
     return score
 
 
-def best_match(query: str, items: list[dict], liked: frozenset[str] = frozenset()) -> dict:
-    """The search result that fits the request best; among equals, a track the account liked, then one by the artist
-    the most results credit, then Spotify's order.
+def best_match(query: str, items: list[dict], liked: frozenset[str] = frozenset(), by_sound: bool = False) -> dict:
+    """The search result that fits the request best; among equals, a track the account liked, then (`by_sound`, for
+    an artist) the name that sounds most like the request when none holds a word of it, then one by the artist the
+    most results credit, then Spotify's order.
 
     Not an exact name first: « Get Lucky » was L.E.J's cover, « Sonate au clair de lune
     Beethoven » a nursery version titled so. The most credited artist: « Clair de lune de Debussy » found an upload
@@ -557,12 +559,34 @@ def best_match(query: str, items: list[dict], liked: frozenset[str] = frozenset(
     plain = fold(query)
     asked, keys, numbers = _words(plain), set(_keys(plain)), _told_numbers(plain)
     credits = Counter(name for item in items for name in set(_artist_names(item)))
+    heard = _joined(query) if by_sound else ""
 
     def rank(item: dict) -> tuple:
+        score = _score(asked, keys, numbers, item)
+        # A name misheard holds no word of the request: « Azaf à Bidan » is closer to Asaf Avidan (0.8) than to
+        # Azwan Ibrahim (0.5), whom Spotify gave first (2026-11-23)
+        sound = _sounds_like(heard, item["name"]) if by_sound and not score else 0
         credited = max((credits[name] for name in _artist_names(item)), default=0)
-        return _score(asked, keys, numbers, item), item["uri"] in liked, credited
+        return score, item["uri"] in liked, sound, credited
 
     return max(items, key=rank)  # max keeps the first of equals
+
+
+def _joined(text: str) -> str:
+    """A text folded in one word, « Azaf à Bidan » → « azafabidan »: compact() with its stopwords, « de Bussy »
+    being « debussy »."""
+    return "".join(c for c in fold(text) if c.isalnum())
+
+
+def _sounds_like(heard: str, name: str) -> float:
+    """How alike a request heard, joined, and a name are written, from 0 to 1."""
+    return difflib.SequenceMatcher(None, heard, _joined(name)).ratio()
+
+
+def joined_name(query: str) -> Optional[str]:
+    """An artist's name said in several words, as one: Parakeet writes a name it does not know as French words, « Asaf
+    Avidan » as « Azaf à Bidan », which Spotify finds as « azafabidan », not as said (2026-11-23)."""
+    return _joined(query) if len(query.split()) > 1 else None
 
 
 def search_variant(query: str) -> Optional[str]:
@@ -592,10 +616,15 @@ _LIKED_WORDS = re.compile(
     r"\b(?:dans |parmi |de |d')?(?:mes |nos |vos |les )?(?:titres? |morceaux |chansons |musique )?"
     r"(?:likee?s?|liked|favoris|favorites?|preferes?|preferees?|coups? de c(?:oe|œ)ur|aimes?)\b"
 )
-# Words left around them that name no track: « tous mes titres likés en aléatoire », « les titres que j'ai likés »
+# Words left around them that name no track: « tous mes titres likés en aléatoire », « les titres que j'ai likés ».
+# Nor do the newest: the collection starts with the last track liked, « les dernières chansons que j'ai likées »
+# searched « dernières chansons » and played Jean Bertola's, then « Dernière danse » (2026-11-23)
 _NAMES_NOTHING = _PLAYLIST_FILLER | {
-    "vos", "tous", "toutes", "tout", "titres", "titre", "morceaux", "chansons", "celui", "celle", "ceux", "qui",
-    "que", "est", "sont", "dans", "j", "ai", "spotify", "aleatoire", "hasard", "melange", "lecture",
+    "vos", "tous", "toutes", "tout", "titres", "titre", "morceaux", "morceau", "chansons", "chanson", "celui",
+    "celle", "ceux", "qui", "que", "est", "sont", "dans", "j", "ai", "spotify", "aleatoire", "hasard", "melange",
+    "lecture", "dernier", "derniers", "derniere", "dernieres", "recent", "recents", "recente", "recentes",
+    "recemment", "dernierement", "nouveau", "nouveaux", "nouvelle", "nouvelles", "nouveautes", "plus", "mis",
+    "mises", "ajoutes", "ajoutees", "ajout", "ajouts",
 }  # fmt: skip
 # What play_music tells the model of a track named among the liked ones (AD-090)
 LIKED_THEN_COLLECTION = "dans vos titres likés, qui suivent"
@@ -927,13 +956,14 @@ class Spotify:
         if not (items := await self._results(query, kind)):
             return None
         liked = await self._liked([item["uri"] for item in items]) if kind == "track" else None
-        return _music(kind, best_match(query, items, liked or frozenset()))
+        return _music(kind, best_match(query, items, liked or frozenset(), by_sound=kind == "artist"))
 
     async def _results(self, query: str, kind: str) -> list[dict]:
-        """Spotify's search, ten results at most, is fuzzy: the request as said, as its catalog writes it, and with
-        its composer first; their results in order, once each."""
+        """Spotify's search, ten results at most, is fuzzy: the request as said, as its catalog writes it, with its
+        composer first, and an artist's name in one word; their results in order, once each."""
         variant = search_variant(query)
-        searches = dict.fromkeys(filter(None, (query, variant, composer_first(query, variant))))
+        joined = joined_name(query) if kind == "artist" else None
+        searches = dict.fromkeys(filter(None, (query, variant, composer_first(query, variant), joined)))
         await self._search_token()  # once, not by each search
         results = await asyncio.gather(*(self._search(q, kind) for q in searches), return_exceptions=True)
         if isinstance(results[0], Exception):
