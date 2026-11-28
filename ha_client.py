@@ -1092,7 +1092,8 @@ class HAClient:
                 logger.error(f"HA service error {resp.status}: {await resp.text()}")
                 return resp.status, None
         except Exception as e:
-            logger.error(f"HA service call failed: {e}")
+            # repr: a timeout's str() is empty, and the call is named, many running at once in the background
+            logger.error(f"HA service call failed: {domain}.{service} -> {payload}: {e!r}")
             return None, None
 
     async def _send(self, domain: str, service: str, entity_id: str, **kwargs) -> Optional[str]:

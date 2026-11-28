@@ -824,6 +824,21 @@ class TestFibaroSubEntities(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Left out by their name, not hidden in HA: Dimmer 2, Entrée (2), Entrée Basic", logs.output[-1])
 
 
+class TestServiceCallFailureLogged(unittest.IsolatedAsyncioTestCase):
+    async def test_a_timeout_names_its_call_and_error(self):
+        """Paris, 2026-11-27 08:28:11: three of 31 lights' turn_off failed as « HA service call failed: », a
+        timeout's str() being empty: neither the lights nor the error could be told."""
+        client = make_client()
+        client._session = MagicMock()
+        client._session.post.side_effect = asyncio.TimeoutError()
+        with self.assertLogs("ha_client", "ERROR") as logs:
+            status = await client._post_service("light", "turn_off", {"entity_id": "light.dimmer_2_9"})
+        self.assertEqual(status, (None, None))
+        self.assertIn("light.turn_off", logs.output[-1])
+        self.assertIn("light.dimmer_2_9", logs.output[-1])
+        self.assertIn("TimeoutError", logs.output[-1])
+
+
 class TestWholeHouseAsked(unittest.IsolatedAsyncioTestCase):
     """Paris, 2026-10-12: « Tu peux fermer les volets là, je suis un désolé » (« … dans la chambre
     de Zoé », misheard) became close_cover room « partout », and every shutter of the flat closed (AD-058)."""
